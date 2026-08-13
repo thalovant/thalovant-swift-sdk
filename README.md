@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.1"),
 ]
 ```
 
@@ -80,6 +80,43 @@ try await api.login(email: "you@example.com", password: "password", otpCode: "12
 // Or use a one-time recovery code instead:
 try await api.login(email: "you@example.com", password: "password", recoveryCode: "abcd-efgh-ijkl")
 ```
+
+## Sign In With the Browser (Device Flow)
+
+Accounts without a password (for example Google sign-in) authenticate through
+the browser device flow. `loginWithBrowser` requests a device authorization,
+prints the verification URL and short user code (pass `prompt` to present them
+yourself), opens the browser at the pre-filled URL where the platform allows
+it (`/usr/bin/open` on macOS, `xdg-open` on Linux, skipped on iOS — always
+best-effort), and polls until the request is approved:
+
+```swift
+let api = ThalovantControlPlane()
+let token = try await api.loginWithBrowser(options: DeviceLoginOptions(
+    scopes: ["hubs:read", "clients:write"],
+    clientName: "my-macbook"
+))
+print(token.tokenId ?? "", token.scopes)
+```
+
+On approval the issued `accessToken` is a durable scoped API token and is
+stored on the control plane exactly like `login`. The server may normalize and
+expand the echoed `scopes`. A denied request throws
+`ThalovantDeviceLoginError.denied`, an expired code throws
+`ThalovantDeviceLoginError.expired`, and giving up after `timeout` seconds
+(900 by default) throws `ThalovantTimeoutError`.
+
+## Use a Pre-Made API Token
+
+Construct the control plane with an existing API token (for example one issued
+by `loginWithBrowser` or created for CI) to skip interactive sign-in entirely:
+
+```swift
+let api = ThalovantControlPlane(accessToken: ProcessInfo.processInfo.environment["THALOVANT_API_TOKEN"])
+```
+
+The token is sent as `Authorization: Bearer <token>` on every authenticated
+call, and `api.accessToken` can also be assigned later at any time.
 
 ## List Your Hubs
 
@@ -182,6 +219,8 @@ let selected = selectDataPlaneEndpoint(
 
 - `ThalovantApiError` — control API failures, with `statusCode`, raw `body`,
   and the decoded `errorCode` where the API provides one.
+- `ThalovantDeviceLoginError` — the browser device sign-in was `.denied` or
+  the user code `.expired` before approval.
 - `ThalovantConnectionError` / `ThalovantTimeoutError` /
   `ThalovantRuntimeError` — data-plane connection, deadline, and hub failures.
 - `ThalovantIdentityError` — malformed or insecure identity documents.

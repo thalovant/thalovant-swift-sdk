@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.1
+
+- `ThalovantControlPlane.loginWithBrowser(options:)`: browser device-flow
+  sign-in (`POST /v1/auth/device/authorize` + `POST /v1/auth/device/token`)
+  for accounts without a password. `DeviceLoginOptions` carries `scopes`,
+  `clientName`, `openBrowser` (best-effort `/usr/bin/open` on macOS and
+  `xdg-open` on Linux, skipped on iOS), a `prompt` closure (defaults to
+  printing the verification URI and user code), and `timeout` (900 s).
+  Polling honors the server `interval` and grows it by 5 s on `slow_down`;
+  the approved token is stored on `accessToken` exactly like `login`.
+- `ThalovantDeviceLoginError` (`.denied`, `.expired`) for terminal device-flow
+  states; polling past `timeout` throws `ThalovantTimeoutError`.
+- `DeviceAuthorizationGrant` and `DeviceLoginResult` types, and the
+  `defaultDevicePollInterval` constant.
+- README: documented device-flow sign-in and constructing
+  `ThalovantControlPlane(accessToken:)` with a pre-made API token (CI).
+
 ## 0.1.0
 
 Initial release of the Thalovant Swift SDK for iOS 15+, macOS 12+, and Linux.

@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.1.0"
+public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.1.1"
 
 /// Filters for `GET /v1/analytics/overview` (and, with `admin`,
 /// `GET /v1/admin/analytics/overview`). `ownerId` is admin-only.
@@ -427,7 +427,7 @@ public final class ThalovantControlPlane {
         return object
     }
 
-    private func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+    func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
         try await withCheckedThrowingContinuation { continuation in
             let task = session.dataTask(with: request) { data, response, error in
                 if let error {
