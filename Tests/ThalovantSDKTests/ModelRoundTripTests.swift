@@ -179,11 +179,11 @@ final class ModelRoundTripTests: XCTestCase {
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         let path = directory.appendingPathComponent("identity.json").path
-        FileManager.default.createFile(
+        XCTAssertTrue(FileManager.default.createFile(
             atPath: path,
             contents: Data(Fixtures.clientIdentify.utf8),
             attributes: [.posixPermissions: NSNumber(value: Int16(0o600))]
-        )
+        ))
         let identity = try ThalovantIdentity.fromFile(path)
         XCTAssertEqual(identity.siteId, "swift-demo-client")
 

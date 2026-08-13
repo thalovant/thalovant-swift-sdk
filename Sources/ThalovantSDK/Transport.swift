@@ -197,7 +197,7 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
             self.socket = socket
         }
         socket.resume()
-        receiveNext(on: socket)
+        startReceiveLoop(on: socket)
 
         do {
             try await openGate.wait(
@@ -248,32 +248,26 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
     }
 
     private func sendText(_ text: String, on socket: URLSessionWebSocketTask) async throws {
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            socket.send(.string(text)) { error in
-                if let error {
-                    continuation.resume(throwing: ThalovantConnectionError("HiveMind WSS send failed: \(error.localizedDescription)"))
-                } else {
-                    continuation.resume()
-                }
-            }
+        do {
+            try await socket.send(.string(text))
+        } catch {
+            throw ThalovantConnectionError("HiveMind WSS send failed: \(error.localizedDescription)")
         }
     }
 
     // MARK: Receiving
 
-    private func receiveNext(on socket: URLSessionWebSocketTask) {
-        socket.receive { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure(let error):
-                self.handleSocketFailure(error)
-            case .success(let message):
+    private func startReceiveLoop(on socket: URLSessionWebSocketTask) {
+        Task { [weak self] in
+            while true {
+                guard let self else { return }
                 do {
+                    let message = try await socket.receive()
                     switch message {
                     case .string(let text):
-                        try self.handleFrame(HiveWire.decode(text: text, cryptoKey: self.identity.cryptoKey))
+                        try await self.handleFrame(HiveWire.decode(text: text, cryptoKey: self.identity.cryptoKey))
                     case .data(let data):
-                        try self.handleFrame(HiveWire.decode(data: data, cryptoKey: self.identity.cryptoKey))
+                        try await self.handleFrame(HiveWire.decode(data: data, cryptoKey: self.identity.cryptoKey))
                     @unknown default:
                         break
                     }
@@ -281,7 +275,6 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
                     self.handleSocketFailure(error)
                     return
                 }
-                self.receiveNext(on: socket)
             }
         }
     }
@@ -315,29 +308,25 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
         handshakeGate.fail(failure)
     }
 
-    private func handleFrame(_ message: HiveMessage) throws {
+    private func handleFrame(_ message: HiveMessage) async throws {
         switch message.msgType {
         case "handshake", "shake":
-            try handleHandshake(message.payload)
+            try await handleHandshake(message.payload)
         case "bus":
-            lock.lock()
-            let handlers = Array(busHandlers.values)
-            lock.unlock()
+            let handlers = lock.locked { Array(busHandlers.values) }
             for handler in handlers {
                 handler(message.payload)
             }
         default:
             break
         }
-        lock.lock()
-        let handlers = Array(messageHandlers.values)
-        lock.unlock()
+        let handlers = lock.locked { Array(messageHandlers.values) }
         for handler in handlers {
             handler(message)
         }
     }
 
-    private func handleHandshake(_ payload: JSONObject) throws {
+    private func handleHandshake(_ payload: JSONObject) async throws {
         guard HiveWire.isPresharedKeyHandshake(payload) else {
             throw ThalovantConnectionError("Only HiveMind preshared-key handshakes are supported by this SDK.")
         }
@@ -349,27 +338,15 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
             publicKey: identity.publicKey,
             sessionId: "thalovant-swift-" + UUID().uuidString.lowercased()
         )
-        lock.lock()
-        let socket = self.socket
-        lock.unlock()
+        let socket = lock.locked { self.socket }
         guard let socket else {
             throw ThalovantConnectionError("HiveMind WSS transport is not connected.")
         }
         // The hello reply is always sent unencrypted.
         let payloadText = try HiveWire.encode(hello, cryptoKey: nil, encrypt: false)
-        socket.send(.string(payloadText)) { [weak self] error in
-            guard let self else { return }
-            if let error {
-                self.handleSocketFailure(
-                    ThalovantConnectionError("HiveMind WSS hello failed: \(error.localizedDescription)")
-                )
-                return
-            }
-            self.lock.lock()
-            self.handshakeCompleteFlag = true
-            self.lock.unlock()
-            self.handshakeGate.open()
-        }
+        try await sendText(payloadText, on: socket)
+        lock.locked { handshakeCompleteFlag = true }
+        handshakeGate.open()
     }
 }
 
