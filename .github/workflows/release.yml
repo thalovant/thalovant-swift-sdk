@@ -1,0 +1,196 @@
+name: Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Immutable release tag (for example v0.1.0) to validate and attach evidence to
+        required: true
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            os: macos-latest
+          - name: Linux
+            os: ubuntu-latest
+            container: swift:5.10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Verify release tag matches VERSION
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          test -n "$VERSION"
+          test "$RELEASE_TAG" = "v$VERSION"
+
+      - run: swift --version
+      - run: swift build
+      - run: swift test
+
+  release:
+    name: Build and attest release artifacts
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Read version
+        id: version
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          test -n "$VERSION"
+          test "$RELEASE_TAG" = "v$VERSION"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Build source archive and CycloneDX SBOM
+        id: artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          mkdir -p release-artifacts
+          ARCHIVE="release-artifacts/thalovant-swift-sdk-$VERSION.tar.gz"
+          # git archive output is deterministic for a given commit (entry
+          # mtimes come from the commit date and gzip embeds no timestamp).
+          git archive --format=tar.gz --prefix="thalovant-swift-sdk-$VERSION/" --output="$ARCHIVE" HEAD
+          python3 - "$ARCHIVE" "$VERSION" <<'PY'
+          import hashlib
+          import json
+          import sys
+
+          archive, version = sys.argv[1], sys.argv[2]
+          digest = hashlib.sha256(open(archive, "rb").read()).hexdigest()
+          # Deterministic serial number derived from the archive digest, so
+          # re-running the workflow on the same tag reproduces the same SBOM.
+          hex32 = digest[:32]
+          serial = "urn:uuid:" + "-".join(
+              [hex32[0:8], hex32[8:12], hex32[12:16], hex32[16:20], hex32[20:32]]
+          )
+          bom = {
+              "bomFormat": "CycloneDX",
+              "specVersion": "1.5",
+              "serialNumber": serial,
+              "version": 1,
+              "metadata": {
+                  "component": {
+                      "type": "library",
+                      "name": "thalovant-swift-sdk",
+                      "version": version,
+                      "purl": f"pkg:swift/github.com/thalovant/thalovant-swift-sdk@{version}",
+                      "hashes": [{"alg": "SHA-256", "content": digest}],
+                  },
+              },
+              # The SDK has zero third-party dependencies, so the SBOM lists
+              # only the metadata component.
+              "components": [],
+          }
+          sbom_path = archive[: -len(".tar.gz")] + ".cdx.json"
+          with open(sbom_path, "w", encoding="utf-8") as handle:
+              json.dump(bom, handle, indent=2)
+              handle.write("\n")
+          print(f"Wrote {sbom_path} with serialNumber {serial}")
+          PY
+          echo "archive=$GITHUB_WORKSPACE/$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "sbom=$GITHUB_WORKSPACE/release-artifacts/thalovant-swift-sdk-$VERSION.cdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Attest artifact provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.artifacts.outputs.archive }}
+
+      - name: Attest artifact SBOM
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: ${{ steps.artifacts.outputs.archive }}
+          sbom-path: ${{ steps.artifacts.outputs.sbom }}
+
+      - name: Attach archive and SBOM to the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARCHIVE: ${{ steps.artifacts.outputs.archive }}
+          SBOM: ${{ steps.artifacts.outputs.sbom }}
+        run: |
+          EXISTING_ASSETS="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name')"
+          for artifact in "$ARCHIVE" "$SBOM"; do
+            name="$(basename "$artifact")"
+            if grep -Fxq "$name" <<< "$EXISTING_ASSETS"; then
+              echo "$name is already attached to $RELEASE_TAG; preserving the existing asset."
+            else
+              gh release upload "$RELEASE_TAG" "$artifact"
+            fi
+          done
+
+  verify-resolution:
+    name: Verify SwiftPM tag resolution
+    needs: release
+    runs-on: ubuntu-latest
+    container: swift:5.10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+
+      - name: Resolve the released tag from a consumer package
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(tr -d '[:space:]' < VERSION)"
+          test "$RELEASE_TAG" = "v$VERSION"
+          PACKAGE_DIR="$(mktemp -d)"
+
+          resolve_with() {
+            rm -rf "$PACKAGE_DIR"
+            mkdir -p "$PACKAGE_DIR"
+            printf '%s\n' \
+              '// swift-tools-version:5.9' \
+              'import PackageDescription' \
+              '' \
+              'let package = Package(' \
+              '    name: "resolve-check",' \
+              '    dependencies: [' \
+              "        .package(url: \"$1\", exact: \"$VERSION\")" \
+              '    ]' \
+              ')' > "$PACKAGE_DIR/Package.swift"
+            (cd "$PACKAGE_DIR" && swift package resolve)
+          }
+
+          PUBLIC_URL="https://github.com/$GITHUB_REPOSITORY.git"
+          AUTH_URL="https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git"
+
+          if resolve_with "$PUBLIC_URL"; then
+            echo "Resolved $VERSION anonymously from $PUBLIC_URL."
+          elif resolve_with "$AUTH_URL"; then
+            echo "Anonymous resolution failed (the repository is likely private);"
+            echo "resolved $VERSION with the workflow token instead. Public consumers"
+            echo "will be able to resolve the tag once the repository is public."
+          else
+            echo "swift package resolve could not resolve tag $RELEASE_TAG." >&2
+            exit 1
+          fi
+          grep -F "\"$VERSION\"" "$PACKAGE_DIR/Package.resolved"
