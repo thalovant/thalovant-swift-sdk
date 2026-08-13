@@ -1,0 +1,167 @@
+name: Auto Release
+
+on:
+  push:
+    branches: [main]
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  actions: write
+  contents: write
+
+concurrency:
+  group: auto-release-swift-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Release unpublished version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Plan automatic release
+        id: plan
+        run: |
+          python3 <<'PY'
+          import os
+          import re
+          import subprocess
+
+          RELEVANT_PATHS = [
+              "Sources",
+              "Tests",
+              "Package.swift",
+              "VERSION",
+              "README.md",
+              "LICENSE",
+          ]
+
+          def git(*args, check=True, quiet=False):
+              result = subprocess.run(
+                  ["git", *args],
+                  capture_output=True,
+                  text=True,
+                  check=check if not quiet else False,
+              )
+              return result.stdout.strip() if not quiet else result
+
+          def tag_exists(tag):
+              result = subprocess.run(
+                  ["git", "rev-parse", "-q", "--verify", f"refs/tags/{tag}"],
+                  capture_output=True,
+              )
+              return result.returncode == 0
+
+          def current_version():
+              version = open("VERSION", encoding="utf-8").read().strip()
+              if not re.fullmatch(r"\d+\.\d+\.\d+", version):
+                  raise SystemExit(f"VERSION does not contain a plain semver version: {version!r}")
+              return version
+
+          def changed_since_latest_tag():
+              latest = git("describe", "--tags", "--abbrev=0", "--match", "v[0-9]*", quiet=True)
+              if latest.returncode != 0:
+                  return ["<initial-release>"]
+              diff = git("diff", "--name-only", f"{latest.stdout.strip()}..HEAD")
+              return [path for path in diff.splitlines() if path]
+
+          def is_relevant(path):
+              return any(path == prefix or path.startswith(f"{prefix}/") for prefix in RELEVANT_PATHS)
+
+          def bump_patch(version):
+              match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)", version)
+              if not match:
+                  raise SystemExit(f"Cannot auto-bump non-standard version: {version}")
+              return f"{match.group(1)}.{match.group(2)}.{int(match.group(3)) + 1}"
+
+          def replace_required(path, old_text, new_text):
+              source = open(path, encoding="utf-8").read()
+              if old_text not in source:
+                  raise SystemExit(f"{path} does not contain the expected release version {old_text}")
+              open(path, "w", encoding="utf-8").write(source.replace(old_text, new_text))
+
+          def write_version_file(old, new):
+              current = open("VERSION", encoding="utf-8").read().strip()
+              if current != old:
+                  raise SystemExit(f"VERSION contains {current}, expected {old}")
+              open("VERSION", "w", encoding="utf-8").write(new + "\n")
+
+          def prepend_changelog_entry(version, previous):
+              path = "CHANGELOG.md"
+              source = open(path, encoding="utf-8").read()
+              header = "# Changelog\n"
+              if not source.startswith(header):
+                  raise SystemExit(f"{path} does not start with the expected header")
+              entry = f"\n## {version}\n\n- Automated patch release of the unreleased changes on `main` since {previous}.\n"
+              open(path, "w", encoding="utf-8").write(header + entry + source[len(header):])
+
+          def write_output(values):
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+                  for key, value in values.items():
+                      handle.write(f"{key}={value}\n")
+
+          changed = changed_since_latest_tag()
+          if changed[0] != "<initial-release>" and not any(is_relevant(path) for path in changed):
+              version = current_version()
+              write_output({
+                  "release_needed": "false",
+                  "version": version,
+                  "tag": f"v{version}",
+                  "release_sha": git("rev-parse", "HEAD"),
+              })
+              print("No release-relevant SDK changes since the latest tag.")
+              raise SystemExit(0)
+
+          version = current_version()
+          if tag_exists(f"v{version}"):
+              next_version = bump_patch(version)
+              write_version_file(version, next_version)
+              user_agent_paths = [
+                  "Sources/ThalovantSDK/ControlPlane.swift",
+                  "Tests/ThalovantSDKTests/RequestBuildingTests.swift",
+                  "Tests/ThalovantSDKTests/WireProtocolTests.swift",
+              ]
+              for path in user_agent_paths:
+                  replace_required(path, f"ThalovantSwiftSDK/{version}", f"ThalovantSwiftSDK/{next_version}")
+              replace_required("README.md", f'from: "{version}"', f'from: "{next_version}"')
+              prepend_changelog_entry(next_version, f"v{version}")
+              git("config", "user.name", "github-actions[bot]")
+              git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+              git("add", "VERSION", "README.md", "CHANGELOG.md", *user_agent_paths)
+              git("commit", "-m", f"release: bump Swift SDK to {next_version}")
+              git("push", "origin", "HEAD:main")
+              version = next_version
+
+          write_output({
+              "release_needed": "true",
+              "version": version,
+              "tag": f"v{version}",
+              "release_sha": git("rev-parse", "HEAD"),
+          })
+          PY
+
+      - name: Run tests (Linux, swift:5.10)
+        if: steps.plan.outputs.release_needed == 'true'
+        run: |
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace swift:5.10 \
+            bash -c "swift --version && swift build && swift test"
+
+      - name: Create GitHub release
+        if: steps.plan.outputs.release_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+          RELEASE_SHA: ${{ steps.plan.outputs.release_sha }}
+        run: gh release create "$TAG" --target "$RELEASE_SHA" --title "$TAG" --notes "Release $TAG"
+
+      - name: Dispatch release validation
+        if: steps.plan.outputs.release_needed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.plan.outputs.tag }}
+        run: gh workflow run release.yml --ref main -f release_tag="$TAG"
