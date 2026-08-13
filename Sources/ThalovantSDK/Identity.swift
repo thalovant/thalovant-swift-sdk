@@ -135,8 +135,11 @@ public struct ThalovantIdentity: Sendable {
         }
         do {
             return try ThalovantIdentity(jsonData: data)
-        } catch is ThalovantIdentityError where (try? ThalovantJSON.decodeObject(data)) == nil {
-            throw ThalovantIdentityError("Identity file is not valid JSON: \(path)")
+        } catch let error as ThalovantIdentityError {
+            if (try? ThalovantJSON.decodeObject(data)) == nil {
+                throw ThalovantIdentityError("Identity file is not valid JSON: \(path)")
+            }
+            throw error
         }
     }
 

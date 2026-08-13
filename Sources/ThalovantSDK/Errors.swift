@@ -24,10 +24,7 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
     static func decodeErrorCode(from body: String?) -> String? {
         guard let body, let object = try? ThalovantJSON.decodeObject(body) else { return nil }
         if let code = object["code"]?.stringValue { return code }
-        if let detail = object["detail"] {
-            if let code = detail["code"]?.stringValue { return code }
-            if let code = detail.stringValue { return code }
-        }
+        if let code = object["detail"]?["code"]?.stringValue { return code }
         return nil
     }
 }
