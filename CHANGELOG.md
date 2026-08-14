@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Documented the two token 429 responses in the README's Errors section: `token_rate_limited` (per-plan per-minute request rate, 60/min on the free plan) and `token_quota_exceeded` (per-plan daily/monthly call quota, with `quota`, `limit`, and `used`). Both carry a `Retry-After` header and a matching `retry_after_seconds`, which is authoritative; the SDK does not retry them, and `ThalovantApiError` exposes no response headers, so `retry_after_seconds` must be read from the body. `errorCode` decodes both codes out of the API's Problem+JSON `detail` object.
+
 ## 0.1.1
 
 - `ThalovantControlPlane.loginWithBrowser(options:)`: browser device-flow

@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.1.1"
+public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.1.2"
 
 /// Filters for `GET /v1/analytics/overview` (and, with `admin`,
 /// `GET /v1/admin/analytics/overview`). `ownerId` is admin-only.
