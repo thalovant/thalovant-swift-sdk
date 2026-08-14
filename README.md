@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.1"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.2"),
 ]
 ```
 
@@ -226,6 +226,25 @@ let selected = selectDataPlaneEndpoint(
 - `ThalovantIdentityError` — malformed or insecure identity documents.
 - `ThalovantUnsupportedProtocolError` — the protocol is disabled, missing an
   endpoint, or not supported by this SDK.
+
+API-token calls are limited per plan. Both limits surface as
+`ThalovantApiError` with HTTP 429 in `statusCode`, a `Retry-After` header, and
+a matching `retry_after_seconds` in the body:
+
+- `token_rate_limited` — the plan's per-minute request rate was exceeded (60
+  requests per minute on the free plan). Retry once the current minute resets.
+- `token_quota_exceeded` — the plan's daily or monthly call quota is exhausted.
+  The body names which in `quota` (`daily` or `monthly`) alongside `limit` and
+  `used`. Retry after the next UTC day or month starts.
+
+Both apply to token-authenticated control-plane calls. `errorCode` decodes the
+code for you, since the API nests it under `detail` in its Problem+JSON body.
+The SDK does not retry automatically, and `ThalovantApiError` carries the
+status, raw `body`, and `errorCode` — not response headers — so read
+`retry_after_seconds` out of the body rather than reaching for the
+`Retry-After` header. It is authoritative: honor it before resending. Per-plan
+limits are listed in the dashboard and at
+<https://docs.thalovant.com/developers/sdks/swift/>.
 
 ## Development
 
