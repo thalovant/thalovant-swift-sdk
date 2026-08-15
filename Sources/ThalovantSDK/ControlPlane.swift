@@ -6,13 +6,10 @@ import FoundationNetworking
 public let defaultControlAPIURL = "https://api.thalovant.com"
 public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.1.3"
 
-/// Filters for `GET /v1/analytics/overview` (and, with `admin`,
-/// `GET /v1/admin/analytics/overview`). `ownerId` is admin-only.
+/// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {
-    public var admin: Bool
     public var range: String?
     public var bucket: String?
-    public var ownerId: String?
     public var hubId: String?
     public var clientId: String?
     public var country: String?
@@ -25,10 +22,8 @@ public struct AnalyticsOverviewOptions: Sendable {
     public var hour: Int?
 
     public init(
-        admin: Bool = false,
         range: String? = nil,
         bucket: String? = nil,
-        ownerId: String? = nil,
         hubId: String? = nil,
         clientId: String? = nil,
         country: String? = nil,
@@ -40,10 +35,8 @@ public struct AnalyticsOverviewOptions: Sendable {
         weekday: Int? = nil,
         hour: Int? = nil
     ) {
-        self.admin = admin
         self.range = range
         self.bucket = bucket
-        self.ownerId = ownerId
         self.hubId = hubId
         self.clientId = clientId
         self.country = country
@@ -97,10 +90,15 @@ public struct BootstrapIdentityResult {
     public var selectedProtocol: HubProtocol? { endpoint?.hubProtocol }
 
     public func asJSON(includeSecrets: Bool = false) -> JSONObject {
+        // The `client` resource (the `POST /v1/clients` response) carries the
+        // provisioned credentials — `initial_identify` access_key/password/
+        // crypto_key/mqtt.password, the `initial_identify_token`, and the echoed
+        // `spec` apiKey/password/cryptoKey — and `hub` can echo them too. Gate
+        // those secret subkeys behind `includeSecrets`, exactly like `identity`.
         var data: JSONObject = [
             "identity": .object(identity.asJSON(includeSecrets: includeSecrets)),
-            "hub": .object(hub),
-            "client": .object(client),
+            "hub": .object(includeSecrets ? hub : redactingSecretFields(hub)),
+            "client": .object(includeSecrets ? client : redactingSecretFields(client)),
         ]
         if let endpoint {
             data["selectedProtocol"] = .string(endpoint.hubProtocol.rawValue)
@@ -244,13 +242,9 @@ public final class ThalovantControlPlane {
     // MARK: Analytics
 
     public func analyticsOverview(_ options: AnalyticsOverviewOptions = AnalyticsOverviewOptions()) async throws -> JSONObject {
-        let endpoint = options.admin ? "/v1/admin/analytics/overview" : "/v1/analytics/overview"
         var params: [(String, String)] = []
         appendParam(&params, "range", options.range)
         appendParam(&params, "bucket", options.bucket)
-        if options.admin {
-            appendParam(&params, "owner_id", options.ownerId)
-        }
         appendParam(&params, "hub_id", options.hubId)
         appendParam(&params, "client_id", options.clientId)
         appendParam(&params, "country", options.country)
@@ -261,7 +255,7 @@ public final class ThalovantControlPlane {
         appendParam(&params, "time_end", options.timeEnd)
         if let weekday = options.weekday { params.append(("weekday", String(weekday))) }
         if let hour = options.hour { params.append(("hour", String(hour))) }
-        return try await requestObject("GET", pathWithQuery(endpoint, params))
+        return try await requestObject("GET", pathWithQuery("/v1/analytics/overview", params))
     }
 
     // MARK: Clients
@@ -401,11 +395,7 @@ public final class ThalovantControlPlane {
         let (data, response) = try await perform(request)
         guard (200..<300).contains(response.statusCode) else {
             let text = String(decoding: data, as: UTF8.self)
-            throw ThalovantApiError(
-                message: "Thalovant API request failed with HTTP \(response.statusCode): \(text)",
-                statusCode: response.statusCode,
-                body: text
-            )
+            throw ThalovantApiError.httpFailure(statusCode: response.statusCode, body: text)
         }
         return data
     }
@@ -469,6 +459,50 @@ func pathWithQuery(_ path: String, _ params: [(String, String)]) -> String {
 func appendParam(_ params: inout [(String, String)], _ name: String, _ value: String?) {
     guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
     params.append((name, value))
+}
+
+/// Field names that must never appear in the non-secrets serialization of the
+/// hub/client resources: the provisioned client credentials the control plane
+/// returns from `POST /v1/clients` (the `initial_identify` access key,
+/// password, crypto key, and MQTT username/password, the
+/// `initial_identify_token`, and the echoed `spec` apiKey/password/cryptoKey).
+/// The MQTT `username` is credential-equivalent — `MqttBrokerCredentials`
+/// itself gates it behind `includeSecrets` — so it is redacted here too, as the
+/// Go and Rust SDKs do. Compared case-insensitively.
+let redactedResultSecretKeys: Set<String> = [
+    "username",
+    "broker_username",
+    "password",
+    "access_key",
+    "accesskey",
+    "crypto_key",
+    "cryptokey",
+    "api_key",
+    "apikey",
+    "initial_identify_token",
+]
+
+/// Deep-copies `object`, dropping every secret-named field at any depth so a
+/// hub or client resource can be serialized without leaking client
+/// credentials. Used only on the non-secrets (`includeSecrets == false`) path;
+/// the include-secrets path returns the resources unchanged.
+func redactingSecretFields(_ object: JSONObject) -> JSONObject {
+    object.reduce(into: JSONObject()) { result, entry in
+        let (key, value) = entry
+        guard !redactedResultSecretKeys.contains(key.lowercased()) else { return }
+        result[key] = redactedSecretValue(value)
+    }
+}
+
+private func redactedSecretValue(_ value: JSONValue) -> JSONValue {
+    switch value {
+    case .object(let object):
+        return .object(redactingSecretFields(object))
+    case .array(let array):
+        return .array(array.map(redactedSecretValue))
+    default:
+        return value
+    }
 }
 
 func encodePathComponent(_ value: String) -> String {

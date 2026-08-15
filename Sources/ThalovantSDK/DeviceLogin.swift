@@ -210,11 +210,7 @@ extension ThalovantControlPlane {
             case "expired_token":
                 throw ThalovantDeviceLoginError.expired
             default:
-                throw ThalovantApiError(
-                    message: "Thalovant API request failed with HTTP \(response.statusCode): \(body)",
-                    statusCode: response.statusCode,
-                    body: body
-                )
+                throw ThalovantApiError.httpFailure(statusCode: response.statusCode, body: body)
             }
             let remaining = deadline - clock()
             if remaining <= 0 {
@@ -241,4 +237,61 @@ func openBrowserBestEffort(_ url: String) {
     #endif
     // iOS, tvOS, watchOS: no process launching; callers surface the URL
     // through the prompt instead.
+}
+
+// MARK: - Redacted reflection
+//
+// The device grant carries the polling `deviceCode` and the result carries the
+// durable `accessToken`; both also keep the raw server response (which repeats
+// those secrets). Default reflection (`"\(x)"`, `String(describing:)`,
+// `dump()`) would print them, so redact every printing/reflection path while
+// leaving the stored values and the `raw` payload intact for real use.
+
+extension DeviceAuthorizationGrant: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "DeviceAuthorizationGrant(userCode: \(userCode), "
+            + "verificationUri: \(verificationUri), deviceCode: <redacted>)"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "userCode": userCode,
+                "verificationUri": verificationUri,
+                "verificationUriComplete": verificationUriComplete as Any,
+                "expiresIn": expiresIn as Any,
+                "interval": interval,
+                "deviceCode": "<redacted>",
+                "raw": "<redacted>",
+            ],
+            displayStyle: .struct
+        )
+    }
+}
+
+extension DeviceLoginResult: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "DeviceLoginResult(tokenId: \(tokenId ?? "nil"), tokenType: \(tokenType ?? "nil"), "
+            + "scopes: \(scopes), expiresAt: \(expiresAt ?? "nil"), accessToken: <redacted>)"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "tokenId": tokenId as Any,
+                "tokenType": tokenType as Any,
+                "scopes": scopes,
+                "expiresAt": expiresAt as Any,
+                "accessToken": "<redacted>",
+                "raw": "<redacted>",
+            ],
+            displayStyle: .struct
+        )
+    }
 }

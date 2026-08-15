@@ -13,6 +13,38 @@ extension NSLock {
     }
 }
 
+/// Precompiled matcher for an `authorization=<value>` query parameter — the
+/// value is the base64 access-key credential the WSS transport puts on the
+/// connection URL. `nil` only if the literal pattern fails to compile.
+private let authorizationQueryRegex = try? NSRegularExpression(
+    pattern: "(authorization=)[^&\\s\"']*",
+    options: [.caseInsensitive]
+)
+
+/// Redacts the value of any `authorization=` query parameter in `text`,
+/// preserving the surrounding message (scheme, host, path, other parameters).
+/// A pure string transform, so it behaves identically on every platform.
+func redactingAuthorizationQuery(_ text: String) -> String {
+    guard let regex = authorizationQueryRegex else { return text }
+    return regex.stringByReplacingMatches(
+        in: text,
+        options: [],
+        range: NSRange(text.startIndex..., in: text),
+        withTemplate: "$1<redacted>"
+    )
+}
+
+/// Human-facing description of a transport error that never leaks the
+/// connection URL. `URLSession` surfaces failures as `NSError`s that embed the
+/// failing request URL under `NSErrorFailingURLKey`, and that URL carries
+/// `?authorization=base64("<user agent>:<access key>")` in its query — so
+/// `String(describing:)` / `\(error)` would expose the access key. Take only
+/// the localized failure reason (which omits the URL) and scrub any
+/// authorization query that still slips through, as a final guard.
+func safeTransportErrorMessage(_ error: Error) -> String {
+    redactingAuthorizationQuery(error.localizedDescription)
+}
+
 /// One-shot async gate: `wait` suspends until `open`/`fail`, or until the
 /// timeout elapses. On timeout it either throws `timeoutError` or, when no
 /// error is configured, returns normally.
@@ -251,7 +283,9 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
         do {
             try await socket.send(.string(text))
         } catch {
-            throw ThalovantConnectionError("HiveMind WSS send failed: \(error.localizedDescription)")
+            // Scrub like handleSocketFailure: a failed send can surface the
+            // authorized connection URL, and this path bypasses that fallback.
+            throw ThalovantConnectionError("HiveMind WSS send failed: \(safeTransportErrorMessage(error))")
         }
     }
 
@@ -298,12 +332,17 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
     }
 
     private func handleSocketFailure(_ error: Error) {
+        // `String(describing:)` / `\(error)` on a URLError embeds
+        // `NSErrorFailingURLKey`, and the connection URL carries
+        // `?authorization=base64("<user agent>:<access key>")` — so use only the
+        // scrubbed, localized description here and in the surfaced error.
+        let detail = safeTransportErrorMessage(error)
         lock.lock()
         connectedFlag = false
-        lastErrorMessage = String(describing: error)
+        lastErrorMessage = detail
         lock.unlock()
         let failure = (error as? ThalovantConnectionError)
-            ?? ThalovantConnectionError("HiveMind WSS connection failed: \(error)")
+            ?? ThalovantConnectionError("HiveMind WSS connection failed: \(detail)")
         openGate.fail(failure)
         handshakeGate.fail(failure)
     }

@@ -27,6 +27,66 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
         if let code = object["detail"]?["code"]?.stringValue { return code }
         return nil
     }
+
+    /// Builds the error for a non-2xx control API response. The human-facing
+    /// `message` — and therefore `description`/`errorDescription`, which a
+    /// SwiftUI alert renders — carries only the status and a short, single-line
+    /// server detail, never the full raw body. A raw body can echo submitted
+    /// secrets (`POST /v1/clients` is sent apiKey/password/cryptoKey, and
+    /// auth/token and device/token carry credentials). The complete body is
+    /// still retained in `body` for programmatic `errorCode` decoding.
+    static func httpFailure(statusCode: Int, body: String) -> ThalovantApiError {
+        let detail = serverErrorDetail(from: body)
+        let message = detail.isEmpty
+            ? "Thalovant API request failed with HTTP \(statusCode)."
+            : "Thalovant API request failed with HTTP \(statusCode): \(detail)"
+        return ThalovantApiError(message: message, statusCode: statusCode, body: body)
+    }
+}
+
+/// A short, non-sensitive server detail for a human-facing error message. For a
+/// JSON error envelope it is built only from allowlisted fields — the machine
+/// `code` and the server's own `message`/`detail`/`title` summary — never the
+/// echoed request `input` or arbitrary body content, so submitted credentials
+/// (`POST /v1/clients` sends apiKey/password/cryptoKey, which FastAPI repeats in
+/// a validation error's `input`) can never reach `message`, `description`, or
+/// `errorDescription`. A non-JSON body falls back to a bounded, single-line
+/// snippet. The full body stays on `ThalovantApiError.body` for `errorCode`.
+func serverErrorDetail(from body: String) -> String {
+    guard let object = try? ThalovantJSON.decodeObject(body) else {
+        return boundedServerDetail(body)
+    }
+    var parts: [String] = []
+    if let code = ThalovantApiError.decodeErrorCode(from: body) {
+        parts.append(code)
+    }
+    if let message = allowlistedServerMessage(object) {
+        parts.append(message)
+    }
+    return boundedServerDetail(parts.joined(separator: ": "))
+}
+
+/// The server's own human-readable summary, taken only from an allowlisted set
+/// of fields. Deliberately ignores a `detail` array — FastAPI validation
+/// errors, whose entries echo the submitted request `input`.
+private func allowlistedServerMessage(_ object: JSONObject) -> String? {
+    if let message = object["message"]?.stringValue { return message }
+    if let detail = object["detail"]?.stringValue { return detail }
+    if let detail = object["detail"]?["message"]?.stringValue { return detail }
+    if let title = object["title"]?.stringValue { return title }
+    return nil
+}
+
+/// Reduces a string to a short, single-line detail safe to surface in an error
+/// message or UI alert: collapses every run of whitespace and newlines to a
+/// single space and caps the length, so large bodies are never dumped verbatim.
+func boundedServerDetail(_ body: String, limit: Int = 200) -> String {
+    let collapsed = body
+        .components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+    guard collapsed.count > limit else { return collapsed }
+    return String(collapsed.prefix(limit)) + "…"
 }
 
 /// The provided identity document is missing fields or unreadable.
