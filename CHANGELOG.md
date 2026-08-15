@@ -21,7 +21,8 @@
   and stored values are unchanged.
 - Security: the WSS transport's `lastError` and surfaced connection error no
   longer interpolate the raw `URLError`, which embeds the connection URL and its
-  `?authorization=` access-key query; they use the localized description only.
+  `?authorization=` access-key query; they use the localized failure reason and
+  scrub any `authorization=` query value that remains.
 - Security: control API HTTP failures (including `POST /v1/clients`,
   `auth/token`, and `device/token`) no longer embed the raw response body in the
   error `message`/`errorDescription` that a UI alert renders — only the status

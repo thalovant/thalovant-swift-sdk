@@ -13,14 +13,36 @@ extension NSLock {
     }
 }
 
+/// Precompiled matcher for an `authorization=<value>` query parameter — the
+/// value is the base64 access-key credential the WSS transport puts on the
+/// connection URL. `nil` only if the literal pattern fails to compile.
+private let authorizationQueryRegex = try? NSRegularExpression(
+    pattern: "(authorization=)[^&\\s\"']*",
+    options: [.caseInsensitive]
+)
+
+/// Redacts the value of any `authorization=` query parameter in `text`,
+/// preserving the surrounding message (scheme, host, path, other parameters).
+/// A pure string transform, so it behaves identically on every platform.
+func redactingAuthorizationQuery(_ text: String) -> String {
+    guard let regex = authorizationQueryRegex else { return text }
+    return regex.stringByReplacingMatches(
+        in: text,
+        options: [],
+        range: NSRange(text.startIndex..., in: text),
+        withTemplate: "$1<redacted>"
+    )
+}
+
 /// Human-facing description of a transport error that never leaks the
 /// connection URL. `URLSession` surfaces failures as `NSError`s that embed the
 /// failing request URL under `NSErrorFailingURLKey`, and that URL carries
 /// `?authorization=base64("<user agent>:<access key>")` in its query — so
-/// `String(describing:)` / `\(error)` would expose the access key. The
-/// localized description carries only the human-readable failure reason.
+/// `String(describing:)` / `\(error)` would expose the access key. Take only
+/// the localized failure reason (which omits the URL) and scrub any
+/// authorization query that still slips through, as a final guard.
 func safeTransportErrorMessage(_ error: Error) -> String {
-    error.localizedDescription
+    redactingAuthorizationQuery(error.localizedDescription)
 }
 
 /// One-shot async gate: `wait` suspends until `open`/`fail`, or until the

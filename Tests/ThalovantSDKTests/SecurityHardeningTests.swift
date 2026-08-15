@@ -194,28 +194,50 @@ final class SecurityHardeningTests: XCTestCase {
 
     // MARK: F7 — transport errors never leak the connection URL / access key
 
-    func testSafeTransportErrorMessageDropsAuthorizationQuery() {
+    func testRedactingAuthorizationQueryStripsAccessKeyKeepsRemainder() {
+        // A synthetic string carrying the access-key query. Deterministic on
+        // every platform: it exercises the pure scrub, with no dependency on
+        // how a given Foundation surfaces a real URLError.
+        let host = "hub-1.hubs.thalovant.com"
+        let accessKey = "BASE64ACCESSKEYSECRET"
+        let input = "Could not connect to wss://\(host)/ws?authorization=\(accessKey)"
+
+        let output = redactingAuthorizationQuery(input)
+        // The access-key value is stripped; the query key and the rest survive.
+        XCTAssertFalse(output.contains(accessKey), "access key must be stripped")
+        XCTAssertEqual(output, "Could not connect to wss://\(host)/ws?authorization=<redacted>")
+
+        // Neighbouring query parameters are preserved; only the value is cut.
+        let multi = redactingAuthorizationQuery("wss://\(host)/ws?a=1&authorization=\(accessKey)&b=2")
+        XCTAssertFalse(multi.contains(accessKey))
+        XCTAssertEqual(multi, "wss://\(host)/ws?a=1&authorization=<redacted>&b=2")
+    }
+
+    func testSafeTransportErrorMessageDropsAccessKey() {
+        let accessKey = "BASE64ACCESSKEYSECRET"
+        let leakURL = "wss://hub-1.hubs.thalovant.com/ws?authorization=\(accessKey)"
+
+        // A plain struct Error reflects its stored URL through `String(describing:)`
+        // (stdlib Mirror — deterministic on every platform), demonstrating the
+        // leak vector; the sanitizer output must not carry the access key.
         struct FakeURLError: Error { let failingURL: String }
-        let leakURL = "wss://hub-1.hubs.thalovant.com/ws?authorization=BASE64ACCESSKEYSECRET"
-
-        // The vector is real: reflecting a URL-bearing error exposes the query.
         let raw = FakeURLError(failingURL: leakURL)
-        XCTAssertTrue("\(raw)".contains("authorization="))
-        XCTAssertTrue("\(raw)".contains("BASE64ACCESSKEYSECRET"))
-        // The fix keeps only the localized reason.
-        XCTAssertFalse(safeTransportErrorMessage(raw).contains("authorization="))
-        XCTAssertFalse(safeTransportErrorMessage(raw).contains("BASE64ACCESSKEYSECRET"))
+        XCTAssertTrue("\(raw)".contains(accessKey), "reflection exposes the access key")
+        XCTAssertFalse(safeTransportErrorMessage(raw).contains(accessKey))
 
-        // The same holds for a genuine URLError-style NSError.
+        #if canImport(Darwin)
+        // Apple-platform Foundation (where the SDK's users run) embeds the
+        // failing URL in an NSError's reflection; the sanitizer strips it there
+        // too. Skipped on swift-corelibs-Foundation, which does not surface
+        // NSErrorFailingURLKey through reflection, so this precondition only
+        // holds on Darwin.
         let nsError = NSError(domain: "NSURLErrorDomain", code: -1004, userInfo: [
             "NSErrorFailingURLKey": leakURL,
             NSLocalizedDescriptionKey: "Could not connect to the server.",
         ])
-        XCTAssertTrue(String(describing: nsError).contains("BASE64ACCESSKEYSECRET"), "vector is real")
-        let safe = safeTransportErrorMessage(nsError)
-        XCTAssertFalse(safe.contains("authorization="))
-        XCTAssertFalse(safe.contains("BASE64ACCESSKEYSECRET"))
-        XCTAssertFalse(safe.contains("wss://"))
+        XCTAssertTrue(String(describing: nsError).contains(accessKey), "vector is real on Darwin")
+        XCTAssertFalse(safeTransportErrorMessage(nsError).contains(accessKey))
+        #endif
     }
 
     // MARK: F9 — HTTP failures never dump the raw body into human-facing text
