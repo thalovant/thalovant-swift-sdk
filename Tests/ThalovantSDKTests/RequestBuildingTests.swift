@@ -137,7 +137,7 @@ final class RequestBuildingTests: XCTestCase {
         let request = try lastRequest()
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/auth/token")
-        XCTAssertEqual(request.header("User-Agent"), "ThalovantSwiftSDK/0.1.3")
+        XCTAssertEqual(request.header("User-Agent"), "ThalovantSwiftSDK/0.1.4")
         XCTAssertEqual(request.header("Accept"), "application/json")
         XCTAssertEqual(request.header("Content-Type"), "application/json")
         XCTAssertNil(request.header("Authorization"))

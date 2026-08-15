@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.4
+
+- Automated patch release of the unreleased changes on `main` since v0.1.3.
+
 ## Unreleased
 
 - **BREAKING:** removed the admin analytics path. `AnalyticsOverviewOptions` no

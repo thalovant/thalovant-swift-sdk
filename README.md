@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.3"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.4"),
 ]
 ```
 
