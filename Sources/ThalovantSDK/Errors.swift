@@ -36,7 +36,7 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
     /// auth/token and device/token carry credentials). The complete body is
     /// still retained in `body` for programmatic `errorCode` decoding.
     static func httpFailure(statusCode: Int, body: String) -> ThalovantApiError {
-        let detail = boundedServerDetail(body)
+        let detail = serverErrorDetail(from: body)
         let message = detail.isEmpty
             ? "Thalovant API request failed with HTTP \(statusCode)."
             : "Thalovant API request failed with HTTP \(statusCode): \(detail)"
@@ -44,10 +44,42 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
     }
 }
 
-/// Reduces a raw response body to a short, single-line detail safe to surface
-/// in an error message or UI alert: collapses every run of whitespace and
-/// newlines to a single space and caps the length, so large or secret-echoing
-/// bodies are never dumped verbatim.
+/// A short, non-sensitive server detail for a human-facing error message. For a
+/// JSON error envelope it is built only from allowlisted fields — the machine
+/// `code` and the server's own `message`/`detail`/`title` summary — never the
+/// echoed request `input` or arbitrary body content, so submitted credentials
+/// (`POST /v1/clients` sends apiKey/password/cryptoKey, which FastAPI repeats in
+/// a validation error's `input`) can never reach `message`, `description`, or
+/// `errorDescription`. A non-JSON body falls back to a bounded, single-line
+/// snippet. The full body stays on `ThalovantApiError.body` for `errorCode`.
+func serverErrorDetail(from body: String) -> String {
+    guard let object = try? ThalovantJSON.decodeObject(body) else {
+        return boundedServerDetail(body)
+    }
+    var parts: [String] = []
+    if let code = ThalovantApiError.decodeErrorCode(from: body) {
+        parts.append(code)
+    }
+    if let message = allowlistedServerMessage(object) {
+        parts.append(message)
+    }
+    return boundedServerDetail(parts.joined(separator: ": "))
+}
+
+/// The server's own human-readable summary, taken only from an allowlisted set
+/// of fields. Deliberately ignores a `detail` array — FastAPI validation
+/// errors, whose entries echo the submitted request `input`.
+private func allowlistedServerMessage(_ object: JSONObject) -> String? {
+    if let message = object["message"]?.stringValue { return message }
+    if let detail = object["detail"]?.stringValue { return detail }
+    if let detail = object["detail"]?["message"]?.stringValue { return detail }
+    if let title = object["title"]?.stringValue { return title }
+    return nil
+}
+
+/// Reduces a string to a short, single-line detail safe to surface in an error
+/// message or UI alert: collapses every run of whitespace and newlines to a
+/// single space and caps the length, so large bodies are never dumped verbatim.
 func boundedServerDetail(_ body: String, limit: Int = 200) -> String {
     let collapsed = body
         .components(separatedBy: .whitespacesAndNewlines)

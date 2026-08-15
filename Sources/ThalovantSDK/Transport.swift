@@ -283,7 +283,9 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
         do {
             try await socket.send(.string(text))
         } catch {
-            throw ThalovantConnectionError("HiveMind WSS send failed: \(error.localizedDescription)")
+            // Scrub like handleSocketFailure: a failed send can surface the
+            // authorized connection URL, and this path bypasses that fallback.
+            throw ThalovantConnectionError("HiveMind WSS send failed: \(safeTransportErrorMessage(error))")
         }
     }
 

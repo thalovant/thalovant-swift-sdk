@@ -74,7 +74,7 @@ final class SecurityHardeningTests: XCTestCase {
     """
 
     private static let allBootstrapSecrets = [
-        "AK-SECRET", "PW-SECRET", "CK-SECRET", "MQTT-PW-SECRET",
+        "AK-SECRET", "PW-SECRET", "CK-SECRET", "MQTT-PW-SECRET", "mqtt-user",
         "IIT-SECRET", "SPEC-AK-SECRET", "SPEC-PW-SECRET", "SPEC-CK-SECRET",
         "HUB-SECRET",
     ]
@@ -101,6 +101,8 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertNil(identify?["password"])
         XCTAssertNil(identify?["crypto_key"])
         XCTAssertNil(identify?["mqtt"]?["password"])
+        // The MQTT username is credential-equivalent and is redacted too.
+        XCTAssertNil(identify?["mqtt"]?["username"])
         XCTAssertEqual(identify?["site_id"]?.stringValue, "swift-demo-client")
         XCTAssertEqual(identify?["mqtt"]?["endpoint"]?.stringValue, "mqtts://mqtt.hub-1.hubs.thalovant.com:8883")
         // client.initial_identify_token and echoed spec secrets are gone.
@@ -127,6 +129,7 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertEqual(full["identity"]?["access_key"]?.stringValue, "AK-SECRET")
         XCTAssertEqual(full["client"]?["initial_identify"]?["access_key"]?.stringValue, "AK-SECRET")
         XCTAssertEqual(full["client"]?["initial_identify"]?["mqtt"]?["password"]?.stringValue, "MQTT-PW-SECRET")
+        XCTAssertEqual(full["client"]?["initial_identify"]?["mqtt"]?["username"]?.stringValue, "mqtt-user")
         XCTAssertEqual(full["client"]?["initial_identify_token"]?.stringValue, "IIT-SECRET")
         XCTAssertEqual(full["client"]?["spec"]?["apiKey"]?.stringValue, "SPEC-AK-SECRET")
         XCTAssertEqual(full["hub"]?["password"]?.stringValue, "HUB-SECRET")
@@ -240,6 +243,23 @@ final class SecurityHardeningTests: XCTestCase {
         #endif
     }
 
+    func testSafeTransportErrorMessageScrubsLocalizedErrorDescription() {
+        // A custom LocalizedError whose errorDescription embeds the authorized
+        // WSS URL — the case where `.localizedDescription` on its own is not a
+        // sufficient boundary. The scrub strips the access key regardless.
+        struct LocalizedURLError: LocalizedError {
+            let text: String
+            var errorDescription: String? { text }
+        }
+        let accessKey = "BASE64ACCESSKEYSECRET"
+        let host = "hub-1.hubs.thalovant.com"
+        let error = LocalizedURLError(text: "WebSocket send failed for wss://\(host)/ws?authorization=\(accessKey)")
+
+        let output = safeTransportErrorMessage(error)
+        XCTAssertFalse(output.contains(accessKey), "access key must not survive")
+        XCTAssertTrue(output.contains("authorization=<redacted>"))
+    }
+
     // MARK: F9 — HTTP failures never dump the raw body into human-facing text
 
     func testHttpFailureBoundsServerDetailButKeepsRawBody() {
@@ -258,6 +278,11 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertFalse(error.message.contains("\n"), "server detail must be single-line")
         XCTAssertLessThan(error.message.count, 260, "server detail is length-bounded")
         XCTAssertLessThan(error.message.count, hugeMultilineBody.count, "must not be the raw body")
+        // The credential echoed in the validation `input` never reaches any
+        // human-facing property (message / description / errorDescription).
+        XCTAssertFalse(error.message.contains("SUPER-SECRET-PW"))
+        XCTAssertFalse(error.description.contains("SUPER-SECRET-PW"))
+        XCTAssertFalse((error.errorDescription ?? "").contains("SUPER-SECRET-PW"))
         // description and errorDescription (what a SwiftUI alert renders) match.
         XCTAssertEqual(error.description, error.message)
         XCTAssertEqual(error.errorDescription, error.message)
@@ -273,6 +298,18 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertEqual(coded.statusCode, 402)
         XCTAssertEqual(coded.errorCode, "paid_plan_required")
         XCTAssertTrue(coded.message.contains("HTTP 402"))
+        // The allowlisted code and server message are surfaced for diagnostics.
+        XCTAssertTrue(coded.message.contains("paid_plan_required"))
+        XCTAssertTrue(coded.message.contains("API access requires a paid plan."))
+
+        // A FastAPI validation error (`detail` is an array whose entries echo
+        // the submitted `input`) surfaces a status-only message, never `input`.
+        let validation = ThalovantApiError.httpFailure(
+            statusCode: 422,
+            body: #"{"detail":[{"loc":["body","spec","password"],"msg":"weak","input":"LEAKED-PW"}]}"#
+        )
+        XCTAssertEqual(validation.message, "Thalovant API request failed with HTTP 422.")
+        XCTAssertFalse(validation.message.contains("LEAKED-PW"))
 
         // An empty body still yields a clean status-only message.
         let empty = ThalovantApiError.httpFailure(statusCode: 500, body: "")

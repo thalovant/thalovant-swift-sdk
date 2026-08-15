@@ -10,8 +10,8 @@
 - Security: `BootstrapIdentityResult.asJSON()` now redacts the `hub` and
   `client` resources by default, matching `identity`. The `client`
   (`POST /v1/clients` response) carries the provisioned credentials —
-  `initial_identify` access_key/password/crypto_key/mqtt.password, the
-  `initial_identify_token`, and the echoed `spec` apiKey/password/cryptoKey —
+  `initial_identify` access_key/password/crypto_key/mqtt.username/mqtt.password,
+  the `initial_identify_token`, and the echoed `spec` apiKey/password/cryptoKey —
   which previously appeared in the default serialization.
   `asJSON(includeSecrets: true)` is unchanged and still returns everything.
 - Security: the secret-bearing types (`ThalovantIdentity`,
@@ -26,8 +26,9 @@
 - Security: control API HTTP failures (including `POST /v1/clients`,
   `auth/token`, and `device/token`) no longer embed the raw response body in the
   error `message`/`errorDescription` that a UI alert renders — only the status
-  and a short, single-line server detail. The full body remains on
-  `ThalovantApiError.body` for `errorCode` decoding.
+  and an allowlisted server detail (the error `code` and the server's own
+  message), never a validation error's echoed request `input`. The full body
+  remains on `ThalovantApiError.body` for `errorCode` decoding.
 
 ## 0.1.3
 

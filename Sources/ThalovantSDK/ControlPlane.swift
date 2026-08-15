@@ -464,9 +464,14 @@ func appendParam(_ params: inout [(String, String)], _ name: String, _ value: St
 /// Field names that must never appear in the non-secrets serialization of the
 /// hub/client resources: the provisioned client credentials the control plane
 /// returns from `POST /v1/clients` (the `initial_identify` access key,
-/// password, crypto key, and MQTT password, the `initial_identify_token`, and
-/// the echoed `spec` apiKey/password/cryptoKey). Compared case-insensitively.
+/// password, crypto key, and MQTT username/password, the
+/// `initial_identify_token`, and the echoed `spec` apiKey/password/cryptoKey).
+/// The MQTT `username` is credential-equivalent — `MqttBrokerCredentials`
+/// itself gates it behind `includeSecrets` — so it is redacted here too, as the
+/// Go and Rust SDKs do. Compared case-insensitively.
 let redactedResultSecretKeys: Set<String> = [
+    "username",
+    "broker_username",
     "password",
     "access_key",
     "accesskey",
