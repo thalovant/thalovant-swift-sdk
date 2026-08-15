@@ -7,8 +7,8 @@ import XCTest
 /// (Exercising the socket itself needs a live hub, so it is out of scope.)
 final class WireProtocolTests: XCTestCase {
     func testAuthorizationIsBase64UserAgentColonAccessKey() {
-        let token = HiveWire.authorization(userAgent: "ThalovantSwiftSDK/0.1.2", accessKey: "access-1")
-        XCTAssertEqual(token, Data("ThalovantSwiftSDK/0.1.2:access-1".utf8).base64EncodedString())
+        let token = HiveWire.authorization(userAgent: "ThalovantSwiftSDK/0.1.3", accessKey: "access-1")
+        XCTAssertEqual(token, Data("ThalovantSwiftSDK/0.1.3:access-1".utf8).base64EncodedString())
     }
 
     func testAuthorizedEndpointAppendsQueryParameter() throws {
@@ -244,13 +244,13 @@ final class AskCorrelationTests: XCTestCase {
             "default_master": "https://hub.example.com",
             "data_plane_endpoints": .object(["wss": "wss://hub.example.com/ws"]),
         ])
-        let transport = HiveMindWSSTransport(identity: identity, userAgent: "ThalovantSwiftSDK/0.1.2")
+        let transport = HiveMindWSSTransport(identity: identity, userAgent: "ThalovantSwiftSDK/0.1.3")
         let url = try transport.endpointURL()
         XCTAssertEqual(url.host, "hub.example.com")
         XCTAssertEqual(url.path, "/ws")
         // The decoded query value must be the exact base64 credential.
         let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
         let value = components?.queryItems?.first { $0.name == "authorization" }?.value
-        XCTAssertEqual(value, Data("ThalovantSwiftSDK/0.1.2:access-1".utf8).base64EncodedString())
+        XCTAssertEqual(value, Data("ThalovantSwiftSDK/0.1.3:access-1".utf8).base64EncodedString())
     }
 }
