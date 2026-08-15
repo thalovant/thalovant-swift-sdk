@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.1.3
+
+- Hub provisioning on `ThalovantControlPlane`: `createHub` (sends a generated
+  `Idempotency-Key` unless you pass your own, so a retried create returns the
+  first hub), `updateHub` and `deleteHub` (both take a **required** `etag`
+  sent as `If-Match` — the API rejects a stale *or missing* value with HTTP
+  412 and changes nothing), `releaseHub`, `setHubRating`/`clearHubRating`, and
+  `getHubRuntimeCapabilities`.
+- Runtime groups: `listRuntimeGroups`, `getRuntimeGroup`, `createRuntimeGroup`,
+  `updateRuntimeGroup`, `getRuntimeGroupConfig`, `updateRuntimeGroupConfig`
+  (the API merges `config` rather than replacing it; `personas` is sent only
+  when provided), `releaseRuntimeGroup`, and `deleteRuntimeGroup` (HTTP 409 for
+  the workspace default group and for a group that still has hubs attached).
+  None of these routes use `If-Match` or an idempotency header.
+- Skills: `installRuntimeGroupSkill` (defaults to the `catalog` source;
+  `git` installs need a `sourceRef`), `uninstallRuntimeGroupSkill`,
+  `listMarketplaceSkills`, `listRuntimeGroupMarketplace`, and
+  `listRuntimeGroupInventory`.
+- `ReleaseOptions`, `MarketplaceSkillListOptions`, and
+  `InstallRuntimeGroupSkillOptions` option structs; every unset field is
+  omitted from the request rather than sent as null.
+- Scope and plan notes carried in the API docs: the provisioning writes need a
+  paid plan plus `hubs:write` (HTTP 402 on the free plan), while the rating
+  routes need `hubs:write` **without** a paid plan, the catalog reads need only
+  `hubs:read`, and the runtime inspection reads need `hubs:inspect`. Neither
+  `listRuntimeGroupInventory` nor `listRuntimeGroupMarketplace` fails when
+  nothing is reporting — they answer with an empty list and a pending `source`,
+  and `getHubRuntimeCapabilities` is the only route here that can answer HTTP
+  409 for a quiet runtime.
+- `createHub`/`updateHub` and `createRuntimeGroup`/`updateRuntimeGroup` accept
+  the camelCase spellings of the API's snake_case body fields
+  (`runtimeGroupId`, `capacityProfile`, `isLocked`, `ownerId`,
+  `cloneFromDefault`) and send them as snake_case.
+- README: a provisioning walkthrough (discover, create hub, create runtime
+  group, install skill, release) with the paid-plan and scope notes.
+
 ## 0.1.2
 
 - Documented the two token 429 responses in the README's Errors section: `token_rate_limited` (per-plan per-minute request rate, 60/min on the free plan) and `token_quota_exceeded` (per-plan daily/monthly call quota, with `quota`, `limit`, and `used`). Both carry a `Retry-After` header and a matching `retry_after_seconds`, which is authoritative; the SDK does not retry them, and `ThalovantApiError` exposes no response headers, so `retry_after_seconds` must be read from the body. `errorCode` decodes both codes out of the API's Problem+JSON `detail` object.

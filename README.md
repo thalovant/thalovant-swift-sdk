@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.2"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.3"),
 ]
 ```
 
@@ -128,6 +128,134 @@ for hub in page["data"]?.arrayValue ?? [] {
     print(hub["id"]?.stringValue ?? "", hub["title"]?.stringValue ?? "")
 }
 ```
+
+## Provision Hubs
+
+Hubs, runtime groups, and skills can be created and managed from code. These
+routes need a **paid plan** and a token with the **`hubs:write`** scope
+("Create and update your hubs" on the dashboard's API Tokens page). A free-plan
+token fails with HTTP 402 (`API access requires a paid plan.`), and a token
+without the scope fails with HTTP 403 (`Insufficient scopes`).
+
+```swift
+let api = ThalovantControlPlane(accessToken: ProcessInfo.processInfo.environment["THALOVANT_API_TOKEN"])
+
+// 1. Discover what is installable before provisioning anything.
+for skill in try await api.listMarketplaceSkills()["data"]?.arrayValue ?? [] {
+    print(skill["skill_id"]?.stringValue ?? "", skill["access_tier"]?.stringValue ?? "")
+}
+
+// 2. Create a runtime group to run the skills.
+let group = try await api.createRuntimeGroup(["name": "kiosks", "description": "Lobby kiosks"])
+let groupId = group["id"]?.stringValue ?? ""
+
+// 3. Create a hub attached to it.
+let hub = try await api.createHub([
+    "name": "joke-garden",
+    "runtimeGroupId": .string(groupId),
+    "spec": .object(["protocols": .object(["wss": .object(["enabled": .bool(true)])])]),
+])
+let hubId = hub["id"]?.stringValue ?? ""
+
+// 4. Install a skill from the marketplace catalog.
+_ = try await api.installRuntimeGroupSkill(groupId, skillId: "skill-weather")
+
+// 5. Release: roll the runtime and the hub onto a release channel.
+_ = try await api.releaseRuntimeGroup(groupId, ReleaseOptions(channel: "stable"))
+_ = try await api.releaseHub(hubId, ReleaseOptions(channel: "stable"))
+```
+
+Creating a hub is idempotent. `createHub` sends a generated `Idempotency-Key`
+header, so a retried call after a timeout returns the hub that was already
+created instead of making a second one. Pass your own `idempotencyKey:` to
+control the key.
+
+Updating and deleting a hub use optimistic locking, so `etag` is a required
+argument rather than an option. Pass the `etag` from the hub resource you read;
+the SDK sends it as `If-Match`, and the API rejects a stale **or missing** value
+with HTTP 412 without changing anything:
+
+```swift
+var current = try await api.getHub(hubId)
+let etag = current["etag"]?.stringValue ?? ""
+current = try await api.updateHub(hubId, ["active": false], etag: etag)
+try await api.deleteHub(hubId, etag: current["etag"]?.stringValue ?? etag)
+```
+
+Deleting a hub also deletes its clients and ACLs. Runtime groups have no
+`If-Match` requirement, but the API refuses to delete the workspace default
+group or a group that still has hubs attached (HTTP 409).
+
+Runtime configuration is merged, not replaced:
+
+```swift
+_ = try await api.updateRuntimeGroupConfig(groupId, config: ["lang": "en-us"])
+let config = try await api.getRuntimeGroupConfig(groupId)
+print(config["config"] ?? [:])
+```
+
+Rating a public hub is the exception to the paid-plan rule: `setHubRating` and
+`clearHubRating` need the `hubs:write` scope but **no** paid plan. Only public
+hubs can be rated, and owners cannot rate their own hubs (HTTP 400).
+
+Reading what a hub is actually running needs the `hubs:inspect` scope instead,
+and is likewise not paid-gated:
+
+```swift
+let capabilities = try await api.getHubRuntimeCapabilities(hubId)
+print(capabilities["counts"]?["total_intents"]?.intValue ?? 0)
+```
+
+## Discover Skills
+
+The marketplace catalog is readable with the **`hubs:read`** scope and, unlike
+the provisioning routes above, is **not paid-gated** — a free-plan token can
+browse the whole catalog before upgrading, and only the install needs a paid
+plan.
+
+```swift
+for skill in try await api.listMarketplaceSkills()["data"]?.arrayValue ?? [] {
+    print(skill["skill_id"]?.stringValue ?? "", skill["category"]?.stringValue ?? "")
+}
+```
+
+Each entry carries what an install needs (`skill_id`, `source_type`,
+`source_ref`, `config_schema`, `secret_schema`) next to presentation fields
+(`title`, `summary`, `tags`, `verified`). Admin tokens can additionally pass
+`ownerId` to read another tenant's catalog and `includeInactive: true` to see
+retired entries; both are silently ignored for non-admin callers rather than
+failing. `forceRefresh: true` re-syncs the global catalog from source first,
+which is slower.
+
+Two group-scoped reads need the **`hubs:inspect`** scope and are likewise not
+paid-gated. The first resolves the catalog against one runtime group, so each
+entry reports whether it is already desired, whether it was observed running,
+and whether the tenant plan allows installing it:
+
+```swift
+let view = try await api.listRuntimeGroupMarketplace(groupId)
+for entry in view["data"]?.arrayValue ?? [] where entry["installable"]?.boolValue == true {
+    if entry["active"]?.boolValue != true {
+        print("available:", entry["skill_id"]?.stringValue ?? "")
+    }
+}
+```
+
+The second answers what the group is actually running right now, rather than
+what could be installed:
+
+```swift
+let inventory = try await api.listRuntimeGroupInventory(groupId, refresh: true)
+print(inventory["source"]?.stringValue ?? "", inventory["data"]?.arrayValue?.count ?? 0)
+```
+
+Both answer from a cached inventory snapshot by default; pass
+`refreshInventory: true` or `refresh: true` to force a live read from the
+runtime operator. When nothing is reporting yet, `listRuntimeGroupInventory`
+returns an empty `data` list with a pending `source`
+(`ovos-runtime-operator-pending`) rather than failing —
+`getHubRuntimeCapabilities` is the one route here that can answer HTTP 409 in
+that case.
 
 ## Operations
 
