@@ -13,6 +13,16 @@ extension NSLock {
     }
 }
 
+/// Human-facing description of a transport error that never leaks the
+/// connection URL. `URLSession` surfaces failures as `NSError`s that embed the
+/// failing request URL under `NSErrorFailingURLKey`, and that URL carries
+/// `?authorization=base64("<user agent>:<access key>")` in its query — so
+/// `String(describing:)` / `\(error)` would expose the access key. The
+/// localized description carries only the human-readable failure reason.
+func safeTransportErrorMessage(_ error: Error) -> String {
+    error.localizedDescription
+}
+
 /// One-shot async gate: `wait` suspends until `open`/`fail`, or until the
 /// timeout elapses. On timeout it either throws `timeoutError` or, when no
 /// error is configured, returns normally.
@@ -298,12 +308,17 @@ public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
     }
 
     private func handleSocketFailure(_ error: Error) {
+        // `String(describing:)` / `\(error)` on a URLError embeds
+        // `NSErrorFailingURLKey`, and the connection URL carries
+        // `?authorization=base64("<user agent>:<access key>")` — so use only the
+        // scrubbed, localized description here and in the surfaced error.
+        let detail = safeTransportErrorMessage(error)
         lock.lock()
         connectedFlag = false
-        lastErrorMessage = String(describing: error)
+        lastErrorMessage = detail
         lock.unlock()
         let failure = (error as? ThalovantConnectionError)
-            ?? ThalovantConnectionError("HiveMind WSS connection failed: \(error)")
+            ?? ThalovantConnectionError("HiveMind WSS connection failed: \(detail)")
         openGate.fail(failure)
         handshakeGate.fail(failure)
     }

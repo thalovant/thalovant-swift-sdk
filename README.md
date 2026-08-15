@@ -65,8 +65,10 @@ do {
 `ThalovantControlPlane()` uses `https://api.thalovant.com` by default. Pass a
 different URL only for local development or a self-hosted control plane.
 
-Keep `result.identity` secret. It contains the client credentials used by the
-hub. Do not log `result.asJSON(includeSecrets: true)`.
+Keep `result.identity` secret — it carries the client credentials the hub
+trusts. `result.asJSON()` redacts the identity, hub, and client credentials, so
+only `result.asJSON(includeSecrets: true)` returns the real secrets; never log
+or persist that variant.
 
 ## Log In With MFA
 
@@ -274,9 +276,6 @@ Authenticated accounts can read the same overview used by the dashboard:
 let overview = try await api.analyticsOverview(AnalyticsOverviewOptions(range: "7d", hubId: "hub-id"))
 print(overview["totals"] ?? [:])
 ```
-
-Admins can pass `admin: true` (and optionally `ownerId`) to read the
-platform-wide `/v1/admin/analytics/overview` rollup instead.
 
 ## Durable Memory
 

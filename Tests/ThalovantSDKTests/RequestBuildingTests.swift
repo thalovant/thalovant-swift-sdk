@@ -296,12 +296,11 @@ final class RequestBuildingTests: XCTestCase {
         )
     }
 
-    func testAnalyticsOverviewWorkspaceIgnoresOwnerId() async throws {
+    func testAnalyticsOverviewBuildsWorkspaceQuery() async throws {
         api.accessToken = "token"
         _ = try await api.analyticsOverview(AnalyticsOverviewOptions(
             range: "7d",
             bucket: "1h",
-            ownerId: "owner-1",
             hubId: "hub-1",
             clientId: "client-1",
             country: "CA",
@@ -316,19 +315,12 @@ final class RequestBuildingTests: XCTestCase {
         let request = try lastRequest()
         XCTAssertTrue(request.url.absoluteString.hasPrefix("https://api.example.com/v1/analytics/overview?"))
         let query = try XCTUnwrap(request.url.query)
-        XCTAssertFalse(query.contains("owner_id"), "owner_id is admin-only")
+        // The admin-only owner_id filter was removed with the /v1/admin branch.
+        XCTAssertFalse(query.contains("owner_id"))
+        XCTAssertFalse(query.contains("admin"))
         XCTAssertEqual(
             request.url.absoluteString,
             "https://api.example.com/v1/analytics/overview?range=7d&bucket=1h&hub_id=hub-1&client_id=client-1&country=CA&message=msg&utterance=utt&intent=intent-1&time_start=2026-08-01T00:00:00Z&time_end=2026-08-08T00:00:00Z&weekday=2&hour=13"
-        )
-    }
-
-    func testAnalyticsOverviewAdminSwitchesEndpointAndSendsOwnerId() async throws {
-        api.accessToken = "token"
-        _ = try await api.analyticsOverview(AnalyticsOverviewOptions(admin: true, range: "24h", ownerId: "owner-1"))
-        XCTAssertEqual(
-            try lastRequest().url.absoluteString,
-            "https://api.example.com/v1/admin/analytics/overview?range=24h&owner_id=owner-1"
         )
     }
 

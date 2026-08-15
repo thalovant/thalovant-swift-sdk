@@ -1,5 +1,33 @@
 # Changelog
 
+## Unreleased
+
+- **BREAKING:** removed the admin analytics path. `AnalyticsOverviewOptions` no
+  longer has `admin` or `ownerId`, and `analyticsOverview` always calls
+  `GET /v1/analytics/overview`; the `GET /v1/admin/analytics/overview` branch
+  and its admin-only `owner_id` filter are gone. This SDK ships to non-admin
+  customers, so the admin surface is removed rather than exposed.
+- Security: `BootstrapIdentityResult.asJSON()` now redacts the `hub` and
+  `client` resources by default, matching `identity`. The `client`
+  (`POST /v1/clients` response) carries the provisioned credentials —
+  `initial_identify` access_key/password/crypto_key/mqtt.password, the
+  `initial_identify_token`, and the echoed `spec` apiKey/password/cryptoKey —
+  which previously appeared in the default serialization.
+  `asJSON(includeSecrets: true)` is unchanged and still returns everything.
+- Security: the secret-bearing types (`ThalovantIdentity`,
+  `MqttBrokerCredentials`, `DeviceAuthorizationGrant`, `DeviceLoginResult`) now
+  redact their credentials from string interpolation, `String(describing:)`,
+  `String(reflecting:)`, and `dump()`. The `asJSON(includeSecrets:)` serializer
+  and stored values are unchanged.
+- Security: the WSS transport's `lastError` and surfaced connection error no
+  longer interpolate the raw `URLError`, which embeds the connection URL and its
+  `?authorization=` access-key query; they use the localized description only.
+- Security: control API HTTP failures (including `POST /v1/clients`,
+  `auth/token`, and `device/token`) no longer embed the raw response body in the
+  error `message`/`errorDescription` that a UI alert renders — only the status
+  and a short, single-line server detail. The full body remains on
+  `ThalovantApiError.body` for `errorCode` decoding.
+
 ## 0.1.3
 
 - Hub provisioning on `ThalovantControlPlane`: `createHub` (sends a generated

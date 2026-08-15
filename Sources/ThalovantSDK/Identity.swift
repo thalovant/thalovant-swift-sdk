@@ -240,3 +240,61 @@ private func assertSecureIdentityFile(_ path: String) throws {
     }
     #endif
 }
+
+// MARK: - Redacted reflection
+//
+// These secret-bearing types are otherwise printed field-by-field by default
+// reflection (`"\(x)"`, `String(describing:)`, `String(reflecting:)`, `dump()`).
+// The string-convertible conformances redact the interpolation/printing paths;
+// `CustomReflectable` redacts `dump()`, which still walks stored properties
+// otherwise. None of this touches the `asJSON(includeSecrets:)` serializer,
+// which is the only path that intentionally exposes credentials.
+
+extension MqttBrokerCredentials: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "MqttBrokerCredentials(endpoint: \(endpoint), tls: \(tls), "
+            + "username: <redacted>, password: <redacted>)"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "endpoint": endpoint,
+                "tls": tls,
+                "username": "<redacted>",
+                "password": "<redacted>",
+            ],
+            displayStyle: .struct
+        )
+    }
+}
+
+extension ThalovantIdentity: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "ThalovantIdentity(siteId: \(siteId), defaultMaster: \(defaultMaster), "
+            + "defaultPort: \(defaultPort), accessKey: <redacted>, "
+            + "password: <redacted>, cryptoKey: <redacted>)"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "siteId": siteId,
+                "defaultMaster": defaultMaster,
+                "defaultPort": defaultPort,
+                "defaultPath": defaultPath,
+                "accessKey": "<redacted>",
+                "password": "<redacted>",
+                "cryptoKey": cryptoKey == nil ? "nil" : "<redacted>",
+                "mqtt": mqtt as Any,
+            ],
+            displayStyle: .struct
+        )
+    }
+}
