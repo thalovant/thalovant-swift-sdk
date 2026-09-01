@@ -192,6 +192,26 @@ final class AskCorrelationTests: XCTestCase {
         XCTAssertTrue(state.progressGate.isOpen)
     }
 
+    /// #22: OVOS renamed the no-intent-matched event to `ovos.intent.unmatched`
+    /// (legacy Mycroft: `complete_intent_failure`). Both must terminate the
+    /// ask() loop: they set `failureEvent` and open `progressGate`, so the reply
+    /// resolves promptly instead of waiting out the full timeout.
+    func testIntentFailureNamesTerminateTheAskLoop() {
+        for name in [ThalovantEvents.intentUnmatched, ThalovantEvents.intentFailure] {
+            let state = AskState()
+            let failure = ThalovantEvent(
+                name: name,
+                data: [:],
+                context: contextWithCorrelation([:], requestId: "r-1")
+            )
+            state.process(failure, requestId: "r-1")
+            let snapshot = state.snapshot()
+            XCTAssertEqual(snapshot.failureEvent?.name, name, "\(name) must be recorded as the failure event")
+            XCTAssertTrue(snapshot.handled, "\(name) must mark the request handled")
+            XCTAssertTrue(state.progressGate.isOpen, "\(name) must open the progress gate so ask() resolves promptly")
+        }
+    }
+
     func testRequestIdFallsBackToSessionAndData() {
         let inContext = ThalovantEvent(name: "speak", data: [:], context: ["request_id": "r-1"])
         XCTAssertEqual(inContext.requestId, "r-1")

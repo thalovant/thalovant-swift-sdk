@@ -283,11 +283,8 @@ final class AskState: @unchecked Sendable {
             handled = true
             lock.unlock()
             progressGate.open()
-        case ThalovantEvents.intentFailure:
-            lock.lock()
-            events.append(event)
-            lock.unlock()
-        case ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout:
+        case ThalovantEvents.intentFailure, ThalovantEvents.intentUnmatched,
+             ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout:
             lock.lock()
             events.append(event)
             failureEvent = event
