@@ -192,24 +192,44 @@ final class AskCorrelationTests: XCTestCase {
         XCTAssertTrue(state.progressGate.isOpen)
     }
 
-    /// #22: OVOS renamed the no-intent-matched event to `ovos.intent.unmatched`
-    /// (legacy Mycroft: `complete_intent_failure`). Both must terminate the
-    /// ask() loop: they set `failureEvent` and open `progressGate`, so the reply
-    /// resolves promptly instead of waiting out the full timeout.
-    func testIntentFailureNamesTerminateTheAskLoop() {
+    /// #22: an intent miss (`ovos.intent.unmatched`, legacy `complete_intent_failure`)
+    /// is a SOFT failure. It ends phase 1 promptly (opens progressGate) so ask()
+    /// does not wait the full timeout, but it must NOT set `failureEvent` — that
+    /// would skip the empty-reply grace period and defeat a fallback reply. It is
+    /// recorded as `softFailureEvent` and only surfaced if no reply arrives.
+    func testIntentMissIsASoftFailure() {
         for name in [ThalovantEvents.intentUnmatched, ThalovantEvents.intentFailure] {
             let state = AskState()
-            let failure = ThalovantEvent(
+            let miss = ThalovantEvent(
                 name: name,
                 data: [:],
                 context: contextWithCorrelation([:], requestId: "r-1")
             )
-            state.process(failure, requestId: "r-1")
+            state.process(miss, requestId: "r-1")
             let snapshot = state.snapshot()
-            XCTAssertEqual(snapshot.failureEvent?.name, name, "\(name) must be recorded as the failure event")
-            XCTAssertTrue(snapshot.handled, "\(name) must mark the request handled")
-            XCTAssertTrue(state.progressGate.isOpen, "\(name) must open the progress gate so ask() resolves promptly")
+            XCTAssertEqual(snapshot.softFailureEvent?.name, name, "\(name) must be a soft failure")
+            XCTAssertNil(snapshot.failureEvent, "\(name) must NOT be a hard failure (would skip the fallback wait)")
+            XCTAssertTrue(state.progressGate.isOpen, "\(name) must end phase 1 promptly")
+            XCTAssertFalse(state.replyGate.isOpen, "\(name) is not a reply, so the reply gate stays closed")
         }
+    }
+
+    /// A fallback reply arriving after an intent miss opens the reply gate, so the
+    /// turn is recovered: fragments win over the soft failure.
+    func testFallbackReplyRecoversAnIntentMiss() {
+        let state = AskState()
+        state.process(
+            ThalovantEvent(name: ThalovantEvents.intentUnmatched, data: [:], context: contextWithCorrelation([:], requestId: "r-1")),
+            requestId: "r-1"
+        )
+        state.process(
+            ThalovantEvent(name: "speak", data: ["utterance": "Here is a fallback answer."], context: contextWithCorrelation([:], requestId: "r-1")),
+            requestId: "r-1"
+        )
+        let snapshot = state.snapshot()
+        XCTAssertEqual(snapshot.fragments, ["Here is a fallback answer."])
+        XCTAssertTrue(state.replyGate.isOpen, "the fallback speak opens the reply gate")
+        XCTAssertNil(snapshot.failureEvent, "a recovered turn is not a hard failure")
     }
 
     func testRequestIdFallsBackToSessionAndData() {
