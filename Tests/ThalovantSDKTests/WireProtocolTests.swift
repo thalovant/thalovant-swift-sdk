@@ -214,6 +214,13 @@ final class AskCorrelationTests: XCTestCase {
         XCTAssertTrue(
             ThalovantEvent(name: ThalovantEvents.intentFailure).isFailure
         )
+        // OVOS renamed `complete_intent_failure` to `ovos.intent.unmatched`;
+        // both must be terminal so `ask` fails promptly rather than timing out (#22).
+        XCTAssertTrue(
+            ThalovantEvent(name: ThalovantEvents.intentUnmatched).isFailure
+        )
+        XCTAssertTrue(ThalovantEvent(name: "ovos.intent.unmatched").isFailure)
+        XCTAssertTrue(ThalovantEvent(name: "complete_intent_failure").isFailure)
         XCTAssertFalse(ThalovantEvent(name: "speak").isFailure)
     }
 

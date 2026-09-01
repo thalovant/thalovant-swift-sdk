@@ -5,12 +5,19 @@ public enum ThalovantEvents {
     public static let speak = "speak"
     public static let ovosUtteranceSpeak = "ovos.utterance.speak"
     public static let utteranceHandled = "ovos.utterance.handled"
+    /// Legacy Mycroft name for the no-intent-matched failure. Retained for
+    /// backwards compatibility with older hubs.
     public static let intentFailure = "complete_intent_failure"
+    /// Current OVOS name for the no-intent-matched failure. OVOS renamed the
+    /// bus event from `complete_intent_failure`; without this an unmatched
+    /// utterance is never terminal and `ask` waits out its full timeout (#22).
+    public static let intentUnmatched = "ovos.intent.unmatched"
     public static let policyDenied = "hive.policy.denied"
     public static let queryTimeout = "hive.query.timeout"
 
     public static let failureEvents: Set<String> = [
         intentFailure,
+        intentUnmatched,
         policyDenied,
         queryTimeout,
     ]
