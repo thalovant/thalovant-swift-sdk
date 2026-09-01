@@ -197,12 +197,15 @@ public final class ThalovantClient: @unchecked Sendable {
         }
 
         let final = state.snapshot()
-        if final.failureEvent == nil && final.fragments.isEmpty {
+        // A soft intent-miss becomes the surfaced failure only if no reply (not
+        // even a fallback) arrived; a reply means a fallback recovered the turn.
+        let effectiveFailure = final.failureEvent ?? (final.fragments.isEmpty ? final.softFailureEvent : nil)
+        if effectiveFailure == nil && final.fragments.isEmpty {
             throw ThalovantTimeoutError(
                 "Hub handled the utterance but did not emit a speak reply within \(Int(emptyReplyWait * 1000))ms."
             )
         }
-        if let failure = final.failureEvent, final.fragments.isEmpty {
+        if let failure = effectiveFailure, final.fragments.isEmpty {
             let message = failure.text.isEmpty ? "Hub reported \(failure.name)." : failure.text
             throw ThalovantRuntimeError(message)
         }
@@ -211,12 +214,12 @@ public final class ThalovantClient: @unchecked Sendable {
             text: replyText,
             displayText: stripSsml(replyText),
             utterances: final.fragments,
-            handled: final.failureEvent == nil,
-            ok: final.failureEvent == nil,
+            handled: effectiveFailure == nil,
+            ok: effectiveFailure == nil,
             sessionId: sessionId,
             requestId: requestId,
             events: final.events,
-            failureEvent: final.failureEvent
+            failureEvent: effectiveFailure
         )
     }
 
@@ -240,6 +243,7 @@ final class AskState: @unchecked Sendable {
         let fragments: [String]
         let events: [ThalovantEvent]
         let failureEvent: ThalovantEvent?
+        let softFailureEvent: ThalovantEvent?
         let handled: Bool
     }
 
@@ -247,6 +251,10 @@ final class AskState: @unchecked Sendable {
     private var fragments: [String] = []
     private var events: [ThalovantEvent] = []
     private var failureEvent: ThalovantEvent?
+    // An intent miss (ovos.intent.unmatched / complete_intent_failure) is a SOFT
+    // failure: it ends phase 1 promptly but still allows the empty-reply grace
+    // period for a fallback skill to answer. Only surfaced if no reply arrives.
+    private var softFailureEvent: ThalovantEvent?
     private var handled = false
 
     /// Opens when the utterance is handled or the first fragment arrives.
@@ -257,7 +265,7 @@ final class AskState: @unchecked Sendable {
     func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        return Snapshot(fragments: fragments, events: events, failureEvent: failureEvent, handled: handled)
+        return Snapshot(fragments: fragments, events: events, failureEvent: failureEvent, softFailureEvent: softFailureEvent, handled: handled)
     }
 
     /// Correlation rule (mirrors the Node SDK): only events carrying the
@@ -283,8 +291,18 @@ final class AskState: @unchecked Sendable {
             handled = true
             lock.unlock()
             progressGate.open()
-        case ThalovantEvents.intentFailure, ThalovantEvents.intentUnmatched,
-             ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout:
+        case ThalovantEvents.intentFailure, ThalovantEvents.intentUnmatched:
+            // Soft failure: end phase 1 so we do not wait the full timeout, but
+            // leave failureEvent unset so the empty-reply grace period still runs
+            // and a fallback reply can take over.
+            lock.lock()
+            events.append(event)
+            softFailureEvent = event
+            handled = true
+            lock.unlock()
+            progressGate.open()
+        case ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout:
+            // Hard failure: terminal, no fallback wait.
             lock.lock()
             events.append(event)
             failureEvent = event
