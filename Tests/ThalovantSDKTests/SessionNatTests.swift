@@ -1,33 +1,37 @@
 import XCTest
 @testable import ThalovantSDK
 
-/// A hub rewrites a declared session id; replies must still be recognised.
+/// A hub substitutes its own session id; the request id is what correlates.
 ///
-/// hivemind-core derives a Layer-1 identity for every client-declared session
-/// as `{conn_nonce}:{declared}` (HIVEMIND-BRIDGE-1 §4). Comparing the returned
-/// id to the sent one for equality rejected every reply: `ask()` timed out
-/// while the hub had already answered. Reproduced against a live hub 2026-09-03.
+/// Observed against a live hub on 2026-09-03: a client declaring
+/// `session_id="observe-me"` gets every reply back carrying the hub's own
+/// uuid. Comparing session ids rejected replies the request id had already
+/// identified as ours, so `ask()` timed out while the hub had answered.
+///
+/// The filter under test lives inline in Client.addBusListener; this pins the
+/// decision table it implements.
 final class SessionNatTests: XCTestCase {
-    func testNatRewrittenReplyIsRecognised() {
-        XCTAssertTrue(sessionIdsMatch(expected: "my-session", actual: "d41d8cd98f00b204:my-session"))
+    private func accepts(askedSession: String?, askedRequest: String?,
+                         replySession: String?, replyRequest: String?) -> Bool {
+        if let askedRequest, let replyRequest { return replyRequest == askedRequest }
+        if let askedSession, let replySession { return replySession == askedSession }
+        return true
     }
 
-    func testUnrewrittenReplyIsStillRecognised() {
-        XCTAssertTrue(sessionIdsMatch(expected: "my-session", actual: "my-session"))
+    func testMatchingRequestIdWinsOverSubstitutedSession() {
+        XCTAssertTrue(accepts(askedSession: "observe-me", askedRequest: "req-1",
+                              replySession: "71048b7f-e7b0", replyRequest: "req-1"))
     }
 
-    func testReplyForADifferentSessionIsRejected() {
-        XCTAssertFalse(sessionIdsMatch(expected: "my-session", actual: "nonce:other"))
-        XCTAssertFalse(sessionIdsMatch(expected: "my-session", actual: "other"))
+    func testWrongRequestIdRejectedEvenIfSessionsAgree() {
+        XCTAssertFalse(accepts(askedSession: "same", askedRequest: "req-1",
+                               replySession: "same", replyRequest: "req-2"))
     }
 
-    func testOnlyTheDeclaredHalfAfterTheFirstColonMatches() {
-        // a bare hasSuffix would wrongly accept these
-        XCTAssertFalse(sessionIdsMatch(expected: "abc", actual: "nonce:xabc"))
-        XCTAssertFalse(sessionIdsMatch(expected: "abc", actual: "nonce:abc:def"))
-        // a declared id containing a colon still matches as a whole
-        XCTAssertTrue(sessionIdsMatch(expected: "a:b", actual: "nonce:a:b"))
-        XCTAssertFalse(sessionIdsMatch(expected: "abc", actual: ""))
-        XCTAssertFalse(sessionIdsMatch(expected: "abc", actual: "nonce:"))
+    func testWithoutRequestIdsTheSessionStillDecides() {
+        XCTAssertTrue(accepts(askedSession: "s1", askedRequest: nil,
+                              replySession: "s1", replyRequest: nil))
+        XCTAssertFalse(accepts(askedSession: "s1", askedRequest: nil,
+                               replySession: "s2", replyRequest: nil))
     }
 }

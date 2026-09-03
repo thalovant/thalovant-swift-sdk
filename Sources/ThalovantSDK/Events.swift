@@ -210,20 +210,3 @@ private func coerceIdentifier(_ value: JSONValue) -> String? {
     }
 }
 
-/// True when a reply's session id is the one we asked for.
-///
-/// A hub rewrites a client-declared session id before the orchestrator sees it:
-/// hivemind-core derives a Layer-1 identity as `{conn_nonce}:{declared}` so two
-/// clients cannot collide on the same declared name (HIVEMIND-BRIDGE-1 §4), and
-/// only admin connections are exempt. Replies can therefore carry either form,
-/// and comparing for equality rejected every one of them — `ask()` timed out
-/// while the hub had already answered and emitted `ovos.utterance.handled`.
-///
-/// Matching the part after the first `:` mirrors what the hub does on the way
-/// out. Deliberately not a bare `hasSuffix`: a declared id of "b" must not
-/// match a reply for "a:xb".
-public func sessionIdsMatch(expected: String, actual: String) -> Bool {
-    if actual == expected { return true }
-    guard let separator = actual.firstIndex(of: ":") else { return false }
-    return String(actual[actual.index(after: separator)...]) == expected
-}

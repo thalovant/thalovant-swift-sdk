@@ -95,9 +95,14 @@ public final class ThalovantClient: @unchecked Sendable {
     ) -> ThalovantSubscription {
         let id = transport.addBusHandler { payload in
             guard let event = ThalovantEvent.fromBusPayload(payload), event.name == eventName else { return }
-            if let sessionId, let eventSession = event.sessionId,
-               !sessionIdsMatch(expected: sessionId, actual: eventSession) { return }
-            if let requestId, let eventRequest = event.requestId, eventRequest != requestId { return }
+            // The request id decides when both sides carry one: a hub does not
+            // echo a client-declared session id, it substitutes its own
+            // (observed live on 2026-09-03), so comparing session ids rejected
+            // replies the request id had already identified as ours.
+            if let requestId, let eventRequest = event.requestId {
+                if eventRequest != requestId { return }
+            } else if let sessionId, let eventSession = event.sessionId,
+                      eventSession != sessionId { return }
             handler(event)
         }
         return ThalovantSubscription { [transport] in
