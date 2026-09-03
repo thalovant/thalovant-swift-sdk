@@ -95,7 +95,8 @@ public final class ThalovantClient: @unchecked Sendable {
     ) -> ThalovantSubscription {
         let id = transport.addBusHandler { payload in
             guard let event = ThalovantEvent.fromBusPayload(payload), event.name == eventName else { return }
-            if let sessionId, let eventSession = event.sessionId, eventSession != sessionId { return }
+            if let sessionId, let eventSession = event.sessionId,
+               !sessionIdsMatch(expected: sessionId, actual: eventSession) { return }
             if let requestId, let eventRequest = event.requestId, eventRequest != requestId { return }
             handler(event)
         }
