@@ -379,6 +379,11 @@ print(definitions.first?.samples ?? [])
 Every query is correlated by request id and answered within
 `options.timeout` seconds (5 by default); a describe the hub never answers
 leaves that one intent without sentences instead of failing the inventory.
+Describes go out in batches of at most `defaultDescribeBatchSize` (32), each
+batch its own window with its own deadline, so a large hub never has more
+replies in flight than a bounded queue can hold. Language tags are sent as you
+spell them — the hub folds the tag it receives, so `fr_FR` finds what `fr-fr`
+registered.
 
 ## Protocol Selection
 

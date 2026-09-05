@@ -71,6 +71,8 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     private var handlers: [UUID: (JSONObject) -> Void] = [:]
     private var connectedFlag = false
     private var emittedLog: [Emitted] = []
+    private var describesInWindow = 0
+    private var closedWindows: [Int] = []
 
     init(
         registered: [String: [Registered]] = registrations,
@@ -99,6 +101,13 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     var connected: Bool { lock.locked { connectedFlag } }
     var emitted: [Emitted] { lock.locked { emittedLog } }
 
+    /// How many describes went out inside each subscription window, in order.
+    /// A window closes when the client drops its handlers, so this is the
+    /// number of requests that were in flight together.
+    var describeWindows: [Int] {
+        lock.locked { describesInWindow > 0 ? closedWindows + [describesInWindow] : closedWindows }
+    }
+
     func clearEmitted() {
         lock.locked { emittedLog = [] }
     }
@@ -120,7 +129,15 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     }
 
     func removeBusHandler(_ id: UUID) {
-        lock.locked { _ = handlers.removeValue(forKey: id) }
+        lock.locked {
+            handlers.removeValue(forKey: id)
+            // The client drops both handlers at the end of a window; the last
+            // one out closes it.
+            if handlers.isEmpty, describesInWindow > 0 {
+                closedWindows.append(describesInWindow)
+                describesInWindow = 0
+            }
+        }
     }
 
     // MARK: the hub
@@ -149,7 +166,12 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     }
 
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws {
-        lock.locked { emittedLog.append(Emitted(type: type, data: data, context: context)) }
+        lock.locked {
+            emittedLog.append(Emitted(type: type, data: data, context: context))
+            if type == ThalovantEvents.intentDescribe {
+                describesInWindow += 1
+            }
+        }
         if refuse.contains(type) {
             deliver(ThalovantEvents.policyDenied, data: [
                 "denied_type": .string(type),
@@ -162,7 +184,11 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         if silent.contains(type) {
             return
         }
-        let lang = data["lang"]?.stringValue ?? ""
+        // ovos-core's manifest folds the tag it receives (`standardize_lang`
+        // on both store and query), so `fr_FR` finds what `fr-fr` registered.
+        // The fake must not be stricter than the hub.
+        let sent = data["lang"]?.stringValue ?? ""
+        let lang = normalizedLanguageTag(sent)
         switch type {
         case ThalovantEvents.intentList:
             if let listRows {
@@ -620,6 +646,83 @@ final class IntentInventoryTests: XCTestCase {
         XCTAssertEqual(reversed.intents.count, 1)
         XCTAssertEqual(reversed.intents[0].phrasesFor("en-us"), ["what is the weather"])
         XCTAssertEqual(reversed.intents[0].engine, "adapt", "the first row names the engine")
+    }
+
+    func testDescribesGoOutInBoundedBatches() async throws {
+        // A hub with many intents must not put more requests in flight than a
+        // bounded reply queue can hold: 69 intents is 69 describes, and every
+        // reply arrives twice. They go out 32 at a time, each batch its own
+        // subscription window.
+        let many = (0..<69).map { n in
+            Registered(skillId: weather, intentName: String(format: "intent.%03d", n), samples: ["sentence \(n)"])
+        }
+        let hub = FakeHubTransport(registered: ["en-us": many])
+        let inventory = try await client(hub).intents(languages: ["en-us"])
+
+        XCTAssertEqual(defaultDescribeBatchSize, 32)
+        XCTAssertEqual(hub.describeWindows, [32, 32, 5], "69 describes go out in three batches of at most 32")
+        XCTAssertEqual(inventory.intents.count, 69)
+        XCTAssertTrue(inventory.hasPhrases)
+        for intent in inventory.intents {
+            XCTAssertEqual(intent.phrasesFor("en-us").count, 1, "\(intent.id) came back without its sentence")
+        }
+        XCTAssertEqual(hub.emitted.filter { $0.type == ThalovantEvents.intentDescribe }.count, 69, "each intent asked once")
+    }
+
+    func testABatchSizeOfZeroSendsThemAllAtOnce() async throws {
+        let many = (0..<69).map { n in
+            Registered(skillId: weather, intentName: String(format: "intent.%03d", n), samples: ["sentence \(n)"])
+        }
+        let hub = FakeHubTransport(registered: ["en-us": many])
+        let sdk = try client(hub)
+        let wanted = many.map { IntentRequestKey(skillId: $0.skillId, intentName: $0.intentName, lang: "en-us") }
+        let described = try await sdk.describeIntentBatch(wanted, timeout: 5, batchSize: 0)
+        XCTAssertEqual(described.count, 69)
+        XCTAssertEqual(hub.describeWindows, [69], "batchSize 0 restores one window for everything")
+    }
+
+    func testASilentHubFailsAfterOneBatchNotAfterEveryRequest() async throws {
+        // The deadline covers each batch, so nothing waits on 69 open requests.
+        let many = (0..<69).map { n in
+            Registered(skillId: weather, intentName: String(format: "intent.%03d", n), samples: ["sentence \(n)"])
+        }
+        let hub = FakeHubTransport(registered: ["en-us": many], silent: [ThalovantEvents.intentDescribe])
+        do {
+            _ = try await client(hub).intents(languages: ["en-us"], options: IntentInventoryOptions(timeout: 0.2))
+            XCTFail("expected ThalovantTimeoutError")
+        } catch is ThalovantTimeoutError {
+            XCTAssertEqual(hub.describeWindows, [32], "it gave up after the first batch")
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testTheCallersLanguageSpellingIsSentAsGiven() async throws {
+        // The runtime folds the tag it receives, so the SDK sends what the
+        // caller wrote rather than a normalised spelling — as the reference
+        // does. The fake folds like ovos-core's manifest.
+        let hub = FakeHubTransport()
+        let inventory = try await client(hub).intents(languages: ["fr_FR"])
+        XCTAssertEqual(inventory.languages, ["fr_FR"], "the caller's spelling is what the inventory reports")
+        XCTAssertEqual(
+            hub.emitted.filter { $0.type == ThalovantEvents.intentList }.map { $0.data["lang"]?.stringValue },
+            ["fr_FR"],
+            "sent verbatim, not normalised"
+        )
+        XCTAssertEqual(
+            hub.emitted.first { $0.type == ThalovantEvents.intentDescribe }?.data["lang"]?.stringValue,
+            "fr_FR"
+        )
+        let weatherIntent = try XCTUnwrap(inventory.intents.first { $0.skillId == weather })
+        XCTAssertEqual(weatherIntent.phrasesFor("fr-fr").first, "quel temps fait-il", "and the hub answered it")
+        XCTAssertEqual(weatherIntent.phrasesFor("fr_FR").first, "quel temps fait-il")
+
+        let rows = try await client(hub).listIntents(lang: "FR-fr")
+        XCTAssertEqual(rows.count, 1)
+        let definitions = try await client(hub).describeIntent(
+            skillId: weather, intentName: "current.weather", lang: "FR-fr"
+        )
+        XCTAssertEqual(definitions.first?.samples.first, "quel temps fait-il")
     }
 
     func testTheFallbackKeepsTheFirstEngineThatNamesAnIntent() async throws {

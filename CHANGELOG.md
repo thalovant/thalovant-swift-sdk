@@ -44,6 +44,17 @@
   carries none, never erases them — and the first row names its `engine`; on
   the names-only fallback the first engine to name an intent decides its
   `engine` (adapt is asked before padatious).
+- Describes go out in batches of at most 32 (`defaultDescribeBatchSize`), each
+  batch its own subscription window, instead of putting every request in flight
+  at once. A hub with 69 intents in two languages is 138 requests and, with
+  every reply delivered twice, 276 inbound events; an SDK whose reply queue is
+  bounded drops replies past its capacity and returns an inventory missing
+  sentences. The per-batch deadline also means a hub that answers nothing fails
+  after one batch rather than holding every request open.
+- Language tags are sent as the caller spelled them: the hub runtime folds the
+  tag it receives (`standardize_lang` on both store and query in ovos-core's
+  manifest), so `fr_FR` matches what `fr-fr` registered, and the SDK does not
+  rewrite what the caller asked for.
 - `ThalovantEvents` gains the eight intent-manifest and engine-manifest event
   names.
 - Internal: `ThalovantClient` drives its transport through the

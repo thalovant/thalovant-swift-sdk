@@ -30,6 +30,13 @@ import Foundation
 /// The language the intent queries ask about when the caller names none.
 let defaultIntentLanguage = "en-us"
 
+/// How many describes may be in flight at once. A hub with 69 intents in two
+/// languages is 138 requests and, with every reply delivered twice, 276 inbound
+/// events; an SDK whose reply queue is bounded drops replies past its capacity
+/// and the inventory comes back missing sentences. Batching also spares the hub
+/// a burst it never asked for.
+public let defaultDescribeBatchSize = 32
+
 // MARK: - Options
 
 /// Options for `ThalovantClient.intents`.
@@ -678,19 +685,41 @@ extension ThalovantClient {
         return intentDefinitions(from: event)
     }
 
-    /// Describes many registrations with the requests in flight together.
+    /// Describes many registrations, at most `batchSize` of them in flight.
     ///
-    /// One subscription, one request id per registration, replies matched by
-    /// that id -- or, for a hub that does not echo it, by the definition's own
-    /// `skill_id`/`intent_name`/`lang` -- and repeats dropped. The deadline
-    /// covers the whole batch; a registration the hub did not describe in time
-    /// is simply absent from the result. No answer at all is a timeout.
+    /// One subscription window per batch, one request id per registration,
+    /// replies matched by that id -- or, for a hub that does not echo it, by
+    /// the definition's own `skill_id`/`intent_name`/`lang` -- and repeats
+    /// dropped. The deadline covers each batch, so a hub that answers nothing
+    /// fails after one batch rather than holding every request open.
+    /// `batchSize: 0` sends them all at once.
     func describeIntentBatch(
         _ wanted: [IntentRequestKey],
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        batchSize: Int = defaultDescribeBatchSize
     ) async throws -> [IntentRequestKey: [IntentDefinition]] {
         let unique = orderedUnique(wanted)
         guard !unique.isEmpty else { return [:] }
+        guard batchSize > 0, unique.count > batchSize else {
+            return try await describeIntentWindow(unique, timeout: timeout)
+        }
+        var found: [IntentRequestKey: [IntentDefinition]] = [:]
+        for start in stride(from: 0, to: unique.count, by: batchSize) {
+            let batch = Array(unique[start..<min(start + batchSize, unique.count)])
+            for (key, definitions) in try await describeIntentWindow(batch, timeout: timeout) {
+                found[key] = definitions
+            }
+        }
+        return found
+    }
+
+    /// One batch: subscribe, send every request, wait for the replies, drop the
+    /// subscription. A registration the hub did not describe within `timeout`
+    /// is simply absent from the result; no answer at all is a timeout.
+    private func describeIntentWindow(
+        _ unique: [IntentRequestKey],
+        timeout: TimeInterval
+    ) async throws -> [IntentRequestKey: [IntentDefinition]] {
         var requests: [(id: String, key: IntentRequestKey)] = []
         var keysByRequest: [String: IntentRequestKey] = [:]
         for key in unique {
