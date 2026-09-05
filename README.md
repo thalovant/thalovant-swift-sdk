@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.4"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.8"),
 ]
 ```
 
@@ -326,6 +326,66 @@ let subscription = client.on("speak") { event in
 subscription.close()
 ```
 
+## What Can I Ask?
+
+A connected client can ask its hub what it can be asked, over its own session,
+with no control-plane token:
+
+```swift
+let client = try ThalovantClient.fromIdentityFile("/path/to/identity.json")
+let inventory = try await client.intents(languages: ["en-us", "fr-fr"])
+for skill in inventory.skills {
+    for intent in skill.intents {
+        print(intent.id, intent.engine, intent.examples(lang: "fr-fr"))
+    }
+}
+await client.close()
+```
+
+Each intent carries the sentences a person says to reach it, per language, as
+the skill wrote them (`{location}` marks a slot): `phrasesFor("fr-FR")` finds
+them whatever the case or separator of the tag, and `examples(lang:limit:)`
+picks a couple worth showing, whole sentences before ones with a slot. The
+languages asked for are folded the same way — `en-us`, `en-US` and `en_us` are
+one language, asked once. The inventory is grouped by skill, sorted, and
+`Codable` — `asJSON()` or a `JSONEncoder` produce the same snake_case document
+the other SDKs write.
+
+The hub's connection must be allowed to publish `ovos.intent.list` and
+`ovos.intent.describe` (connections the control plane provisions for SDK
+clients are, by default). A hub that refuses throws
+`ThalovantPolicyDeniedError` naming the type at once — `deniedType`, `code`,
+`reason`, and the `allowed` list — rather than waiting out the deadline; with
+the default `IntentInventoryOptions(fallback: true)` a hub allowed for only the
+engines' own manifests answers with intent names alone, marked
+`source: .engineManifests` and `denied: ["ovos.intent.list"]`, so check
+`inventory.hasPhrases` before promising sentences.
+
+The two queries underneath are exposed as well: `listIntents(lang:options:)`
+returns the manifest rows (`IntentRegistration`, one per registration, with
+`engine` mapping the runtime's `template`/`keyword` methods to `padatious`/
+`adapt`), and `describeIntent(skillId:intentName:lang:options:)` returns the
+registrations behind one intent (`IntentDefinition`, with its `samples`), empty
+for one the hub does not know:
+
+```swift
+let rows = try await client.listIntents(lang: "en-us")
+let definitions = try await client.describeIntent(
+    skillId: rows[0].skillId, intentName: rows[0].intentName, lang: "en-us"
+)
+print(definitions.first?.samples ?? [])
+```
+
+Every query is correlated by request id and answered within
+`options.timeout` seconds (5 by default); a describe the hub never answers
+leaves that one intent without sentences instead of failing the inventory.
+Describes go out in batches of at most `defaultDescribeBatchSize` (32), each
+batch its own window with its own deadline, so a large hub never has more
+replies in flight than a bounded queue can hold; a window the hub does not
+answer costs those intents their sentences, not the whole inventory. Language tags are sent as you
+spell them — the hub folds the tag it receives, so `fr_FR` finds what `fr-fr`
+registered.
+
 ## Protocol Selection
 
 Hubs advertise enabled protocols (`spec.protocols.{wss,http,mqtt}.enabled`,
@@ -350,6 +410,10 @@ let selected = selectDataPlaneEndpoint(
   the user code `.expired` before approval.
 - `ThalovantConnectionError` / `ThalovantTimeoutError` /
   `ThalovantRuntimeError` — data-plane connection, deadline, and hub failures.
+- `ThalovantPolicyDeniedError` — the hub refused a message type this
+  connection may not publish (`hive.policy.denied`), with `deniedType`,
+  `code`, `reason`, and the `allowed` list; thrown at once by the intent
+  inventory queries instead of a timeout.
 - `ThalovantIdentityError` — malformed or insecure identity documents.
 - `ThalovantUnsupportedProtocolError` — the protocol is disabled, missing an
   endpoint, or not supported by this SDK.
@@ -381,8 +445,11 @@ swift test
 ```
 
 The test suite is fully offline: HTTP requests are intercepted with a
-`URLProtocol` stub and the WSS wire protocol is tested through its pure
-encode/decode functions.
+`URLProtocol` stub, the WSS wire protocol is tested through its pure
+encode/decode functions, and the client's request/reply paths (the intent
+inventory) run against an in-memory hub that reproduces the observed wire
+behaviour — replies delivered twice, `hive.policy.denied` refusals, a hub that
+does not echo the request id.
 
 ## License
 

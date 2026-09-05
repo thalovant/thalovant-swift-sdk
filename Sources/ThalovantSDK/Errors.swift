@@ -113,6 +113,52 @@ public struct ThalovantRuntimeError: Error, CustomStringConvertible, LocalizedEr
     public var errorDescription: String? { message }
 }
 
+/// The hub refused a message type this connection may not publish.
+///
+/// The hub answers `hive.policy.denied` at once, naming the type and the list
+/// it does allow; surfacing that here saves the caller a timeout and tells the
+/// operator exactly what to add to the connection's allow-list. Thrown by the
+/// intent inventory queries (`ThalovantClient.intents`, `listIntents`,
+/// `describeIntent`); it is the policy-shaped sibling of
+/// `ThalovantRuntimeError`, the SDK's errors being distinct value types
+/// rather than a class hierarchy.
+public struct ThalovantPolicyDeniedError: Error, Equatable, CustomStringConvertible, LocalizedError {
+    /// The message type the hub refused, for example `ovos.intent.list`.
+    public let deniedType: String
+    /// The hub's machine-readable code, `acl_disallowed_type` for an ACL refusal.
+    public let code: String
+    /// The hub's human-readable reason, when it gave one.
+    public let reason: String
+    /// The message types the connection is allowed to publish, when the hub listed them.
+    public let allowed: [String]
+    public let message: String
+
+    public init(deniedType: String, code: String = "", reason: String = "", allowed: [String] = []) {
+        self.deniedType = deniedType
+        self.code = code
+        self.reason = reason
+        self.allowed = allowed
+        let detail = !reason.isEmpty ? reason : (!code.isEmpty ? code : "refused by the hub's policy")
+        self.message = "The hub refused '\(deniedType)': \(detail). Allow this connection to "
+            + "publish '\(deniedType)' in the dashboard's connection settings."
+    }
+
+    /// Builds the error from a `hive.policy.denied` event:
+    /// `{denied_type, code, reason, data: {msg_type, allowed}}`.
+    public static func fromEvent(_ event: ThalovantEvent) -> ThalovantPolicyDeniedError {
+        let allowed = event.data["data"]?["allowed"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+        return ThalovantPolicyDeniedError(
+            deniedType: event.data["denied_type"]?.stringValue ?? "",
+            code: event.data["code"]?.stringValue ?? "",
+            reason: event.data["reason"]?.stringValue ?? "",
+            allowed: allowed
+        )
+    }
+
+    public var description: String { message }
+    public var errorDescription: String? { message }
+}
+
 /// The hub did not respond within the allotted time.
 public struct ThalovantTimeoutError: Error, CustomStringConvertible, LocalizedError {
     public let message: String

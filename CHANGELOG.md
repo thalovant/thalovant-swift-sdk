@@ -1,5 +1,73 @@
 # Changelog
 
+## 0.1.8
+
+- Add the intent inventory: `ThalovantClient.intents(languages:options:)` reads
+  the hub runtime's intent manifest (OVOS-INTENT-4 §10) over the client's own
+  session and returns a `HubIntentInventory` — every intent each skill
+  registered, per language, with the sentences a person says to reach it as
+  the skill's locale files wrote them, `{slot}` placeholders included. No
+  control-plane credential is involved. `listIntents(lang:options:)` and
+  `describeIntent(skillId:intentName:lang:options:)` expose the two underlying
+  queries (`ovos.intent.list` / `ovos.intent.describe`) as `IntentRegistration`
+  rows and `IntentDefinition`s; `IntentInventoryOptions`, `ListIntentsOptions`,
+  and `DescribeIntentOptions` carry the deadline and switches.
+- `HubIntentInventory`, `HubSkillIntents`, `HubIntent`, `IntentRegistration`,
+  and `IntentDefinition` are `Codable` with the snake_case keys the sibling
+  SDKs serialize (`asJSON()` gives the `JSONObject` form), and `HubIntentSource`
+  names how an inventory was read (`intent-manifest` or `engine-manifests`).
+  `HubIntent.phrasesFor(_:)` matches language tags case-insensitively with `_`
+  and `-` folded (`sameLanguage`), and `examples(lang:limit:)` prefers whole
+  sentences over ones with a slot, shorter first.
+- Queries are correlated by `context.request_id` like every other request, and
+  a reply delivered more than once is taken once. Describes are sent together
+  and matched by request id, or by the definition's own
+  `skill_id`/`intent_name`/`lang` for a hub that does not echo the id. A
+  describe the hub never answers leaves that intent without sentences rather
+  than failing the inventory.
+- Add `ThalovantPolicyDeniedError`, thrown at once from the hub's
+  `hive.policy.denied` with `deniedType`, `code`, `reason` and the `allowed`
+  list, instead of waiting for a timeout. `IntentInventoryOptions.fallback`,
+  on by default, falls back to the engines' own manifests
+  (`intent.service.adapt.manifest.get` / `intent.service.padatious.manifest.get`)
+  when `ovos.intent.list` is refused; the result then carries names only,
+  `source: .engineManifests`, and `denied: ["ovos.intent.list"]`.
+- A runtime that attaches each row's `definition` to `ovos.intent.list` when
+  asked with `include_definitions` is used as such; one that does not is
+  described row by row.
+- Reads the same as the reference (Python SDK 0.4.37) on the four points the
+  ports settled: `hasPhrases` is true only when at least one intent carries at
+  least one sentence; `intents(languages:)` trims each tag and asks once per
+  language whatever its spellings (`en-us`, `en-US`, `en_us`), keeping the
+  first spelling in `languages`; an intent registered under both engines in
+  one language keeps the template row's sentences — the keyword row, which
+  carries none, never erases them — and the first row names its `engine`; on
+  the names-only fallback the first engine to name an intent decides its
+  `engine` (adapt is asked before padatious).
+- Describes go out in batches of at most 32 (`defaultDescribeBatchSize`), each
+  batch its own subscription window, instead of putting every request in flight
+  at once. A hub with 69 intents in two languages is 138 requests and, with
+  every reply delivered twice, 276 inbound events; an SDK whose reply queue is
+  bounded drops replies past its capacity and returns an inventory missing
+  sentences. The per-batch deadline also means a hub that answers nothing fails
+  after one batch rather than holding every request open. A window that answered
+  nothing contributes nothing rather than discarding what the earlier windows
+  found — windows are contiguous slices, so a skill that stops answering can own
+  a whole window — and the call fails only when no window produced anything, so
+  a hub silent from the start still fails at the first window.
+- Language tags are sent as the caller spelled them: the hub runtime folds the
+  tag it receives (`standardize_lang` on both store and query in ovos-core's
+  manifest), so `fr_FR` matches what `fr-fr` registered, and the SDK does not
+  rewrite what the caller asked for.
+- `ThalovantEvents` gains the eight intent-manifest and engine-manifest event
+  names.
+- Internal: `ThalovantClient` drives its transport through the
+  `HiveMindBusTransport` seam so the test suite can run the request/reply paths
+  against an in-memory hub; `HiveMindWSSTransport` is unchanged. The release
+  literals that had drifted (`README.md` install snippet and
+  `WireProtocolTests` at 0.1.4 while `VERSION` was 0.1.7) are realigned, which
+  the auto-release bump requires.
+
 ## 0.1.4
 
 - Automated patch release of the unreleased changes on `main` since v0.1.3.
