@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.1.9
+
+- `listIntents(lang:options:)` throws `ThalovantRuntimeError` when the hub
+  answers `ovos.intent.list` with `ok: false`, instead of reading the
+  missing `intents` key as an empty list. A refused listing is not an empty
+  hub, and reporting it as no intents showed a person a device that can do
+  nothing; the engine-manifest fallback stays out of it, since a failed
+  query is not a policy refusal.
+  `describeIntent(skillId:intentName:lang:options:)` keeps returning an
+  empty list for `ok: false`, which is a real answer: the hub does not know
+  that registration. Reported by the Kotlin port's review, fixed in the
+  reference as thalovant-python-sdk 0.4.40.
+- `ThalovantPolicyDeniedError.allowed` keeps only string entries — already
+  the case here, now pinned by a test alongside the other ports.
+- README: listing an inventory needs `ovos.intent.list` alone;
+  `ovos.intent.describe` is needed only when definitions are asked for
+  (`IntentInventoryOptions(describe: true)`, the default).
+
 ## 0.1.8
 
 - Add the intent inventory: `ThalovantClient.intents(languages:options:)` reads

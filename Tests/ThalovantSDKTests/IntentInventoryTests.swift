@@ -67,6 +67,9 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     /// When set, answers `ovos.intent.list` with these rows for the language
     /// instead of the registrations.
     let listRows: ((String) -> [JSONValue])?
+    /// When set, answers `ovos.intent.list` with `{"ok": false, "error": ...}`
+    /// -- the query failed, which is not the same as a hub with no intents.
+    let listError: String?
     /// What `intent.service.adapt.manifest.get` answers (names only).
     let adaptNames: [String]
 
@@ -88,6 +91,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         deafDescribeIntent: (@Sendable (String) -> Bool)? = nil,
         replyDelay: TimeInterval? = nil,
         listRows: ((String) -> [JSONValue])? = nil,
+        listError: String? = nil,
         adaptNames: [String] = []
     ) {
         self.registered = registered
@@ -100,6 +104,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.deafDescribeIntent = deafDescribeIntent
         self.replyDelay = replyDelay
         self.listRows = listRows
+        self.listError = listError
         self.adaptNames = adaptNames
     }
 
@@ -196,6 +201,14 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         let lang = normalizedLanguageTag(sent)
         switch type {
         case ThalovantEvents.intentList:
+            if let listError {
+                deliver(
+                    ThalovantEvents.intentListResponse,
+                    data: ["ok": false, "error": .string(listError)],
+                    context: context
+                )
+                return
+            }
             if let listRows {
                 deliver(ThalovantEvents.intentListResponse, data: ["ok": true, "intents": .array(listRows(lang))], context: context)
                 return
@@ -764,6 +777,56 @@ final class IntentInventoryTests: XCTestCase {
         XCTAssertEqual(inventory.intents.first { $0.skillId == shadow }?.engine, "padatious", "named by padatious alone")
         XCTAssertEqual(inventory.intents.count, 2, "a name both engines list is one intent")
     }
+
+    func testARefusedListingIsAnErrorNotAnEmptyHub() async throws {
+        // `ok: false` on a listing means the query failed. Reporting it as no
+        // intents would show a person a device that can do nothing.
+        let hub = FakeHubTransport(listError: "manifest unavailable")
+        do {
+            _ = try await client(hub).intents(languages: ["en-us"])
+            XCTFail("expected ThalovantRuntimeError")
+        } catch let error as ThalovantRuntimeError {
+            XCTAssertTrue(error.message.contains("manifest unavailable"), error.message)
+            XCTAssertTrue(error.message.contains(ThalovantEvents.intentList), error.message)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+        XCTAssertTrue(
+            hub.emitted.allSatisfy { $0.type == ThalovantEvents.intentList },
+            "a failed listing is not a refusal, so the engine-manifest fallback stays out of it"
+        )
+    }
+
+    func testARefusedListingWithoutAReasonStillReadsAsAFailure() async throws {
+        let hub = FakeHubTransport(listError: "   ")
+        do {
+            _ = try await client(hub).listIntents(lang: "en-us")
+            XCTFail("expected ThalovantRuntimeError")
+        } catch let error as ThalovantRuntimeError {
+            XCTAssertTrue(error.message.contains("the hub refused the listing"), error.message)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testADescribeThatDoesNotKnowTheIntentIsNotAnError() async throws {
+        // The other half of the rule: describe answering `ok: false` is a real
+        // answer -- the hub does not know that registration -- so the intent
+        // is listed with no sentences rather than failing the inventory.
+        let unknown: JSONValue = .object([
+            "skill_id": .string(weather),
+            "intent_name": "gone.away",
+            "lang": "en-us",
+            "method": "template",
+            "enabled": true,
+            "session_id": "default",
+        ])
+        let hub = FakeHubTransport(listRows: { _ in [unknown] })
+        let inventory = try await client(hub).intents(languages: ["en-us"])
+        XCTAssertEqual(inventory.intents.map { $0.id }, ["\(weather):gone.away"])
+        XCTAssertEqual(inventory.intents[0].phrasesFor("en-us"), [])
+        XCTAssertFalse(inventory.hasPhrases)
+    }
 }
 
 /// The models on their own: parsing the observed shapes, language folding,
@@ -808,6 +871,18 @@ final class IntentModelTests: XCTestCase {
         )
         XCTAssertEqual(error.description, error.message)
         XCTAssertEqual(error.localizedDescription, error.message)
+    }
+
+    func testOnlyStringEntriesSurviveInTheAllowedList() {
+        // A number or a null in `allowed` is not a message type; carrying one
+        // through would put "3" in front of an operator reading which types to
+        // allow.
+        let error = ThalovantPolicyDeniedError.fromEvent(ThalovantEvent(name: ThalovantEvents.policyDenied, data: [
+            "denied_type": "ovos.intent.list",
+            "code": "acl_disallowed_type",
+            "data": .object(["allowed": .array(["speak", 3, .null, "recognizer_loop:utterance"])]),
+        ]))
+        XCTAssertEqual(error.allowed, ["speak", "recognizer_loop:utterance"])
     }
 
     func testPolicyDeniedErrorFallsBackToCodeThenToAGenericDetail() {
