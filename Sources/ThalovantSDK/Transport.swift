@@ -112,6 +112,18 @@ final class AsyncGate: @unchecked Sendable {
     }
 }
 
+/// The slice of a data-plane transport that `ThalovantClient` drives: connect,
+/// emit a bus event, observe bus events. `HiveMindWSSTransport` is the
+/// production implementation; the test suite substitutes an in-memory hub so
+/// the client's request/reply paths run without a network.
+protocol HiveMindBusTransport: AnyObject, Sendable {
+    func connect(timeout: TimeInterval) async throws
+    func disconnect() async
+    func addBusHandler(_ handler: @escaping (JSONObject) -> Void) -> UUID
+    func removeBusHandler(_ id: UUID)
+    func emitBus(type: String, data: JSONObject, context: JSONObject) async throws
+}
+
 /// WSS data-plane transport for the HiveMind runtime, backed by
 /// `URLSessionWebSocketTask`.
 ///
@@ -123,7 +135,7 @@ final class AsyncGate: @unchecked Sendable {
 ///    `session.session_id`, and `site_id`; the handshake is then complete.
 /// 4. Subsequent frames are JSON `HiveMessage`s, AES-128-GCM encrypted with the
 ///    identity `crypto_key` when one is present.
-public final class HiveMindWSSTransport: NSObject, @unchecked Sendable {
+public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchecked Sendable {
     public let identity: ThalovantIdentity
     public let userAgent: String
 

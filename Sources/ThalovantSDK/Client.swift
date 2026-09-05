@@ -30,7 +30,7 @@ public final class ThalovantSubscription: @unchecked Sendable {
 /// `ThalovantUnsupportedProtocolError`.
 public final class ThalovantClient: @unchecked Sendable {
     public let identity: ThalovantIdentity
-    let transport: HiveMindWSSTransport
+    let transport: any HiveMindBusTransport
     private let replySettle: TimeInterval
     private let emptyReplyWait: TimeInterval
     private let lock = NSLock()
@@ -62,6 +62,20 @@ public final class ThalovantClient: @unchecked Sendable {
         }
         self.identity = identity
         self.transport = HiveMindWSSTransport(identity: identity, userAgent: userAgent)
+        self.replySettle = replySettle
+        self.emptyReplyWait = emptyReplyWait
+    }
+
+    /// A client over an already-built transport. The test suite uses it to
+    /// drive the request/reply paths against an in-memory hub.
+    init(
+        identity: ThalovantIdentity,
+        transport: any HiveMindBusTransport,
+        replySettle: TimeInterval = 0.25,
+        emptyReplyWait: TimeInterval = 5
+    ) {
+        self.identity = identity
+        self.transport = transport
         self.replySettle = replySettle
         self.emptyReplyWait = emptyReplyWait
     }
@@ -226,6 +240,53 @@ public final class ThalovantClient: @unchecked Sendable {
             requestId: requestId,
             events: final.events,
             failureEvent: effectiveFailure
+        )
+    }
+
+    // MARK: Intents
+
+    /// Everything the hub can be asked, per language, grouped by skill.
+    ///
+    /// Read from the runtime's intent manifest over this session, so no
+    /// control-plane credential is involved. Each intent carries the sentences
+    /// a person says to reach it, as the skill wrote them, `{slot}`
+    /// placeholders included. `languages` defaults to `en-us`.
+    ///
+    /// Throws `ThalovantPolicyDeniedError` when the hub refuses the query and
+    /// `options.fallback` is off; with it on (the default), a hub allowed for
+    /// only the engines' manifests yields intent names with `source` set to
+    /// `.engineManifests` and `denied` naming the refused query.
+    public func intents(
+        languages: [String]? = nil,
+        options: IntentInventoryOptions = IntentInventoryOptions()
+    ) async throws -> HubIntentInventory {
+        let chosen = languages.flatMap { $0.isEmpty ? nil : $0 } ?? [defaultIntentLanguage]
+        return try await intentInventory(languages: chosen, options: options)
+    }
+
+    /// The hub's intent manifest for one language, one row per registration
+    /// (`ovos.intent.list`). `lang` defaults to `en-us`.
+    public func listIntents(
+        lang: String? = nil,
+        options: ListIntentsOptions = ListIntentsOptions()
+    ) async throws -> [IntentRegistration] {
+        try await listIntentRegistrations(lang: lang ?? defaultIntentLanguage, options: options)
+    }
+
+    /// The registrations behind one intent in one language, sentences included
+    /// (`ovos.intent.describe`). Empty for a registration the hub does not
+    /// know. `lang` defaults to `en-us`.
+    public func describeIntent(
+        skillId: String,
+        intentName: String,
+        lang: String? = nil,
+        options: DescribeIntentOptions = DescribeIntentOptions()
+    ) async throws -> [IntentDefinition] {
+        try await describeIntentDefinitions(
+            skillId: skillId,
+            intentName: intentName,
+            lang: lang ?? defaultIntentLanguage,
+            options: options
         )
     }
 

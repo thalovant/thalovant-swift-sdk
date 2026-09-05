@@ -15,6 +15,17 @@ public enum ThalovantEvents {
     public static let policyDenied = "hive.policy.denied"
     public static let queryTimeout = "hive.query.timeout"
 
+    // The hub runtime's intent manifest (OVOS-INTENT-4 section 10) and the
+    // engines' own manifests. See `ThalovantClient.intents`.
+    public static let intentList = "ovos.intent.list"
+    public static let intentListResponse = "ovos.intent.list.response"
+    public static let intentDescribe = "ovos.intent.describe"
+    public static let intentDescribeResponse = "ovos.intent.describe.response"
+    public static let adaptManifestGet = "intent.service.adapt.manifest.get"
+    public static let adaptManifest = "intent.service.adapt.manifest"
+    public static let padatiousManifestGet = "intent.service.padatious.manifest.get"
+    public static let padatiousManifest = "intent.service.padatious.manifest"
+
     public static let failureEvents: Set<String> = [
         intentFailure,
         intentUnmatched,
