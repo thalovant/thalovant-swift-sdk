@@ -691,8 +691,9 @@ extension ThalovantClient {
     /// replies matched by that id -- or, for a hub that does not echo it, by
     /// the definition's own `skill_id`/`intent_name`/`lang` -- and repeats
     /// dropped. The deadline covers each batch, so a hub that answers nothing
-    /// fails after one batch rather than holding every request open.
-    /// `batchSize: 0` sends them all at once.
+    /// fails after one batch rather than holding every request open. A window
+    /// that answered nothing contributes nothing; the call fails only when no
+    /// window produced anything. `batchSize: 0` sends them all at once.
     func describeIntentBatch(
         _ wanted: [IntentRequestKey],
         timeout: TimeInterval,
@@ -706,8 +707,18 @@ extension ThalovantClient {
         var found: [IntentRequestKey: [IntentDefinition]] = [:]
         for start in stride(from: 0, to: unique.count, by: batchSize) {
             let batch = Array(unique[start..<min(start + batchSize, unique.count)])
-            for (key, definitions) in try await describeIntentWindow(batch, timeout: timeout) {
-                found[key] = definitions
+            do {
+                for (key, definitions) in try await describeIntentWindow(batch, timeout: timeout) {
+                    found[key] = definitions
+                }
+            } catch let error as ThalovantTimeoutError {
+                // A partial answer is an answer, across windows as within one:
+                // windows are contiguous slices, so an unresponsive skill with
+                // more than one window's worth of intents would otherwise turn
+                // the whole inventory into a timeout while the same skill with
+                // fewer intents only loses its sentences. A hub silent from the
+                // start still fails at the first window, since nothing is found.
+                if found.isEmpty { throw error }
             }
         }
         return found

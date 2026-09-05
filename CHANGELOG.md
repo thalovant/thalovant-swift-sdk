@@ -50,7 +50,11 @@
   every reply delivered twice, 276 inbound events; an SDK whose reply queue is
   bounded drops replies past its capacity and returns an inventory missing
   sentences. The per-batch deadline also means a hub that answers nothing fails
-  after one batch rather than holding every request open.
+  after one batch rather than holding every request open. A window that answered
+  nothing contributes nothing rather than discarding what the earlier windows
+  found — windows are contiguous slices, so a skill that stops answering can own
+  a whole window — and the call fails only when no window produced anything, so
+  a hub silent from the start still fails at the first window.
 - Language tags are sent as the caller spelled them: the hub runtime folds the
   tag it receives (`standardize_lang` on both store and query in ovos-core's
   manifest), so `fr_FR` matches what `fr-fr` registered, and the SDK does not

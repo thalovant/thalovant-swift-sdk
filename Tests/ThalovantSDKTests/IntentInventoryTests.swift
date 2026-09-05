@@ -57,6 +57,9 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     let repeats: Int
     /// Skills whose describes are swallowed: the hub never answers them.
     let deafDescribeSkills: Set<String>
+    /// Intent names whose describes are swallowed, for a hub that stops
+    /// answering part way through.
+    let deafDescribeIntent: (@Sendable (String) -> Bool)?
     /// When set, replies arrive that many seconds later on another thread,
     /// the way a real hub answers on the receive loop, instead of inside
     /// `emitBus`.
@@ -82,6 +85,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         echoRequestId: Bool = true,
         repeats: Int = 2,
         deafDescribeSkills: Set<String> = [],
+        deafDescribeIntent: (@Sendable (String) -> Bool)? = nil,
         replyDelay: TimeInterval? = nil,
         listRows: ((String) -> [JSONValue])? = nil,
         adaptNames: [String] = []
@@ -93,6 +97,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.echoRequestId = echoRequestId
         self.repeats = repeats
         self.deafDescribeSkills = deafDescribeSkills
+        self.deafDescribeIntent = deafDescribeIntent
         self.replyDelay = replyDelay
         self.listRows = listRows
         self.adaptNames = adaptNames
@@ -221,7 +226,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         case ThalovantEvents.intentDescribe:
             let skillId = data["skill_id"]?.stringValue ?? ""
             let intentName = data["intent_name"]?.stringValue ?? ""
-            if deafDescribeSkills.contains(skillId) {
+            if deafDescribeSkills.contains(skillId) || deafDescribeIntent?(intentName) == true {
                 return
             }
             let known = (registered[lang] ?? []).first { $0.skillId == skillId && $0.intentName == intentName }
@@ -695,6 +700,30 @@ final class IntentInventoryTests: XCTestCase {
         } catch {
             XCTFail("unexpected error: \(error)")
         }
+    }
+
+    func testASilentWindowKeepsWhatTheEarlierWindowsFound() async throws {
+        // Windows are contiguous slices, so a skill that stops answering can
+        // own a whole window. Losing its sentences is right; losing the
+        // inventory is not.
+        let quietFrom = 40
+        let many = (0..<69).map { n in
+            Registered(skillId: weather, intentName: String(format: "intent.%03d", n), samples: ["sentence \(n)"])
+        }
+        let hub = FakeHubTransport(
+            registered: ["en-us": many],
+            deafDescribeIntent: { name in (Int(name.split(separator: ".").last ?? "") ?? 0) >= quietFrom }
+        )
+        let inventory = try await client(hub).intents(languages: ["en-us"], options: IntentInventoryOptions(timeout: 0.3))
+
+        XCTAssertEqual(inventory.intents.count, 69, "every intent is still listed")
+        // Windows are 0-31, 32-63, 64-68. The first answers in full, the second
+        // in part, the third not at all — and the third does not discard the rest.
+        XCTAssertEqual(inventory.intents.filter { !$0.phrasesFor("en-us").isEmpty }.count, quietFrom)
+        XCTAssertTrue(inventory.hasPhrases)
+        XCTAssertEqual(hub.describeWindows, [32, 32, 5], "all three windows were attempted")
+        XCTAssertEqual(inventory.intents.first?.phrasesFor("en-us"), ["sentence 0"], "the first window kept its sentences")
+        XCTAssertEqual(inventory.intents.last?.phrasesFor("en-us"), [], "the silent window's intents carry none")
     }
 
     func testTheCallersLanguageSpellingIsSentAsGiven() async throws {
