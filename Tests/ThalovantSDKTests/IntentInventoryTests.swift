@@ -61,6 +61,11 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     /// the way a real hub answers on the receive loop, instead of inside
     /// `emitBus`.
     let replyDelay: TimeInterval?
+    /// When set, answers `ovos.intent.list` with these rows for the language
+    /// instead of the registrations.
+    let listRows: ((String) -> [JSONValue])?
+    /// What `intent.service.adapt.manifest.get` answers (names only).
+    let adaptNames: [String]
 
     private let lock = NSLock()
     private var handlers: [UUID: (JSONObject) -> Void] = [:]
@@ -75,7 +80,9 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         echoRequestId: Bool = true,
         repeats: Int = 2,
         deafDescribeSkills: Set<String> = [],
-        replyDelay: TimeInterval? = nil
+        replyDelay: TimeInterval? = nil,
+        listRows: ((String) -> [JSONValue])? = nil,
+        adaptNames: [String] = []
     ) {
         self.registered = registered
         self.refuse = refuse
@@ -85,6 +92,8 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.repeats = repeats
         self.deafDescribeSkills = deafDescribeSkills
         self.replyDelay = replyDelay
+        self.listRows = listRows
+        self.adaptNames = adaptNames
     }
 
     var connected: Bool { lock.locked { connectedFlag } }
@@ -156,6 +165,10 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         let lang = data["lang"]?.stringValue ?? ""
         switch type {
         case ThalovantEvents.intentList:
+            if let listRows {
+                deliver(ThalovantEvents.intentListResponse, data: ["ok": true, "intents": .array(listRows(lang))], context: context)
+                return
+            }
             var rows: [JSONValue] = []
             for entry in registered[lang] ?? [] {
                 // The runtime standardises what it stores: fr-fr is answered in
@@ -206,7 +219,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
             }
             deliver(ThalovantEvents.intentDescribeResponse, data: payload, context: context)
         case ThalovantEvents.adaptManifestGet:
-            deliver(ThalovantEvents.adaptManifest, data: ["intents": .array([])], context: context)
+            deliver(ThalovantEvents.adaptManifest, data: ["intents": .array(adaptNames.map { .string($0) })], context: context)
         case ThalovantEvents.padatiousManifestGet:
             var names = Set<String>()
             for entries in registered.values {
@@ -550,6 +563,74 @@ final class IntentInventoryTests: XCTestCase {
         let inventory = try await client(hub).intents(languages: ["en-us", "en-us"])
         XCTAssertEqual(inventory.languages, ["en-us"])
         XCTAssertEqual(hub.emitted.filter { $0.type == ThalovantEvents.intentList }.count, 1)
+    }
+
+    // MARK: The four points the ports settled (reference 0.4.37)
+
+    func testHasPhrasesMeansAtLeastOneSentence() async throws {
+        let hub = FakeHubTransport(registered: ["en-us": [Registered(skillId: shadow, intentName: "custos.incidents", samples: [])]])
+        let inventory = try await client(hub).intents(languages: ["en-us"])
+        XCTAssertEqual(inventory.intents.count, 1, "the intent is listed")
+        XCTAssertEqual(inventory.intents[0].languages, ["en-us"], "and listed for the language")
+        XCTAssertFalse(inventory.hasPhrases, "but its describe came back with no sentences")
+    }
+
+    func testLanguagesAreFoldedAndDeduplicatedBeforeAsking() async throws {
+        let hub = FakeHubTransport()
+        let inventory = try await client(hub).intents(languages: [" en-us ", "en-US", "en_us", "fr-fr"])
+        XCTAssertEqual(inventory.languages, ["en-us", "fr-fr"], "the first spelling, trimmed, in the order given")
+        XCTAssertEqual(
+            hub.emitted.filter { $0.type == ThalovantEvents.intentList }.map { $0.data["lang"]?.stringValue },
+            ["en-us", "fr-fr"],
+            "one language is asked once"
+        )
+        let weatherIntent = try XCTUnwrap(inventory.intents.first { $0.skillId == weather })
+        XCTAssertEqual(weatherIntent.languages, ["en-us", "fr-fr"])
+        XCTAssertEqual(weatherIntent.phrasesFor("en_US").count, 3)
+    }
+
+    func testAKeywordRowDoesNotEraseTheTemplateRowsSentences() async throws {
+        // One intent, two registrations in one language: the keyword row has
+        // no samples. Whichever order the rows arrive in, the sentences stay;
+        // the first row names the engine.
+        func row(_ method: String, lang: String) -> JSONValue {
+            var definition: JSONObject = [
+                "skill_id": .string(weather), "intent_name": "current.weather", "lang": .string(lang),
+            ]
+            if method == "template" {
+                definition["samples"] = .array(["what is the weather"])
+            } else {
+                definition["required"] = .array([.array(["WeatherKeyword"])])
+            }
+            return .object([
+                "skill_id": .string(weather), "intent_name": "current.weather", "lang": .string(lang),
+                "method": .string(method), "enabled": true, "session_id": "default",
+                "definition": .object(definition),
+            ])
+        }
+        let templateFirst = FakeHubTransport(listRows: { lang in [row("template", lang: lang), row("keyword", lang: lang)] })
+        let inventory = try await client(templateFirst).intents(languages: ["en-us"])
+        XCTAssertEqual(inventory.intents.count, 1, "one intent, not two")
+        XCTAssertEqual(inventory.intents[0].phrasesFor("en-us"), ["what is the weather"])
+        XCTAssertEqual(inventory.intents[0].engine, "padatious", "the first row names the engine")
+        XCTAssertTrue(inventory.hasPhrases)
+
+        let keywordFirst = FakeHubTransport(listRows: { lang in [row("keyword", lang: lang), row("template", lang: lang)] })
+        let reversed = try await client(keywordFirst).intents(languages: ["en-us"])
+        XCTAssertEqual(reversed.intents.count, 1)
+        XCTAssertEqual(reversed.intents[0].phrasesFor("en-us"), ["what is the weather"])
+        XCTAssertEqual(reversed.intents[0].engine, "adapt", "the first row names the engine")
+    }
+
+    func testTheFallbackKeepsTheFirstEngineThatNamesAnIntent() async throws {
+        // adapt is asked before padatious, so a name both list is adapt.
+        let hub = FakeHubTransport(refuse: [ThalovantEvents.intentList], adaptNames: ["\(weather):current.weather"])
+        let inventory = try await client(hub).intents(languages: ["en-us"])
+        XCTAssertEqual(inventory.source, .engineManifests)
+        let weatherIntent = try XCTUnwrap(inventory.intents.first { $0.name == "current.weather" })
+        XCTAssertEqual(weatherIntent.engine, "adapt")
+        XCTAssertEqual(inventory.intents.first { $0.skillId == shadow }?.engine, "padatious", "named by padatious alone")
+        XCTAssertEqual(inventory.intents.count, 2, "a name both engines list is one intent")
     }
 }
 

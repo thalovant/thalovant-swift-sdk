@@ -424,7 +424,9 @@ public struct HubSkillIntents: Codable, Equatable, Sendable {
 /// language; `.engineManifests` is the names-only fallback, and `denied` then
 /// names the query the hub refused.
 public struct HubIntentInventory: Codable, Equatable, Sendable {
-    /// The languages asked for, in the order asked.
+    /// The languages asked for, in the order asked: trimmed, one entry per
+    /// language whatever its spellings (`en-us`, `en-US`, `en_us`), the first
+    /// spelling kept.
     public let languages: [String]
     /// Skills sorted by id, each with its intents sorted by name.
     public let skills: [HubSkillIntents]
@@ -456,8 +458,9 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
         skills.flatMap { $0.intents }
     }
 
-    /// True when at least one intent carries at least one sentence. Always
-    /// false for the names-only `.engineManifests` fallback.
+    /// True when at least one intent carries at least one sentence. False for
+    /// the names-only `.engineManifests` fallback, and for a manifest-path
+    /// inventory whose describes all came back empty.
     public var hasPhrases: Bool {
         intents.contains { intent in intent.phrases.values.contains { !$0.isEmpty } }
     }
@@ -779,9 +782,15 @@ extension ThalovantClient {
     /// the hub refuses `ovos.intent.list` and `options.fallback` is on, the
     /// engines' manifests give the names and the result says so.
     func intentInventory(languages: [String], options: IntentInventoryOptions) async throws -> HubIntentInventory {
-        let asked = orderedUnique(languages.filter {
-            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        })
+        // `en-us`, `en-US` and `en_us` are one language, asked once; the first
+        // spelling given is the one the inventory reports.
+        var asked: [String] = []
+        for language in languages {
+            let tag = language.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !tag.isEmpty, !asked.contains(where: { sameLanguage($0, tag) }) {
+                asked.append(tag)
+            }
+        }
         guard !asked.isEmpty else {
             throw ThalovantRuntimeError("intents() requires at least one language.")
         }
@@ -832,9 +841,14 @@ extension ThalovantClient {
                     let request = IntentRequestKey(skillId: row.skillId, intentName: row.intentName, lang: entry.lang)
                     sentences = described[request]?.first { !$0.samples.isEmpty }?.samples ?? []
                 }
+                // An intent registered under both engines has two rows for the
+                // language; the keyword row carries no sentences and must not
+                // erase the template row's, whichever order they arrive in.
                 var perLanguage = phrases[key] ?? []
                 if let index = perLanguage.firstIndex(where: { $0.lang == entry.lang }) {
-                    perLanguage[index] = (entry.lang, sentences)
+                    if !sentences.isEmpty {
+                        perLanguage[index] = (entry.lang, sentences)
+                    }
                 } else {
                     perLanguage.append((entry.lang, sentences))
                 }
@@ -872,9 +886,12 @@ func inventoryFromNames(
     for manifest in manifests {
         for raw in manifest.names {
             let (skillId, intentName) = splitIntentName(raw)
-            bySkill[skillId, default: [:]][intentName] = HubIntent(
-                skillId: skillId, name: intentName, engine: manifest.engine
-            )
+            // First engine to name it wins, as on the manifest path.
+            if bySkill[skillId]?[intentName] == nil {
+                bySkill[skillId, default: [:]][intentName] = HubIntent(
+                    skillId: skillId, name: intentName, engine: manifest.engine
+                )
+            }
         }
     }
     let skills = bySkill.keys.sorted().map { skillId in

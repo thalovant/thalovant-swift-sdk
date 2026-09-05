@@ -346,8 +346,10 @@ Each intent carries the sentences a person says to reach it, per language, as
 the skill wrote them (`{location}` marks a slot): `phrasesFor("fr-FR")` finds
 them whatever the case or separator of the tag, and `examples(lang:limit:)`
 picks a couple worth showing, whole sentences before ones with a slot. The
-inventory is grouped by skill, sorted, and `Codable` — `asJSON()` or a
-`JSONEncoder` produce the same snake_case document the other SDKs write.
+languages asked for are folded the same way — `en-us`, `en-US` and `en_us` are
+one language, asked once. The inventory is grouped by skill, sorted, and
+`Codable` — `asJSON()` or a `JSONEncoder` produce the same snake_case document
+the other SDKs write.
 
 The hub's connection must be allowed to publish `ovos.intent.list` and
 `ovos.intent.describe` (connections the control plane provisions for SDK
