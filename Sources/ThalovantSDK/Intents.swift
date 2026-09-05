@@ -16,7 +16,8 @@ import Foundation
 //   session_id}]}`. `method` is `template` (sample sentences) or `keyword`
 //   (keyword sets). A runtime may attach each entry's `definition` when asked
 //   with `include_definitions`; when it does not, the client describes each
-//   intent individually.
+//   intent individually. `{"ok": false}` here is a failed query, not an empty
+//   hub, and throws `ThalovantRuntimeError`.
 // - `ovos.intent.describe` `{"skill_id", "intent_name", "lang"}` ->
 //   `ovos.intent.describe.response` `{"ok", "definitions": [{method,
 //   definition}]}` or `{"ok": false, "error"}`.
@@ -572,7 +573,12 @@ final class DescribeBatch: @unchecked Sendable {
     }
 }
 
-/// The definitions a describe reply carries; none for `{"ok": false}`.
+/// The definitions a describe reply carries.
+///
+/// `{"ok": false}` yields none, which is a real answer: the hub does not know
+/// that registration, so the intent simply has no sentences. A listing that
+/// answers `ok: false` is the other case and throws, because a failed query
+/// has told us nothing.
 func intentDefinitions(from event: ThalovantEvent) -> [IntentDefinition] {
     if event.data["ok"]?.boolValue == false { return [] }
     return (event.data["definitions"]?.arrayValue ?? [])
@@ -659,6 +665,16 @@ extension ThalovantClient {
             lang: lang,
             timeout: options.timeout
         )
+        if event.data["ok"]?.boolValue == false {
+            // A refused listing is not an empty hub. Describe answers
+            // `ok: false` for an intent it does not know, which is a real
+            // answer; a listing that fails has told us nothing, and reporting
+            // it as no intents would show a person an empty hub.
+            let error = event.data["error"]?.stringValue?
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let detail = error.isEmpty ? "the hub refused the listing" : error
+            throw ThalovantRuntimeError("\(ThalovantEvents.intentList) failed: \(detail)")
+        }
         return (event.data["intents"]?.arrayValue ?? [])
             .compactMap { $0.objectValue.flatMap(IntentRegistration.fromJSON) }
     }

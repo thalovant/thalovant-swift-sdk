@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.8"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.9"),
 ]
 ```
 
@@ -351,9 +351,12 @@ one language, asked once. The inventory is grouped by skill, sorted, and
 `Codable` — `asJSON()` or a `JSONEncoder` produce the same snake_case document
 the other SDKs write.
 
-The hub's connection must be allowed to publish `ovos.intent.list` and
-`ovos.intent.describe` (connections the control plane provisions for SDK
-clients are, by default). A hub that refuses throws
+The hub's connection must be allowed to publish `ovos.intent.list`; asking for
+the sentences needs `ovos.intent.describe` as well, which the default
+`IntentInventoryOptions(describe: true)` does — a listing alone
+(`describe: false`, or `listIntents(lang:options:)`) needs only
+`ovos.intent.list`. Connections the control plane provisions for SDK clients
+are allowed both by default. A hub that refuses throws
 `ThalovantPolicyDeniedError` naming the type at once — `deniedType`, `code`,
 `reason`, and the `allowed` list — rather than waiting out the deadline; with
 the default `IntentInventoryOptions(fallback: true)` a hub allowed for only the
@@ -366,7 +369,9 @@ returns the manifest rows (`IntentRegistration`, one per registration, with
 `engine` mapping the runtime's `template`/`keyword` methods to `padatious`/
 `adapt`), and `describeIntent(skillId:intentName:lang:options:)` returns the
 registrations behind one intent (`IntentDefinition`, with its `samples`), empty
-for one the hub does not know:
+for one the hub does not know. A hub that answers the listing itself with
+`ok: false` has failed the query rather than reported an empty hub, and
+`listIntents` throws `ThalovantRuntimeError` carrying the hub's reason:
 
 ```swift
 let rows = try await client.listIntents(lang: "en-us")

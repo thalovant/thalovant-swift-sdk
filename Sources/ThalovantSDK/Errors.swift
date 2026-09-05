@@ -146,6 +146,9 @@ public struct ThalovantPolicyDeniedError: Error, Equatable, CustomStringConverti
     /// Builds the error from a `hive.policy.denied` event:
     /// `{denied_type, code, reason, data: {msg_type, allowed}}`.
     public static func fromEvent(_ event: ThalovantEvent) -> ThalovantPolicyDeniedError {
+        // Only strings: a number or a null in the hub's list is not a message
+        // type, and carrying one through would put "3" or "null" in front of
+        // an operator reading which types to allow.
         let allowed = event.data["data"]?["allowed"]?.arrayValue?.compactMap { $0.stringValue } ?? []
         return ThalovantPolicyDeniedError(
             deniedType: event.data["denied_type"]?.stringValue ?? "",
