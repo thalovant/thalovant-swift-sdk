@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.3.0
+
+- Validate both device authorization URLs before displaying a prompt, invoking
+  a browser callback, or polling. Accept only HTTP(S) URLs with a host and no
+  userinfo, raw whitespace, or control characters; launch with a single URL argument.
+
+- Reject control-plane redirects and credential-bearing HTTP outside explicit
+  loopback development endpoints, including caller-supplied session configurations.
+  Preserve supplied trust callbacks while retaining SDK redirect ownership.
+
+- Add scoped conversations, direct HiveMind query/cascade replies, bounded event
+  streams and waits, action/code input helpers, and local connection/health diagnostics.
+- Fall back to engine intent names when the detailed listing is silent as well
+  as denied. Discover fallback handlers with a bounded optional probe and expose
+  known/unknown discovery plus conservative language answerability.
+- Keep query collection open after soft intent misses, recover on later speech,
+  and retain partial speech when a policy denial or query timeout terminates it.
+- Ignore foreign correlated denials and describe replies; retain content-based
+  describe matching only when a reply carries no request id.
+- Bound connection timeout across socket open and handshake, and let send
+  cancellation skip queued writes without affecting successors. A cancelled write
+  that already began sealing retires its session and retains cancellation semantics.
+- Propagate task cancellation to URLSession HTTP requests, exclude non-JSON
+  response bodies from ordinary errors, and reject unsafe JSON numeric-to-Int conversions.
+- Extend network-free inventory, runtime lifecycle, cancellation and security
+  regressions while retaining macOS/Linux CI and independent Node Noise interop.
+
 ## 0.2.1
 
 - Join concurrent WSS connection attempts instead of rejecting overlapping

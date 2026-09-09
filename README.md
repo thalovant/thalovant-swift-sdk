@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.2.1"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.3.0"),
 ]
 ```
 
@@ -371,6 +371,33 @@ The identity document uses the same snake_case fields the API returns from
 `default_master`, `default_port`, plus optional `data_plane_endpoints`,
 `protocols`, and `mqtt` broker credentials.
 
+## Runtime helpers
+
+```swift
+let conversation = client.conversation(lang: "fr-fr")
+let reply = try await conversation.query("bonjour")
+try await conversation.sendAction("show-details", title: "Details")
+try await conversation.sendCode("001-09", label: "Ticket")
+let health = try await client.healthcheck()
+print(health.ok)
+```
+
+Conversations keep a stable session and merge nested context without changing
+caller input. Requests receive fresh request ids. `query()` uses HiveMind
+query/cascade frames, accepts only a matching query id, and waits for query
+completion. It does not automatically replay requests after disconnects.
+
+`waitForEvent()` accepts session/request filters and a predicate. `listen()`
+returns an `AsyncThrowingStream`, with optional `timeout` and `maxEvents`, and
+starts its subscription when called. Both remove subscriptions on completion,
+timeout or task cancellation and fail promptly after transport loss. Streams
+buffer at most 64 events and fail explicitly on overflow.
+
+`connectWithInfo()`, `connectionInfo()`, `healthcheck()` and `doctor()` report
+local authenticated transport state, without claiming health of every hub
+skill or external dependency. Cancelling a control-plane task cancels its
+underlying URLSession request.
+
 ## Events
 
 Handlers can observe hub bus events directly:
@@ -447,6 +474,37 @@ replies in flight than a bounded queue can hold; a window the hub does not
 answer costs those intents their sentences, not the whole inventory. Language tags are sent as you
 spell them — the hub folds the tag it receives, so `fr_FR` finds what `fr-fr`
 registered.
+
+A silent detailed listing now takes the same default engine-manifest fallback
+as an explicit policy denial. Set `fallback: false` to keep strict listing
+timeouts. The `denied` marker records which query triggered fallback and is
+not, on its own, proof of a policy denial. Engine-query failures still propagate.
+
+`listFallbacks()` discovers registered fallback handlers. Inventory collection
+also makes an optional probe capped at 1.5 seconds across connection, send and
+reply wait. `fallbacksKnown` distinguishes known empty from unknown (denied,
+silent or explicitly failed discovery). `inventory.mayAnswer(lang)` is true
+when an enabled intent has phrases, a fallback handler exists, or fallback
+discovery is unknown. It is false only when discovery is known, no fallback
+handlers exist, and no enabled intent has phrases for the requested language.
+
+## Control-Plane HTTP Security
+
+Device login validates both verification URLs before displaying a prompt,
+invoking a browser callback, or polling. Each URL must use HTTP(S), include a
+host, and contain no userinfo, raw whitespace, or control characters. Invalid
+grants fail with a generic API error; their URLs are not displayed or launched.
+
+Control-plane requests never follow redirects automatically. Credentials and
+request bodies require HTTPS, except explicit `localhost`, `127.0.0.1`, and
+`[::1]` HTTP development endpoints. Anonymous body-free reads may use HTTP.
+URLs containing userinfo are rejected before I/O. Configure the intended API
+endpoint directly instead of relying on a redirect.
+
+If you supply a `URLSession`, the SDK creates its own session from that
+configuration. It retains redirect decisions and forwards only authentication-
+challenge callbacks to the supplied delegate, preserving custom trust handling.
+Supplied protocol implementations remain trusted application code.
 
 ## Protocol Selection
 

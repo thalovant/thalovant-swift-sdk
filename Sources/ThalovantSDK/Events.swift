@@ -17,6 +17,8 @@ public enum ThalovantEvents {
 
     // The hub runtime's intent manifest (OVOS-INTENT-4 section 10) and the
     // engines' own manifests. See `ThalovantClient.intents`.
+    public static let fallbackList = "ovos.skills.fallback.list"
+    public static let fallbackListResponse = "ovos.skills.fallback.list.response"
     public static let intentList = "ovos.intent.list"
     public static let intentListResponse = "ovos.intent.list.response"
     public static let intentDescribe = "ovos.intent.describe"

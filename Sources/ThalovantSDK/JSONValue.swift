@@ -70,7 +70,7 @@ public enum JSONValue: Codable, Equatable, Sendable {
     public var intValue: Int? {
         switch self {
         case .integer(let value): return value
-        case .number(let value) where value == value.rounded(): return Int(value)
+        case .number(let value) where value.isFinite && value == value.rounded() && value >= Double(Int.min) && value < Double(Int.max): return Int(value)
         default: return nil
         }
     }

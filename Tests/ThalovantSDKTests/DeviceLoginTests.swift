@@ -88,6 +88,31 @@ final class DeviceLoginTests: XCTestCase {
         )
     }
 
+    func testGrantURLsAreValidatedBeforePromptAndPolling() async throws {
+        let invalid: [Any] = ["file:///tmp/program", "javascript:alert(1)", "calc.exe", "--help",
+            "https://user:PRIVATE-CREDENTIAL@example.test", "https://@example.test",
+            "https://example.test/\n--help", " https://example.test", "https://example.test/a b", "https:///missing-host", 42]
+        for field in ["verification_uri", "verification_uri_complete"] {
+            for value in invalid {
+                StubURLProtocol.reset()
+                var grant = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(Self.deviceGrant.utf8)) as? [String: Any])
+                grant[field] = value
+                let body = try XCTUnwrap(String(data: JSONSerialization.data(withJSONObject: grant), encoding: .utf8))
+                StubURLProtocol.enqueue(.init(body: body))
+                let recorder = DeviceFlowRecorder()
+                do {
+                    _ = try await api.loginWithBrowser(options: DeviceLoginOptions(openBrowser: false, prompt: { recorder.record($0) }))
+                    XCTFail("expected invalid verification URI")
+                } catch let error as ThalovantApiError {
+                    XCTAssertFalse(error.description.contains("PRIVATE-CREDENTIAL"))
+                }
+                XCTAssertTrue(recorder.grants.isEmpty)
+                XCTAssertEqual(StubURLProtocol.requests.count, 1)
+                XCTAssertTrue(StubURLProtocol.requests.first?.url.path.hasSuffix("/auth/device/authorize") == true)
+            }
+        }
+    }
+
     func testLoginWithBrowserPollsUntilTokenAndStoresIt() async throws {
         StubURLProtocol.enqueue(.init(body: Self.deviceGrant))
         StubURLProtocol.enqueue(.init(status: 400, body: #"{"error": "authorization_pending"}"#))

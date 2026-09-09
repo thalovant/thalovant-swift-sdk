@@ -127,6 +127,11 @@ extension ThalovantControlPlane {
         else {
             throw ThalovantApiError(message: "Thalovant API device authorization response was incomplete.")
         }
+        let complete = response["verification_uri_complete"]
+        guard deviceVerificationURL(verificationUri) != nil,
+            complete == nil || complete == .null || complete?.stringValue.flatMap(deviceVerificationURL) != nil else {
+            throw ThalovantApiError(message: "Thalovant API device authorization returned an invalid verification URI.")
+        }
         let interval: TimeInterval
         if let raw = response["interval"]?.doubleValue, raw >= 0 {
             interval = raw
@@ -223,16 +228,25 @@ extension ThalovantControlPlane {
 
 /// Opens `url` in the local browser where the platform allows launching a
 /// process; never throws — browser availability is best-effort.
-func openBrowserBestEffort(_ url: String) {
+func deviceVerificationURL(_ url: String) -> URL? {
+    guard !url.unicodeScalars.contains(where: { CharacterSet.controlCharacters.union(.whitespacesAndNewlines).contains($0) }),
+        let target = URL(string: url), ["http", "https"].contains(target.scheme?.lowercased() ?? ""),
+        let host = target.host, !host.isEmpty, target.user == nil, target.password == nil else { return nil }
+    return target
+}
+
+func openBrowserBestEffort(_ url: String, launch: ((URL) -> Void)? = nil) {
+    guard let target = deviceVerificationURL(url) else { return }
+    if let launch { launch(target); return }
     #if os(macOS)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = [url]
+    process.arguments = [target.absoluteString]
     try? process.run()
     #elseif os(Linux)
     let process = Process()
     process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
-    process.arguments = ["xdg-open", url]
+    process.arguments = ["xdg-open", target.absoluteString]
     try? process.run()
     #endif
     // iOS, tvOS, watchOS: no process launching; callers surface the URL

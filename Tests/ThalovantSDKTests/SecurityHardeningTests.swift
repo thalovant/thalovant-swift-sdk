@@ -290,6 +290,23 @@ final class SecurityHardeningTests: XCTestCase {
         XCTAssertEqual(error.body, hugeMultilineBody)
     }
 
+    func testNumericJSONAccessDoesNotTrapOnUntrustedMagnitude() {
+        for value in [Double.infinity, -Double.infinity, Double.nan, 1e100, -1e100, Double(Int.max)] {
+            XCTAssertNil(JSONValue.number(value).intValue)
+        }
+        XCTAssertEqual(JSONValue.number(Double(Int.min)).intValue, Int.min)
+        XCTAssertEqual(JSONValue.number(20).intValue, 20)
+        XCTAssertNil(JSONValue.number(20.5).intValue)
+    }
+
+    func testNonJSONHttpFailureNeverReflectsCredentials() {
+        let body = "password=SECRET-AT-START api_key=PRIVATE"
+        let error = ThalovantApiError.httpFailure(statusCode: 422, body: body)
+        XCTAssertEqual(error.message, "Thalovant API request failed with HTTP 422.")
+        XCTAssertEqual(error.body, body)
+        XCTAssertFalse(error.description.contains("SECRET-AT-START"))
+    }
+
     func testHttpFailureStillDecodesErrorCodeAndCarriesStatus() {
         let coded = ThalovantApiError.httpFailure(
             statusCode: 402,

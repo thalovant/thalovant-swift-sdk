@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.2.1"
+public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.3.0"
 
 /// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {
@@ -114,18 +114,23 @@ public final class ThalovantControlPlane {
     public var accessToken: String?
     public let userAgent: String
     let session: URLSession
+    private let hasCustomTrustDelegate: Bool
 
     public init(
         apiURL: String = defaultControlAPIURL,
         accessToken: String? = nil,
         userAgent: String = defaultThalovantUserAgent,
-        session: URLSession = URLSession(configuration: .ephemeral)
+        session: URLSession? = nil
     ) {
         self.apiURL = ThalovantControlPlane.normalizeControlAPIURL(apiURL)
         self.accessToken = accessToken
         self.userAgent = userAgent
-        self.session = session
+        self.hasCustomTrustDelegate = session?.delegate != nil
+        self.session = URLSession(configuration: session?.configuration ?? .ephemeral,
+            delegate: ControlPlaneRedirectPolicy(upstream: session?.delegate), delegateQueue: nil)
     }
+
+    deinit { session.invalidateAndCancel() }
 
     /// Normalizes the control API base URL: trims trailing slashes and a
     /// trailing `/v1` path segment, and appends exactly one trailing `/`.
@@ -362,7 +367,24 @@ public final class ThalovantControlPlane {
             trimmedPath.removeFirst()
         }
         guard let url = URL(string: apiURL + trimmedPath) else {
-            throw ThalovantApiError(message: "Invalid Thalovant API URL: \(apiURL + trimmedPath)")
+            throw ThalovantApiError(message: "Invalid Thalovant API URL.")
+        }
+        guard ["https", "http"].contains(url.scheme?.lowercased() ?? "") else {
+            throw ThalovantApiError(message: "Thalovant API URLs require HTTP or HTTPS.")
+        }
+        guard url.user == nil && url.password == nil else {
+            throw ThalovantApiError(message: "Thalovant API URLs must not contain userinfo credentials.")
+        }
+        let secretHeaders = ["authorization", "proxy-authorization", "cookie"]
+        let configuredHeaders = session.configuration.httpAdditionalHeaders ?? [:]
+        let hasCookies = session.configuration.httpShouldSetCookies && !(session.configuration.httpCookieStorage?.cookies(for: url) ?? []).isEmpty
+        let hasStoredCredentials = session.configuration.urlCredentialStorage?.allCredentials.keys.contains { $0.host.caseInsensitiveCompare(url.host ?? "") == .orderedSame } ?? false
+        let carriesCredentials = auth || body != nil || hasCookies || hasStoredCredentials || hasCustomTrustDelegate ||
+            headers.keys.contains { secretHeaders.contains($0.lowercased()) } ||
+            configuredHeaders.keys.contains { secretHeaders.contains(String(describing: $0).lowercased()) }
+        let explicitLoopback = apiURL.range(of: #"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:/|$)"#, options: [.regularExpression, .caseInsensitive]) != nil
+        guard !carriesCredentials || url.scheme?.lowercased() == "https" || explicitLoopback else {
+            throw ThalovantApiError(message: "Credential-bearing Thalovant API requests require HTTPS except explicit loopback development endpoints.")
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -418,20 +440,26 @@ public final class ThalovantControlPlane {
     }
 
     func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = session.dataTask(with: request) { data, response, error in
-                if let error {
-                    continuation.resume(throwing: ThalovantApiError(message: "Thalovant API request failed: \(error.localizedDescription)"))
-                    return
+        let cancellation = HTTPRequestCancellation()
+        let result: (Data, HTTPURLResponse) = try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request) { data, response, error in
+                    if cancellation.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if let error {
+                        continuation.resume(throwing: ThalovantApiError(message: "Thalovant API request failed: \(safeTransportErrorMessage(error))"))
+                    } else if let http = response as? HTTPURLResponse {
+                        continuation.resume(returning: (data ?? Data(), http))
+                    } else {
+                        continuation.resume(throwing: ThalovantApiError(message: "Thalovant API returned a non-HTTP response."))
+                    }
                 }
-                guard let http = response as? HTTPURLResponse else {
-                    continuation.resume(throwing: ThalovantApiError(message: "Thalovant API returned a non-HTTP response."))
-                    return
-                }
-                continuation.resume(returning: (data ?? Data(), http))
+                cancellation.start(task)
             }
-            task.resume()
-        }
+        }, onCancel: { cancellation.cancel() })
+        try Task.checkCancellation()
+        return result
     }
 
     private func decodeResource<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -585,4 +613,52 @@ func stripEndpointPath(_ endpoint: String) -> String {
     components.query = nil
     components.fragment = nil
     return trimTrailingSlashes(components.string ?? endpoint)
+}
+
+
+/// Serializes cancellation with task publication, including cancellation before dataTask exists.
+private final class HTTPRequestCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionDataTask?
+    private var cancelled = false
+    var isCancelled: Bool { lock.locked { cancelled } }
+    func start(_ task: URLSessionDataTask) {
+        let wasCancelled = lock.locked { () -> Bool in self.task = task; return cancelled }
+        if wasCancelled { task.cancel() }
+        task.resume()
+    }
+    func cancel() {
+        let active = lock.locked { () -> URLSessionDataTask? in cancelled = true; return task }
+        active?.cancel()
+    }
+}
+
+/// Own redirect policy while preserving only the injected delegate's trust callbacks.
+final class ControlPlaneRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let upstream: URLSessionDelegate?
+    init(upstream: URLSessionDelegate? = nil) { self.upstream = upstream }
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        #if canImport(ObjectiveC)
+        if upstream?.urlSession?(session, didReceive: challenge, completionHandler: completionHandler) != nil { return }
+        #else
+        if let upstream { upstream.urlSession(session, didReceive: challenge, completionHandler: completionHandler); return }
+        #endif
+        completionHandler(.performDefaultHandling, nil)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        #if canImport(ObjectiveC)
+        if let upstream = upstream as? URLSessionTaskDelegate,
+            upstream.urlSession?(session, task: task, didReceive: challenge, completionHandler: completionHandler) != nil { return }
+        #else
+        if let upstream = upstream as? URLSessionTaskDelegate { upstream.urlSession(session, task: task, didReceive: challenge, completionHandler: completionHandler); return }
+        #endif
+        completionHandler(.performDefaultHandling, nil)
+    }
 }

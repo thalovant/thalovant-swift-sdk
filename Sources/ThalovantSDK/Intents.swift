@@ -426,11 +426,35 @@ public struct HubSkillIntents: Codable, Equatable, Sendable {
     }
 }
 
+/// One registered fallback handler, ordered by priority and then skill id.
+public struct HubFallback: Codable, Equatable, Sendable {
+    public let skillId: String
+    public let priority: Int
+    public init(skillId: String, priority: Int = 0) { self.skillId = skillId; self.priority = priority }
+    enum CodingKeys: String, CodingKey { case skillId = "skill_id"; case priority }
+    public func asJSON() -> JSONObject { encodedJSONObject(self) }
+    static func fromJSON(_ raw: JSONObject) -> HubFallback? {
+        guard let skill = raw["skill_id"]?.stringValue,
+              !skill.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let priority: Int
+        switch raw["priority"] {
+        case .integer(let value): priority = value
+        case .bool(let value): priority = value ? 1 : 0
+        case .number(let value):
+            guard value.isFinite, value >= Double(Int.min), value < Double(Int.max) else { return nil }
+            priority = Int(value)
+        default: priority = 0
+        }
+        return HubFallback(skillId: skill, priority: priority)
+    }
+}
+
 /// Everything a hub can be asked, grouped by skill.
 ///
 /// `source` says how it was read: `.intentManifest` carries sentences per
 /// language; `.engineManifests` is the names-only fallback, and `denied` then
-/// names the query the hub refused.
+/// names the query that triggered fallback. Silence uses the same marker and
+/// is not proof of a policy denial.
 public struct HubIntentInventory: Codable, Equatable, Sendable {
     /// The languages asked for, in the order asked: trimmed, one entry per
     /// language whatever its spellings (`en-us`, `en-US`, `en_us`), the first
@@ -441,24 +465,32 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
     public let source: HubIntentSource
     /// The queries the hub refused on the way to this result.
     public let denied: [String]
+    public let fallbacks: [HubFallback]
+    public let fallbacksKnown: Bool
 
     enum CodingKeys: String, CodingKey {
         case languages
         case skills
         case source
         case denied
+        case fallbacks
+        case fallbacksKnown = "fallbacks_known"
     }
 
     public init(
         languages: [String],
         skills: [HubSkillIntents],
         source: HubIntentSource = .intentManifest,
-        denied: [String] = []
+        denied: [String] = [],
+        fallbacks: [HubFallback] = [],
+        fallbacksKnown: Bool = false
     ) {
         self.languages = languages
         self.skills = skills
         self.source = source
         self.denied = denied
+        self.fallbacks = fallbacks
+        self.fallbacksKnown = fallbacksKnown
     }
 
     /// Every intent of every skill, in `skills` order.
@@ -473,6 +505,11 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
         intents.contains { intent in intent.phrases.values.contains { !$0.isEmpty } }
     }
 
+    /// Unknown fallback discovery cannot rule out a handler answering another language.
+    public func mayAnswer(_ lang: String) -> Bool {
+        intents.contains { $0.enabled && !$0.phrasesFor(lang).isEmpty } || !fallbacks.isEmpty || !fallbacksKnown
+    }
+
     public func asJSON() -> JSONObject {
         encodedJSONObject(self)
     }
@@ -483,7 +520,9 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
             languages: raw["languages"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
             skills: (raw["skills"]?.arrayValue ?? []).compactMap { $0.objectValue.flatMap(HubSkillIntents.fromJSON) },
             source: raw["source"]?.stringValue.flatMap(HubIntentSource.init(rawValue:)) ?? .intentManifest,
-            denied: raw["denied"]?.arrayValue?.compactMap { $0.stringValue } ?? []
+            denied: raw["denied"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
+            fallbacks: (raw["fallbacks"]?.arrayValue ?? []).compactMap { $0.objectValue.flatMap(HubFallback.fromJSON) },
+            fallbacksKnown: raw["fallbacks_known"]?.boolValue ?? false
         )
     }
 
@@ -632,7 +671,7 @@ extension ThalovantClient {
         let answer = FirstReply()
 
         try await connect()
-        let denials = on(ThalovantEvents.policyDenied) { event in
+        let denials = on(ThalovantEvents.policyDenied, requestId: requestId) { event in
             if isPolicyDenial(event, of: queryType) {
                 gate.fail(ThalovantPolicyDeniedError.fromEvent(event))
             }
@@ -759,7 +798,7 @@ extension ThalovantClient {
 
         try await connect()
         let denials = on(ThalovantEvents.policyDenied) { event in
-            if isPolicyDenial(event, of: ThalovantEvents.intentDescribe) {
+            if (event.requestId == nil || byRequest[event.requestId!] != nil), isPolicyDenial(event, of: ThalovantEvents.intentDescribe) {
                 batch.gate.fail(ThalovantPolicyDeniedError.fromEvent(event))
             }
         }
@@ -767,7 +806,7 @@ extension ThalovantClient {
         let replies = on(ThalovantEvents.intentDescribeResponse) { event in
             let definitions = intentDefinitions(from: event)
             var key = event.requestId.flatMap { byRequest[$0] }
-            if key == nil, let first = definitions.first {
+            if event.requestId == nil, let first = definitions.first {
                 // No request id came back: the definition names what it describes.
                 key = unique.first {
                     $0.skillId == first.skillId && $0.intentName == first.intentName
@@ -863,7 +902,11 @@ extension ThalovantClient {
         } catch let denied as ThalovantPolicyDeniedError {
             guard options.fallback, denied.deniedType == ThalovantEvents.intentList else { throw denied }
             let manifests = try await intentEngineManifests(lang: asked[0], timeout: options.timeout)
-            return inventoryFromNames(manifests, languages: asked, denied: denied.deniedType)
+            return try await withFallbacks(inventoryFromNames(manifests, languages: asked, denied: denied.deniedType), timeout: options.timeout)
+        } catch let timeout as ThalovantTimeoutError {
+            guard options.fallback else { throw timeout }
+            let manifests = try await intentEngineManifests(lang: asked[0], timeout: options.timeout)
+            return try await withFallbacks(inventoryFromNames(manifests, languages: asked, denied: ThalovantEvents.intentList), timeout: options.timeout)
         }
 
         var wanted: [IntentRequestKey] = []
@@ -927,7 +970,7 @@ extension ThalovantClient {
         let skills = bySkill.keys.sorted().map { skillId in
             HubSkillIntents(skillId: skillId, intents: (bySkill[skillId] ?? []).sorted { $0.name < $1.name })
         }
-        return HubIntentInventory(languages: asked, skills: skills, source: .intentManifest)
+        return try await withFallbacks(HubIntentInventory(languages: asked, skills: skills, source: .intentManifest), timeout: options.timeout)
     }
 }
 
@@ -954,4 +997,38 @@ func inventoryFromNames(
         HubSkillIntents(skillId: skillId, intents: (bySkill[skillId] ?? [:]).values.sorted { $0.name < $1.name })
     }
     return HubIntentInventory(languages: languages, skills: skills, source: .engineManifests, denied: [denied])
+}
+
+
+extension ThalovantClient {
+    /// Registered fallback handlers; nil means discovery unavailable, [] means none registered.
+    public func listFallbacks(timeout: TimeInterval = 5) async throws -> [HubFallback]? {
+        try validateRuntimeTimeout(timeout)
+        let event: ThalovantEvent
+        do {
+            event = try await withThrowingTaskGroup(of: ThalovantEvent.self) { group in
+                defer { group.cancelAll() }
+                group.addTask {
+                    try await self.requestReply(queryType: ThalovantEvents.fallbackList,
+                        replyType: ThalovantEvents.fallbackListResponse, data: [:], timeout: timeout)
+                }
+                group.addTask {
+                    try await AsyncGate().wait(timeout: timeout, timeoutError: ThalovantTimeoutError("Fallback discovery timed out."))
+                    throw ThalovantTimeoutError("Fallback discovery timed out.")
+                }
+                return try await group.next()!
+            }
+        } catch is ThalovantPolicyDeniedError { return nil }
+          catch is ThalovantTimeoutError { return nil }
+        guard event.data["ok"]?.boolValue != false, let rows = event.data["fallbacks"]?.arrayValue else { return nil }
+        return rows.compactMap { $0.objectValue.flatMap(HubFallback.fromJSON) }.sorted {
+            $0.priority != $1.priority ? $0.priority < $1.priority : $0.skillId < $1.skillId
+        }
+    }
+
+    private func withFallbacks(_ inventory: HubIntentInventory, timeout: TimeInterval) async throws -> HubIntentInventory {
+        let handlers = try await listFallbacks(timeout: min(timeout, 1.5))
+        return HubIntentInventory(languages: inventory.languages, skills: inventory.skills,
+            source: inventory.source, denied: inventory.denied, fallbacks: handlers ?? [], fallbacksKnown: handlers != nil)
+    }
 }
