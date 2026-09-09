@@ -33,6 +33,13 @@ Run `python3 tools/check-source-hashes.py` from the Swift repository root to
 verify every shared C source and public header. CI and release jobs run this
 check and reject missing, additional, or changed files with stale hashes.
 
+Manifest schema version 2 separates the nine byte-identical upstream files in
+`shared_c` from the Swift-owned umbrella header in `swift_module`. Both groups
+are verified, including every header beneath `include/`. The previous flat
+manifest is rejected with a migration error: regroup its existing shared-file
+hashes and record the current Swift module header hash explicitly. Validation
+never rewrites the manifest or accepts stale hashes automatically.
+
 References: https://noiseprotocol.org/noise.html,
 https://www.rfc-editor.org/rfc/rfc7748,
 https://www.rfc-editor.org/rfc/rfc9106,

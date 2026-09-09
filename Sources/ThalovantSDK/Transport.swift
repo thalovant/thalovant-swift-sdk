@@ -162,6 +162,14 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
         return handshakeCompleteFlag
     }
 
+    #if DEBUG
+    /// Loopback-test barrier: callers admitted to this socket's pending handshake.
+    /// This test SPI is absent from release builds.
+    @_spi(Testing) public var _pendingConnectHandshakeWaiters: Int {
+        lock.locked { handshakeGate.waiterCount }
+    }
+    #endif
+
     public var lastError: String? {
         lock.lock()
         defer { lock.unlock() }

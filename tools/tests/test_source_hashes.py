@@ -19,13 +19,17 @@ class SourceHashTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         (self.root / "include/thalovant").mkdir(parents=True)
         self.hashes = {}
-        for name in ("noise.c", "include/thalovant/noise.h"):
+        self.wrapper = "include/CThalovantNoise.h"
+        for name in ("noise.c", "include/thalovant/noise.h", self.wrapper):
             (self.root / name).write_text("/* synthetic fixture */\n")
             self.hashes[name] = hashlib.sha256((self.root / name).read_bytes()).hexdigest()
         self.write_manifest()
 
     def write_manifest(self):
-        (self.root / "source-hashes.json").write_text(json.dumps(self.hashes))
+        manifest = {"schema_version": 2,
+                    "shared_c": {k: v for k, v in self.hashes.items() if k != self.wrapper},
+                    "swift_module": {k: v for k, v in self.hashes.items() if k == self.wrapper}}
+        (self.root / "source-hashes.json").write_text(json.dumps(manifest))
 
     def test_complete_copy_passes(self):
         checker.validate(self.root)
@@ -33,6 +37,25 @@ class SourceHashTests(unittest.TestCase):
     def test_changed_source_fails(self):
         (self.root / "noise.c").write_text("/* changed source */\n")
         with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
+            checker.validate(self.root)
+
+    def test_changed_umbrella_header_fails(self):
+        (self.root / self.wrapper).write_text("/* changed public umbrella */\n")
+        with self.assertRaisesRegex(ValueError, "SHA256 mismatch"):
+            checker.validate(self.root)
+
+    def test_old_ungrouped_manifest_requires_explicit_migration(self):
+        (self.root / "source-hashes.json").write_text(json.dumps(self.hashes))
+        with self.assertRaisesRegex(ValueError, "schema_version 2"):
+            checker.validate(self.root)
+
+    def test_umbrella_cannot_be_mislabelled_shared(self):
+        path = self.root / "source-hashes.json"
+        manifest = json.loads(path.read_text())
+        manifest["shared_c"].update(manifest["swift_module"])
+        manifest["swift_module"] = {}
+        path.write_text(json.dumps(manifest))
+        with self.assertRaisesRegex(ValueError, "shared_c source file list differs"):
             checker.validate(self.root)
 
     def test_dropped_manifest_entry_fails(self):

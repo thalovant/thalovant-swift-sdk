@@ -7,10 +7,11 @@
   cancellation/deadline from the shared handshake.
 - Consume the first-party C 0.4.1 pattern-specific handshake bounds fix and
   legacy key-entropy contract; expose AES declarations through the C module.
-- Verify all shared C source/header hashes before CI and release artifacts,
-  and retain independent peer failure logs while terminating rejected sessions.
+- Verify all shared C source/header and Swift module-header hashes before CI
+  and release artifacts, and retain peer failure logs and startup exit status.
 - Add network-free gate cancellation/timeout tests, an imported AES-GCM known
-  answer, and simultaneous XX/KK connection plus encrypted-send interop.
+  answer, and XX/KK connection plus encrypted-send interop that verifies all
+  three callers joined each pending handshake before releasing peer readiness.
 
 ## 0.2.0
 

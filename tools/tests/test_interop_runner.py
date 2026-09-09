@@ -8,15 +8,15 @@ import unittest
 
 
 class InteropRunnerTests(unittest.TestCase):
-    def run_fixture(self, swift_status: int, peer_status: int | None):
+    def run_fixture(self, swift_status: int, peer_status: int | None, publish_endpoint=True):
         with tempfile.TemporaryDirectory() as directory:
             commands = Path(directory)
             swift = commands / "swift"
             swift.write_text(f'#!/usr/bin/env bash\nif [[ "$1" == "build" ]]; then exit 0; fi\nexit {swift_status}\n')
             node = commands / "node"
             finish = "signal.pause()" if peer_status is None else f"time.sleep(0.3)\nsys.exit({peer_status})"
-            node.write_text('#!/usr/bin/env python3\nimport signal,sys,time\n'
-                            'print("ws://127.0.0.1:1", flush=True)\n'
+            endpoint = 'print("ws://127.0.0.1:1", flush=True)\n' if publish_endpoint else ''
+            node.write_text('#!/usr/bin/env python3\nimport signal,sys,time\n' + endpoint +
                             'print("synthetic peer diagnostic", flush=True)\n' + finish + '\n')
             swift.chmod(0o755)
             node.chmod(0o755)
@@ -33,6 +33,16 @@ class InteropRunnerTests(unittest.TestCase):
     def test_peer_failure_preserves_peer_log_and_exit_status(self):
         result = self.run_fixture(0, 7)
         self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("synthetic peer diagnostic", result.stdout)
+
+    def test_failure_before_endpoint_preserves_peer_status(self):
+        result = self.run_fixture(0, 19, publish_endpoint=False)
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertIn("synthetic peer diagnostic", result.stdout)
+
+    def test_successful_exit_without_endpoint_is_a_startup_failure(self):
+        result = self.run_fixture(0, 0, publish_endpoint=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn("synthetic peer diagnostic", result.stdout)
 
 
