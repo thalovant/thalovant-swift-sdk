@@ -331,7 +331,7 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                         }
                         if let (payload, isJSON) = decoded {
                             guard isJSON else { throw noiseError("Hub sent binary content although this client negotiated JSON only.") }
-                            try await self.handleFrame(JSONDecoder().decode(HiveMessage.self, from: payload))
+                            try self.handleFrame(JSONDecoder().decode(HiveMessage.self, from: payload), on: socket)
                         }
                     @unknown default:
                         throw noiseError("Unknown WebSocket frame type.")
@@ -371,22 +371,21 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
         socket.cancel(with: .goingAway, reason: nil); session?.invalidateAndCancel()
     }
 
-    private func handleFrame(_ message: HiveMessage) async throws {
-        switch message.msgType {
-        case "handshake", "shake":
-            throw noiseError("Unexpected handshake inside an established Noise session.")
-        case "bus":
-            let handlers = lock.locked { Array(busHandlers.values) }
-            for handler in handlers {
-                handler(message.payload)
+    func handleFrame(_ message: HiveMessage, on socket: URLSessionWebSocketTask) throws {
+        // Admit callbacks for the same socket that supplied the decrypted frame.
+        // There is no async hop between admission and delivery. Handlers run
+        // outside the lock so application callbacks can register/remove handlers.
+        let snapshot = try lock.locked { () throws -> ([(JSONObject) -> Void], [(HiveMessage) -> Void])? in
+            guard self.socket === socket, handshakeCompleteFlag else { return nil }
+            guard message.msgType != "handshake", message.msgType != "shake" else {
+                throw noiseError("Unexpected handshake inside an established Noise session.")
             }
-        default:
-            break
+            let bus = message.msgType == "bus" ? Array(busHandlers.values) : []
+            return (bus, Array(messageHandlers.values))
         }
-        let handlers = lock.locked { Array(messageHandlers.values) }
-        for handler in handlers {
-            handler(message)
-        }
+        guard let (bus, messages) = snapshot else { return }
+        for handler in bus { handler(message.payload) }
+        for handler in messages { handler(message) }
     }
 
 }

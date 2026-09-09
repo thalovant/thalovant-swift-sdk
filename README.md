@@ -31,7 +31,11 @@ iOS 15+, macOS 12+, or Linux (Foundation networking). On Linux, WSS also
 requires FoundationNetworking/libcurl compiled with WebSocket support.
 The stock `swift:5.10` and `swift:6.3.3` images build this SDK but their
 FoundationNetworking/libcurl rejects WebSockets. Such builds return a connection error and never
-report readiness; use a WebSocket-capable Swift distribution for runtime WSS.
+report readiness. CI also verifies real WSS on Swift 6.3.3 with a WebSocket-enabled
+libcurl 8.22.0. The reproducible platform build is in
+[`tools/interop/build-websocket-curl.sh`](tools/interop/build-websocket-curl.sh);
+configure the runtime linker to load that libcurl. The SDK itself retains
+Foundation sockets and adds no package dependency.
 
 ## Quick Start
 

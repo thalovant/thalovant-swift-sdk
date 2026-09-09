@@ -16,7 +16,8 @@
   writes, clear state on disconnect/failure, and isolate old socket callbacks
   during reconnect. Plaintext sends and sends before readiness fail closed.
 - Add independent Node XX/KK transcripts, PSK vectors, wire negotiation and
-  reconnect, framing/tamper/replay, and persistent-store security tests.
+  reconnect, framing/tamper/replay, and persistent-store security tests. Verify
+  real Node peer exchanges on macOS and Linux with WebSocket-enabled libcurl.
 
 ## 0.1.9
 

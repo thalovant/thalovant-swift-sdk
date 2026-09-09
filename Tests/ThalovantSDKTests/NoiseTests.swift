@@ -1,4 +1,7 @@
 import XCTest
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 @testable import ThalovantSDK
 
 private struct NoiseFixture: Decodable {
@@ -186,12 +189,19 @@ final class NoiseTests: XCTestCase {
     func testConcurrentProcessesCreateOnePersistentIdentity() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        var location = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
         var executable: URL?
-        for _ in 0..<6 {
-            let candidate = location.appendingPathComponent("ThalovantNoiseStoreFixture")
-            if FileManager.default.isExecutableFile(atPath: candidate.path) { executable = candidate; break }
-            location.deleteLastPathComponent()
+        // macOS launches the system xctest runner; its argv[0] is outside the
+        // package. The XCTest bundle identifies the actual build directory.
+        let roots = [Bundle(for: NoiseTests.self).bundleURL,
+                     URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()]
+        for root in roots {
+            var location = root
+            for _ in 0..<6 {
+                let candidate = location.appendingPathComponent("ThalovantNoiseStoreFixture")
+                if FileManager.default.isExecutableFile(atPath: candidate.path) { executable = candidate; break }
+                location.deleteLastPathComponent()
+            }
+            if executable != nil { break }
         }
         let helper = try XCTUnwrap(executable, "swift build/test must build the test fixture executable")
         let processes: [(Process, Pipe)] = try (0..<8).map { _ in
@@ -211,6 +221,25 @@ final class NoiseTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(publicKeys.first).count, 65)
         let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
         XCTAssertFalse(files.contains { $0.hasPrefix(".new-") })
+    }
+    func testDetachedSocketCannotDeliverFramesOrChangeFailureState() async throws {
+        let identity = try ThalovantIdentity(json: ["access_key": "fixture", "password": "fixture", "default_master": "ws://localhost", "site_id": "fixture"])
+        let transport = HiveMindWSSTransport(identity: identity)
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let oldSocket = session.webSocketTask(with: URL(string: "ws://127.0.0.1:1")!)
+        var delivered = 0
+        transport.addBusHandler { _ in delivered += 1 }
+        transport.addMessageHandler { _ in delivered += 1 }
+        await transport.disconnect()
+        try transport.handleFrame(HiveMessage(msgType: "bus", payload: [:]), on: oldSocket)
+        try transport.handleFrame(HiveMessage(msgType: "shake", payload: [:]), on: oldSocket)
+        transport.handleSocketOpen(on: oldSocket)
+        transport.handleSocketClosed(ThalovantConnectionError("old socket failed"), on: oldSocket)
+        XCTAssertEqual(delivered, 0)
+        XCTAssertNil(transport.lastError)
+        XCTAssertFalse(transport.connected)
+        XCTAssertFalse(transport.handshakeComplete)
     }
     func testSendBeforeHandshakeAndPlaintextOptOutFail() async throws {
         let identity = try ThalovantIdentity(json: ["access_key": "fixture", "password": "fixture", "default_master": "ws://localhost", "site_id": "fixture"])
