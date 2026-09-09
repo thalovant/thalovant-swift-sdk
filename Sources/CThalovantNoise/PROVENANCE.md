@@ -26,6 +26,20 @@ with both GCC and Clang. Keep these shared files byte-identical when fixing
 core behavior, and rerun both SDK suites; `source-hashes.json` records this
 release's copy.
 
+This copy comes from `thalovant-embedded-c` version `0.4.1`, source commit
+`718ee9497c3e50516a3a8e6df5868114a59af784`. The commit is available from
+https://github.com/thalovant/thalovant-embedded-c/commit/718ee9497c3e50516a3a8e6df5868114a59af784.
+Run `python3 tools/check-source-hashes.py` from the Swift repository root to
+verify every shared C source and public header. CI and release jobs run this
+check and reject missing, additional, or changed files with stale hashes.
+
+Manifest schema version 2 separates the nine byte-identical upstream files in
+`shared_c` from the Swift-owned umbrella header in `swift_module`. Both groups
+are verified, including every header beneath `include/`. The previous flat
+manifest is rejected with a migration error: regroup its existing shared-file
+hashes and record the current Swift module header hash explicitly. Validation
+never rewrites the manifest or accepts stale hashes automatically.
+
 References: https://noiseprotocol.org/noise.html,
 https://www.rfc-editor.org/rfc/rfc7748,
 https://www.rfc-editor.org/rfc/rfc9106,

@@ -9,6 +9,11 @@
 enum token { END, E, S, EE, ES, SE, SS, PSK };
 static const int xx[3][6] = {{E, END}, {E, EE, S, ES, PSK, END}, {S, SE, END}};
 static const int kk[2][6] = {{PSK, E, ES, SS, END}, {E, EE, SE, END}};
+static int valid_handshake_step(const thalovant_noise *s)
+{
+    return (s->pattern == THALOVANT_NOISE_XX && s->step >= 0 && s->step < 3) ||
+           (s->pattern == THALOVANT_NOISE_KK && s->step >= 0 && s->step < 2);
+}
 static int fail(thalovant_noise *s, int error)
 {
     if (s) {
@@ -224,8 +229,8 @@ int thalovant_noise_write(thalovant_noise *s, const uint8_t *payload, size_t len
     int rc;
     if (written)
         *written = 0;
-    if (!s || !written || !out || (!payload && len) || s->failed || s->ready || s->step < 0 ||
-        s->step > 2 || ((s->step % 2 == 0) != s->initiator))
+    if (!s || !written || !out || (!payload && len) || s->failed || s->ready ||
+        !valid_handshake_step(s) || ((s->step % 2 == 0) != s->initiator))
         return fail(s, THALOVANT_ERR_INVALID);
     /* Maximum possible overhead is ephemeral+encrypted static+payload tag. */
     if (len > 65535 - 96 || capacity < len + 96)
@@ -273,8 +278,8 @@ int thalovant_noise_read(thalovant_noise *s, const uint8_t *message, size_t len,
     int rc;
     if (written)
         *written = 0;
-    if (!s || !written || !payload || !message || s->failed || s->ready || s->step < 0 ||
-        s->step > 2 || ((s->step % 2 == 0) == s->initiator) || len > 65535)
+    if (!s || !written || !payload || !message || s->failed || s->ready ||
+        !valid_handshake_step(s) || ((s->step % 2 == 0) == s->initiator) || len > 65535)
         return fail(s, THALOVANT_ERR_INVALID);
     tokens = s->pattern == THALOVANT_NOISE_XX ? xx[s->step] : kk[s->step];
     for (unsigned i = 0; tokens[i]; i++) {

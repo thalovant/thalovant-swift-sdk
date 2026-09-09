@@ -58,6 +58,13 @@ int thalovant_aes_gcm_decrypt(const uint8_t key[16], const uint8_t *nonce, size_
  * Derive the 16-byte runtime key from `identity.crypto_key`: trim, then take
  * the first 16 bytes. Returns THALOVANT_ERR_MISSING when the key is NULL or
  * blank and THALOVANT_ERR_INVALID when fewer than 16 bytes remain.
+ *
+ * Legacy callers must provision at least 128 bits of unpredictable entropy
+ * in the retained key bytes; human-chosen strings permit offline brute-force
+ * attacks against captured frames. Entropy in a discarded suffix does not
+ * strengthen the key. This derivation is preserved for legacy Node wire
+ * compatibility. v3 Noise uses separate 32-byte session keys and never calls
+ * this function.
  */
 int thalovant_crypto_runtime_key(const char *crypto_key, uint8_t out[16]);
 

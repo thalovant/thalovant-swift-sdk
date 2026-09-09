@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.2.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.2.1"),
 ]
 ```
 
@@ -91,9 +91,10 @@ messages use ordered AES256-GCM binary frames; `connect()` returns after the
 Noise exchange and encrypted application HELLO have been sent. Reconnect
 creates fresh ephemeral keys and counters while retaining the static identity
 and hub pin. Preserve that state across app restarts. Certificate verification
-uses Foundation's normal trust evaluation. Before issuing concurrent requests,
-`try await client.connect()` once; overlapping initial connection attempts return
-an explicit in-progress error.
+uses Foundation's normal trust evaluation. Concurrent initial requests join the
+same connection and wait for authenticated readiness. A joining caller's own
+timeout or cancellation does not abort other waiters. The caller that starts
+the connection owns its teardown if that initial attempt fails or is cancelled.
 
 By default the SDK stores client keys and hub pins in private 0600 files under
 `Application Support/Thalovant/noise-swift` (platform-specific base directory),

@@ -14,6 +14,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Verify shared C provenance
+        run: python3 tools/check-source-hashes.py
+      - name: Test provenance drift rejection
+        run: python3 -m unittest discover -s tools/tests
       - run: swift --version
       - run: swift build
       - run: swift test
@@ -38,6 +42,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+      - name: Verify shared C provenance
+        run: python3 tools/check-source-hashes.py
+      - name: Test provenance drift rejection
+        run: python3 -m unittest discover -s tools/tests
       - run: swift --version
       - run: swift build
       - run: swift test
