@@ -25,7 +25,7 @@ public final class ThalovantSubscription: @unchecked Sendable {
     }
 }
 
-/// Data-plane client for a Thalovant hub. Version 0.2 speaks v3 Noise over WSS;
+/// Data-plane client for a Thalovant hub. Speaks v3 Noise over WSS;
 /// requesting the HTTPS or MQTT transport throws
 /// `ThalovantUnsupportedProtocolError`.
 public final class ThalovantClient: @unchecked Sendable {

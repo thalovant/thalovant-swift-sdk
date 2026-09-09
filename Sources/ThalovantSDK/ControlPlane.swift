@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.2.1"
+public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.3.0"
 
 /// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {
@@ -418,20 +418,26 @@ public final class ThalovantControlPlane {
     }
 
     func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
-        try await withCheckedThrowingContinuation { continuation in
-            let task = session.dataTask(with: request) { data, response, error in
-                if let error {
-                    continuation.resume(throwing: ThalovantApiError(message: "Thalovant API request failed: \(error.localizedDescription)"))
-                    return
+        let cancellation = HTTPRequestCancellation()
+        let result: (Data, HTTPURLResponse) = try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                let task = session.dataTask(with: request) { data, response, error in
+                    if cancellation.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else if let error {
+                        continuation.resume(throwing: ThalovantApiError(message: "Thalovant API request failed: \(safeTransportErrorMessage(error))"))
+                    } else if let http = response as? HTTPURLResponse {
+                        continuation.resume(returning: (data ?? Data(), http))
+                    } else {
+                        continuation.resume(throwing: ThalovantApiError(message: "Thalovant API returned a non-HTTP response."))
+                    }
                 }
-                guard let http = response as? HTTPURLResponse else {
-                    continuation.resume(throwing: ThalovantApiError(message: "Thalovant API returned a non-HTTP response."))
-                    return
-                }
-                continuation.resume(returning: (data ?? Data(), http))
+                cancellation.start(task)
             }
-            task.resume()
-        }
+        }, onCancel: { cancellation.cancel() })
+        try Task.checkCancellation()
+        return result
     }
 
     private func decodeResource<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
@@ -585,4 +591,22 @@ func stripEndpointPath(_ endpoint: String) -> String {
     components.query = nil
     components.fragment = nil
     return trimTrailingSlashes(components.string ?? endpoint)
+}
+
+
+/// Serializes cancellation with task publication, including cancellation before dataTask exists.
+private final class HTTPRequestCancellation: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: URLSessionDataTask?
+    private var cancelled = false
+    var isCancelled: Bool { lock.locked { cancelled } }
+    func start(_ task: URLSessionDataTask) {
+        let wasCancelled = lock.locked { () -> Bool in self.task = task; return cancelled }
+        if wasCancelled { task.cancel() }
+        task.resume()
+    }
+    func cancel() {
+        let active = lock.locked { () -> URLSessionDataTask? in cancelled = true; return task }
+        active?.cancel()
+    }
 }

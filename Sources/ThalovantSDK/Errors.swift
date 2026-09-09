@@ -50,11 +50,11 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
 /// echoed request `input` or arbitrary body content, so submitted credentials
 /// (`POST /v1/clients` sends apiKey/password/cryptoKey, which FastAPI repeats in
 /// a validation error's `input`) can never reach `message`, `description`, or
-/// `errorDescription`. A non-JSON body falls back to a bounded, single-line
-/// snippet. The full body stays on `ThalovantApiError.body` for `errorCode`.
+/// `errorDescription`. A non-JSON body is retained only on
+/// `ThalovantApiError.body`, never echoed into ordinary exception messages.
 func serverErrorDetail(from body: String) -> String {
     guard let object = try? ThalovantJSON.decodeObject(body) else {
-        return boundedServerDetail(body)
+        return ""
     }
     var parts: [String] = []
     if let code = ThalovantApiError.decodeErrorCode(from: body) {

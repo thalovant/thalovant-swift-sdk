@@ -81,7 +81,7 @@ final class AsyncGate: @unchecked Sendable {
         waiter?.resume(with: outcome)
     }
 
-    func wait(timeout: TimeInterval, timeoutError: Error?) async throws {
+    func wait(timeout: TimeInterval?, timeoutError: Error?) async throws {
         let id = UUID()
         try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
@@ -97,8 +97,10 @@ final class AsyncGate: @unchecked Sendable {
                     waiter.resume(with: immediate)
                     return
                 }
-                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-                    self?.finishWaiter(id, with: timeoutError.map { .failure($0) } ?? .success(()))
+                if let timeout {
+                    DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                        self?.finishWaiter(id, with: timeoutError.map { .failure($0) } ?? .success(()))
+                    }
                 }
             }
         } onCancel: {
@@ -112,11 +114,28 @@ final class AsyncGate: @unchecked Sendable {
 /// production implementation; the test suite substitutes an in-memory hub so
 /// the client's request/reply paths run without a network.
 protocol HiveMindBusTransport: AnyObject, Sendable {
+    var connected: Bool { get }
+    var handshakeComplete: Bool { get }
+    var connectionInfo: ThalovantConnectionInfo { get }
+    var supportsHiveMessages: Bool { get }
+    func addMessageHandler(_ handler: @escaping (HiveMessage) -> Void) -> UUID
+    func removeMessageHandler(_ id: UUID)
+    func sendHiveFrame(_ message: HiveMessage) async throws
     func connect(timeout: TimeInterval) async throws
     func disconnect() async
     func addBusHandler(_ handler: @escaping (JSONObject) -> Void) -> UUID
     func removeBusHandler(_ id: UUID)
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws
+}
+
+extension HiveMindBusTransport {
+    var connected: Bool { false }
+    var handshakeComplete: Bool { connected }
+    var connectionInfo: ThalovantConnectionInfo { ThalovantConnectionInfo(phase: connected && handshakeComplete ? "ready" : "idle") }
+    var supportsHiveMessages: Bool { false }
+    func addMessageHandler(_ handler: @escaping (HiveMessage) -> Void) -> UUID { UUID() }
+    func removeMessageHandler(_ id: UUID) {}
+    func sendHiveFrame(_ message: HiveMessage) async throws { throw ThalovantRuntimeError("This transport does not support HiveMind query frames.") }
 }
 
 /// WSS data-plane transport for the HiveMind runtime, backed by
@@ -126,6 +145,13 @@ protocol HiveMindBusTransport: AnyObject, Sendable {
 /// X25519, AES256-GCM and the exact Argon2id password derivation. Runtime
 /// messages use ordered encrypted binary frames; legacy downgrade is rejected.
 public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchecked Sendable {
+    var supportsHiveMessages: Bool { true }
+    var connectionInfo: ThalovantConnectionInfo {
+        lock.locked { ThalovantConnectionInfo(phase: lastErrorMessage != nil ? "error" : handshakeCompleteFlag && connectedFlag ? "ready" : connectedFlag ? "handshake" : "idle",
+            lastError: lastErrorMessage == nil ? nil : "HiveMind WSS connection failed.") }
+    }
+    func sendHiveFrame(_ message: HiveMessage) async throws { try await send(message) }
+
     public let identity: ThalovantIdentity
     public let userAgent: String
 
@@ -223,7 +249,9 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     // MARK: Lifecycle
 
     public func connect(timeout: TimeInterval = 6) async throws {
+        try validateRuntimeTimeout(timeout)
         try Task.checkCancellation()
+        let deadline = ProcessInfo.processInfo.systemUptime + timeout
         let url = try endpointURL()
         let setup = lock.locked { () -> (URLSessionWebSocketTask, AsyncGate, AsyncGate, Bool)? in
             if connectedFlag && handshakeCompleteFlag { return nil }
@@ -244,13 +272,13 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             startReceiveLoop(on: socket)
         }
         do {
-            try await open.wait(timeout: timeout, timeoutError: noiseError("HiveMind WSS connect timed out."))
+            try await open.wait(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime), timeoutError: noiseError("HiveMind WSS connect timed out."))
             try Task.checkCancellation()
             try lock.locked {
                 guard self.socket === socket else { throw noiseError("Connection attempt was interrupted.") }
                 connectedFlag = true
             }
-            try await handshake.wait(timeout: timeout, timeoutError: ThalovantTimeoutError("HiveMind WSS handshake timed out."))
+            try await handshake.wait(timeout: max(0, deadline - ProcessInfo.processInfo.systemUptime), timeoutError: ThalovantTimeoutError("HiveMind WSS handshake timed out."))
             try Task.checkCancellation()
             try lock.locked {
                 guard self.socket === socket, handshakeCompleteFlag else { throw noiseError("Connection closed during Noise negotiation.") }
@@ -407,12 +435,28 @@ private actor NoiseSocketWriter {
     func send(on socket: URLSessionWebSocketTask,
               frames: @escaping @Sendable () throws -> [URLSessionWebSocketTask.Message]) async throws {
         let previous = tail
+        let completion = AsyncGate()
         let next = Task {
-            if let previous { try await previous.value }
-            for message in try frames() { try await socket.send(message) }
+            do {
+                if let previous { try await previous.value }
+                try Task.checkCancellation()
+                for message in try frames() {
+                    try Task.checkCancellation()
+                    try await socket.send(message)
+                }
+                completion.open()
+            } catch {
+                completion.fail(error)
+                throw error
+            }
         }
         tail = next
-        try await next.value
+        // A cancelled caller must not remain stuck awaiting an unstructured
+        // predecessor task. The transport invalidates a possibly partial send;
+        // the queued task checks cancellation before consuming a Noise nonce.
+        try await withTaskCancellationHandler(operation: {
+            try await completion.wait(timeout: nil, timeoutError: nil)
+        }, onCancel: { next.cancel() })
     }
 }
 

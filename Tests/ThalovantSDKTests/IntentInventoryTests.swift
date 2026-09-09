@@ -72,6 +72,10 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     let listError: String?
     /// What `intent.service.adapt.manifest.get` answers (names only).
     let adaptNames: [String]
+    let fallbackPayload: JSONObject
+    let foreignFirst: Bool
+    let fallbackDelay: TimeInterval
+    let connectDelay: TimeInterval
 
     private let lock = NSLock()
     private var handlers: [UUID: (JSONObject) -> Void] = [:]
@@ -92,7 +96,9 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         replyDelay: TimeInterval? = nil,
         listRows: ((String) -> [JSONValue])? = nil,
         listError: String? = nil,
-        adaptNames: [String] = []
+        adaptNames: [String] = [],
+        fallbackPayload: JSONObject = ["fallbacks": .array([])],
+        foreignFirst: Bool = false, fallbackDelay: TimeInterval = 0, connectDelay: TimeInterval = 0
     ) {
         self.registered = registered
         self.refuse = refuse
@@ -106,6 +112,8 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.listRows = listRows
         self.listError = listError
         self.adaptNames = adaptNames
+        self.fallbackPayload = fallbackPayload
+        self.foreignFirst = foreignFirst; self.fallbackDelay = fallbackDelay; self.connectDelay = connectDelay
     }
 
     var connected: Bool { lock.locked { connectedFlag } }
@@ -125,6 +133,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     // MARK: transport surface
 
     func connect(timeout: TimeInterval) async throws {
+        if connectDelay > 0 { try await Task.sleep(nanoseconds: UInt64(connectDelay * 1_000_000_000)) }
         lock.locked { connectedFlag = true }
     }
 
@@ -157,6 +166,15 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         if !echoRequestId {
             replyContext["request_id"] = nil
         }
+        if foreignFirst && type == ThalovantEvents.intentDescribeResponse {
+            var bad = data
+            if var definitions = bad["definitions"]?.arrayValue, var first = definitions.first?.objectValue,
+               var definition = first["definition"]?.objectValue {
+                definition["samples"] = .array([.string("foreign phrase")]); first["definition"] = .object(definition)
+                definitions[0] = .object(first); bad["definitions"] = .array(definitions)
+                fanOut(["type": .string(type), "data": .object(bad), "context": .object(["request_id": .string("foreign-request")])])
+            }
+        }
         let payload: JSONObject = ["type": .string(type), "data": .object(data), "context": .object(replyContext)]
         guard let replyDelay else {
             fanOut(payload)
@@ -176,6 +194,8 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     }
 
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws {
+        if type == ThalovantEvents.fallbackList && fallbackDelay > 0 { try await Task.sleep(nanoseconds: UInt64(fallbackDelay * 1_000_000_000)) }
+        if foreignFirst { deliver(ThalovantEvents.policyDenied, data: ["denied_type": .string(type)], context: ["request_id": .string("foreign-request")]) }
         lock.locked {
             emittedLog.append(Emitted(type: type, data: data, context: context))
             if type == ThalovantEvents.intentDescribe {
@@ -200,6 +220,8 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         let sent = data["lang"]?.stringValue ?? ""
         let lang = normalizedLanguageTag(sent)
         switch type {
+        case ThalovantEvents.fallbackList:
+            deliver(ThalovantEvents.fallbackListResponse, data: fallbackPayload, context: context)
         case ThalovantEvents.intentList:
             if let listError {
                 deliver(
@@ -429,17 +451,82 @@ final class IntentInventoryTests: XCTestCase {
         }
     }
 
-    func testASilentHubTimesOutOnTheListing() async throws {
+    func testSilentListingFallsBackWithoutProvingPolicyDenial() async throws {
         let hub = FakeHubTransport(silent: [ThalovantEvents.intentList])
-        do {
-            _ = try await client(hub).intents(languages: ["en-us"], options: IntentInventoryOptions(timeout: 0.2))
-            XCTFail("expected ThalovantTimeoutError")
-        } catch let error as ThalovantTimeoutError {
-            XCTAssertTrue(error.message.contains("ovos.intent.list"), error.message)
-            XCTAssertTrue(error.message.contains("0.2s"), error.message)
-        } catch {
-            XCTFail("unexpected error: \(error)")
+        let result = try await client(hub).intents(languages: ["en-us"], options: IntentInventoryOptions(timeout: 0.03))
+        XCTAssertEqual(result.source, .engineManifests)
+        XCTAssertEqual(result.denied, [ThalovantEvents.intentList])
+        XCTAssertTrue(result.fallbacksKnown)
+        XCTAssertFalse(result.mayAnswer("de-de"))
+    }
+
+    func testSilentListingStrictModeAndSilentEnginesStillTimeOut() async throws {
+        for (silent, fallback, expected) in [
+            ([ThalovantEvents.intentList], false, ThalovantEvents.intentList),
+            ([ThalovantEvents.intentList, ThalovantEvents.adaptManifestGet], true, ThalovantEvents.adaptManifestGet),
+        ] {
+            do {
+                _ = try await client(FakeHubTransport(silent: Set(silent))).intents(
+                    languages: ["en-us"], options: IntentInventoryOptions(timeout: 0.03, fallback: fallback))
+                XCTFail("Expected timeout")
+            } catch let error as ThalovantTimeoutError { XCTAssertTrue(error.message.contains(expected)) }
         }
+    }
+
+    func testFallbackDiscoveryDistinguishesUnknownFromKnownEmpty() async throws {
+        for hub in [FakeHubTransport(refuse: [ThalovantEvents.fallbackList]),
+                    FakeHubTransport(silent: [ThalovantEvents.fallbackList]),
+                    FakeHubTransport(fallbackPayload: ["fallbacks": .string("invalid")]),
+                    FakeHubTransport(fallbackPayload: ["ok": .bool(false), "fallbacks": .array([])])] {
+            let inventory = try await client(hub).intents(languages: ["fr-fr"], options: IntentInventoryOptions(timeout: 0.03))
+            XCTAssertFalse(inventory.fallbacksKnown)
+            XCTAssertTrue(inventory.mayAnswer("de-de"))
+            XCTAssertEqual(inventory.asJSON()["fallbacks_known"], .bool(false))
+        }
+        let known = try await client(FakeHubTransport()).intents(languages: ["fr-fr"])
+        XCTAssertTrue(known.fallbacksKnown)
+        XCTAssertTrue(known.mayAnswer("fr-FR"))
+        XCTAssertFalse(known.mayAnswer("de-de"))
+        XCTAssertTrue(HubIntentInventory.fromJSON([:]).mayAnswer("de-de"))
+        XCTAssertEqual(HubIntentInventory.fromJSON(known.asJSON()), known)
+    }
+
+    func testForeignCorrelatedDenialsAndDescriptionsCannotCompleteOurRequests() async throws {
+        let inventory = try await client(FakeHubTransport(foreignFirst: true)).intents(languages: ["en-us", "fr-fr"])
+        XCTAssertTrue(inventory.hasPhrases)
+        XCTAssertFalse(inventory.intents.flatMap { $0.phrases.values.flatMap { $0 } }.contains("foreign phrase"))
+        XCTAssertTrue(inventory.fallbacksKnown)
+    }
+
+    func testFallbackBudgetIncludesConnectAndSendAndPreservesCancellation() async throws {
+        for hub in [FakeHubTransport(fallbackDelay: 5), FakeHubTransport(connectDelay: 5)] {
+            let sdk = try client(hub), start = ProcessInfo.processInfo.systemUptime
+            let handlers = try await sdk.listFallbacks(timeout: 0.03)
+            XCTAssertNil(handlers); XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 1)
+            let pending = Task { try await sdk.listFallbacks(timeout: 5) }
+            pending.cancel()
+            do { _ = try await pending.value; XCTFail("Expected cancellation") } catch is CancellationError {}
+        }
+        let start = ProcessInfo.processInfo.systemUptime
+        let inventory = try await client(FakeHubTransport(fallbackDelay: 5)).intents(languages: ["en-us"])
+        XCTAssertFalse(inventory.fallbacksKnown)
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 3)
+    }
+
+    func testFallbackDiscoveryParsesSortsAndRejectsUnsafePriority() async throws {
+        let rows: [JSONValue] = [
+            .object(["skill_id": .string("b"), "priority": .integer(20)]),
+            .object(["skill_id": .string("a"), "priority": .number(20.5)]),
+            .object(["skill_id": .string("default"), "priority": .string("10")]),
+            .object(["skill_id": .string("huge"), "priority": .number(1e100)]),
+            .object(["skill_id": .string("")]), .bool(false),
+        ]
+        let sdk = try client(FakeHubTransport(fallbackPayload: ["fallbacks": .array(rows)]))
+        let handlers = try await sdk.listFallbacks()
+        XCTAssertEqual(handlers, [HubFallback(skillId: "default"), HubFallback(skillId: "a", priority: 20), HubFallback(skillId: "b", priority: 20)])
+        let inventory = try await sdk.intents(languages: ["fr-fr"])
+        XCTAssertTrue(inventory.mayAnswer("de-de"))
+        XCTAssertTrue(inventory.fallbacksKnown)
     }
 
     func testADescribeThatNeverComesLeavesThatIntentWithoutSentences() async throws {

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.0
+
+- Add scoped conversations, direct HiveMind query/cascade replies, bounded event
+  streams and waits, action/code input helpers, and local connection/health diagnostics.
+- Fall back to engine intent names when the detailed listing is silent as well
+  as denied. Discover fallback handlers with a bounded optional probe and expose
+  known/unknown discovery plus conservative language answerability.
+- Ignore foreign correlated denials and describe replies; retain content-based
+  describe matching only when a reply carries no request id.
+- Bound connection timeout across socket open and handshake, and let send
+  cancellation interrupt queued waits before consuming another Noise nonce.
+- Propagate task cancellation to URLSession HTTP requests, exclude non-JSON
+  response bodies from ordinary errors, and reject unsafe JSON numeric-to-Int conversions.
+- Extend network-free inventory, runtime lifecycle, cancellation and security
+  regressions while retaining macOS/Linux CI and independent Node Noise interop.
+
 ## 0.2.1
 
 - Join concurrent WSS connection attempts instead of rejecting overlapping

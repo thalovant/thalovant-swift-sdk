@@ -3,6 +3,16 @@ import XCTest
 @testable import ThalovantSDK
 
 final class AsyncGateTests: XCTestCase {
+    func testUntimedGateWaitStillRespondsToCancellation() async throws {
+        let gate = AsyncGate()
+        let waiter = Task { try await gate.wait(timeout: nil, timeoutError: nil) }
+        waiter.cancel()
+        do { try await waiter.value; XCTFail("Expected cancellation") } catch is CancellationError {}
+        XCTAssertEqual(gate.waiterCount, 0)
+        gate.open()
+        try await gate.wait(timeout: nil, timeoutError: nil)
+    }
+
     private func waitForRegistrations(_ count: Int, on gate: AsyncGate) async throws {
         let deadline = Date().addingTimeInterval(3)
         while gate.waiterCount != count && Date() < deadline {
