@@ -517,7 +517,7 @@ actor NoiseSocketWriter {
                     catch { return }
                     let error = ThalovantTimeoutError("HiveMind physical write timed out.")
                     if state.finish(error) {
-                        completion.fail(error); onPhysicalFailure(error); physical.cancel()
+                        onPhysicalFailure(error); completion.fail(error); physical.cancel()
                     }
                 }
                 defer { expiry.cancel() }
@@ -526,7 +526,7 @@ actor NoiseSocketWriter {
                     if state.finish() { completion.open() }
                     if let failure = state.failure { throw failure }
                 } catch {
-                    if state.finish(error) { completion.fail(error); onPhysicalFailure(error) }
+                    if state.finish(error) { onPhysicalFailure(error); completion.fail(error) }
                     throw state.failure ?? error
                 }
             } catch {
