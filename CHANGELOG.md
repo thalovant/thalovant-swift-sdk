@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.1
+
+- Apply one Ask timeout across connection admission, authentication, sending and
+  reply collection. Clip fixed empty-reply and settling windows to that deadline.
+- Freeze Ask collection on policy denial or query timeout, retaining only speech
+  received before the hard failure, and interrupt optional waits immediately.
+- Return the first correlated runtime session ID from Ask and Query while preserving strict request
+  correlation and the original request ID.
+- Add regressions for blocked connection/send, clipped reply phases, cancellation
+  cleanup and explicit event-stream buffer overflow.
+
 ## 0.3.0
 
 - Validate both device authorization URLs before displaying a prompt, invoking

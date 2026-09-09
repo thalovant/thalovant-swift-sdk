@@ -212,9 +212,11 @@ private final class RuntimeQueryState: @unchecked Sendable {
     let gate = AsyncGate(); private let lock = NSLock()
     private var events: [ThalovantEvent] = [], fragments: [String] = []
     private var failure: ThalovantEvent?, complete = false
+    private var responseSessionId: String?
     func accept(_ event: ThalovantEvent) {
         lock.locked {
             guard !complete else { return }; events.append(event)
+            if responseSessionId == nil, let session = event.sessionId, !session.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { responseSessionId = session }
             if event.name == "hive.query.complete" { complete = true; gate.open() }
             else if [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains(event.name) {
                 let fragment = event.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
@@ -232,7 +234,7 @@ private final class RuntimeQueryState: @unchecked Sendable {
             }
             let terminalFailure = failure.flatMap { [ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout].contains($0.name) ? $0 : nil }
             return ThalovantReply(text: fragments.joined(separator: " "), displayText: stripSsml(fragments.joined(separator: " ")), utterances: fragments, handled: terminalFailure == nil, ok: terminalFailure == nil,
-                sessionId: sessionId, requestId: requestId, events: events, failureEvent: terminalFailure)
+                sessionId: responseSessionId ?? sessionId, requestId: requestId, events: events, failureEvent: terminalFailure)
         }
     }
 }
