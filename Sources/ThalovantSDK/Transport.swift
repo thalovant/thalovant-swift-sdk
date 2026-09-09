@@ -6,10 +6,10 @@ import FoundationNetworking
 extension NSLock {
     /// Runs `body` while holding the lock. Safe to call from async contexts
     /// because the lock is only held inside this synchronous helper.
-    func locked<T>(_ body: () -> T) -> T {
+    func locked<T>(_ body: () throws -> T) rethrows -> T {
         lock()
         defer { unlock() }
-        return body()
+        return try body()
     }
 }
 
@@ -127,14 +127,9 @@ protocol HiveMindBusTransport: AnyObject, Sendable {
 /// WSS data-plane transport for the HiveMind runtime, backed by
 /// `URLSessionWebSocketTask`.
 ///
-/// Wire protocol (mirrors the Node SDK's WSS transport):
-/// 1. Connect to the identity's WSS endpoint with
-///    `?authorization=base64("<user agent>:<access key>")`.
-/// 2. The hub sends a `handshake`/`shake` frame with `payload.preshared_key`.
-/// 3. The client answers with a plaintext `hello` frame carrying `pubkey`,
-///    `session.session_id`, and `site_id`; the handshake is then complete.
-/// 4. Subsequent frames are JSON `HiveMessage`s, AES-128-GCM encrypted with the
-///    identity `crypto_key` when one is present.
+/// HiveMind v3 WSS transport: authenticated Noise XXpsk2 / KKpsk0 with
+/// X25519, AES256-GCM and the exact Argon2id password derivation. Runtime
+/// messages use ordered encrypted binary frames; legacy downgrade is rejected.
 public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchecked Sendable {
     public let identity: ThalovantIdentity
     public let userAgent: String
@@ -142,6 +137,9 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     private let lock = NSLock()
     private var socket: URLSessionWebSocketTask?
     private var session: URLSession?
+    private let noiseStore: any ThalovantNoiseStore
+    private var negotiator: NoiseNegotiator?
+    private var writer = NoiseSocketWriter()
     private var connectedFlag = false
     private var handshakeCompleteFlag = false
     private var lastErrorMessage: String?
@@ -150,9 +148,11 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     private var busHandlers: [UUID: (JSONObject) -> Void] = [:]
     private var messageHandlers: [UUID: (HiveMessage) -> Void] = [:]
 
-    public init(identity: ThalovantIdentity, userAgent: String = defaultThalovantUserAgent) {
+    public init(identity: ThalovantIdentity, userAgent: String = defaultThalovantUserAgent,
+                noiseStore: (any ThalovantNoiseStore)? = nil) {
         self.identity = identity
         self.userAgent = userAgent
+        self.noiseStore = noiseStore ?? ThalovantFileNoiseStore(identityScope: identity.accessKey)
     }
 
     public var connected: Bool {
@@ -220,54 +220,49 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     // MARK: Lifecycle
 
     public func connect(timeout: TimeInterval = 6) async throws {
-        let alreadyReady = lock.locked {
-            if connectedFlag && handshakeCompleteFlag {
-                return true
-            }
-            openGate = AsyncGate()
-            handshakeGate = AsyncGate()
-            handshakeCompleteFlag = false
-            lastErrorMessage = nil
-            return false
-        }
-        if alreadyReady { return }
-
         let url = try endpointURL()
-        let delegate = WebSocketOpenDelegate(transport: self)
-        let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
-        let socket = session.webSocketTask(with: url)
-        lock.locked {
-            self.session = session
-            self.socket = socket
+        let setup = try lock.locked { () throws -> (URLSessionWebSocketTask, AsyncGate, AsyncGate)? in
+            if connectedFlag && handshakeCompleteFlag { return nil }
+            guard socket == nil else { throw noiseError("A connection attempt is already in progress.") }
+            negotiator = NoiseNegotiator(identity: identity, store: noiseStore)
+            writer = NoiseSocketWriter()
+            openGate = AsyncGate(); handshakeGate = AsyncGate()
+            handshakeCompleteFlag = false; lastErrorMessage = nil
+            let delegate = WebSocketOpenDelegate(transport: self)
+            let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
+            let socket = session.webSocketTask(with: url)
+            self.session = session; self.socket = socket
+            return (socket, openGate, handshakeGate)
         }
+        guard let (socket, open, handshake) = setup else { return }
         socket.resume()
         startReceiveLoop(on: socket)
-
         do {
-            try await openGate.wait(
-                timeout: timeout,
-                timeoutError: ThalovantConnectionError("HiveMind WSS connect timed out.")
-            )
-            lock.locked { connectedFlag = true }
-            try await handshakeGate.wait(
-                timeout: timeout,
-                timeoutError: ThalovantTimeoutError("HiveMind WSS handshake timed out.")
-            )
+            try await open.wait(timeout: timeout, timeoutError: noiseError("HiveMind WSS connect timed out."))
+            try lock.locked {
+                guard self.socket === socket else { throw noiseError("Connection attempt was interrupted.") }
+                connectedFlag = true
+            }
+            try await handshake.wait(timeout: timeout, timeoutError: ThalovantTimeoutError("HiveMind WSS handshake timed out."))
+            try lock.locked {
+                guard self.socket === socket, handshakeCompleteFlag else { throw noiseError("Connection closed during Noise negotiation.") }
+            }
         } catch {
-            await disconnect()
+            handleSocketFailure(error, on: socket)
             throw error
         }
     }
 
     public func disconnect() async {
-        let (socket, session) = lock.locked { () -> (URLSessionWebSocketTask?, URLSession?) in
-            let pair = (self.socket, self.session)
-            self.socket = nil
-            self.session = nil
-            connectedFlag = false
-            handshakeCompleteFlag = false
+        let (socket, session, open, handshake) = lock.locked { () -> (URLSessionWebSocketTask?, URLSession?, AsyncGate, AsyncGate) in
+            let pair = (self.socket, self.session, openGate, handshakeGate)
+            self.socket = nil; self.session = nil
+            connectedFlag = false; handshakeCompleteFlag = false
+            negotiator?.connection?.close(); negotiator = nil
             return pair
         }
+        let error = noiseError("HiveMind WSS disconnected.")
+        open.fail(error); handshake.fail(error)
         socket?.cancel(with: .normalClosure, reason: nil)
         session?.invalidateAndCancel()
     }
@@ -275,30 +270,25 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     // MARK: Sending
 
     public func send(_ message: HiveMessage, encrypt: Bool = true) async throws {
-        let (socket, ready) = lock.locked { (self.socket, handshakeCompleteFlag) }
-        guard let socket else {
-            throw ThalovantConnectionError("HiveMind WSS transport is not connected.")
+        let (socket, connection, writer) = try lock.locked { () throws -> (URLSessionWebSocketTask, NoiseConnection, NoiseSocketWriter) in
+            guard encrypt, let socket = self.socket, handshakeCompleteFlag, let connection = negotiator?.connection, connection.ready else {
+                throw noiseError("HiveMind v3 messages require a completed Noise handshake and encryption.")
+            }
+            return (socket, connection, self.writer)
         }
-        let payload = try HiveWire.encode(
-            message,
-            cryptoKey: identity.cryptoKey,
-            encrypt: encrypt && ready
-        )
-        try await sendText(payload, on: socket)
+        do {
+            try await writer.send(on: socket) {
+                let bytes = try JSONEncoder().encode(message)
+                return try connection.encrypt(bytes).map { .data($0) }
+            }
+        } catch {
+            handleSocketFailure(error, on: socket)
+            throw noiseError("HiveMind WSS send failed: \(safeTransportErrorMessage(error))")
+        }
     }
 
     public func emitBus(type: String, data: JSONObject, context: JSONObject) async throws {
         try await send(HiveWire.busMessage(type: type, data: data, context: context))
-    }
-
-    private func sendText(_ text: String, on socket: URLSessionWebSocketTask) async throws {
-        do {
-            try await socket.send(.string(text))
-        } catch {
-            // Scrub like handleSocketFailure: a failed send can surface the
-            // authorized connection URL, and this path bypasses that fallback.
-            throw ThalovantConnectionError("HiveMind WSS send failed: \(safeTransportErrorMessage(error))")
-        }
     }
 
     // MARK: Receiving
@@ -308,96 +298,111 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             while true {
                 guard let self else { return }
                 do {
-                    let message = try await socket.receive()
-                    switch message {
+                    let frame = try await socket.receive()
+                    guard self.lock.locked({ self.socket === socket }) else { return }
+                    switch frame {
                     case .string(let text):
-                        try await self.handleFrame(HiveWire.decode(text: text, cryptoKey: self.identity.cryptoKey))
+                        let (replies, connection, writer) = try self.lock.locked { () throws -> ([HiveMessage], NoiseConnection?, NoiseSocketWriter) in
+                            guard self.socket === socket, !self.handshakeCompleteFlag, let negotiator = self.negotiator else {
+                                throw noiseError("Unexpected cleartext frame after Noise negotiation.")
+                            }
+                            let replies = try negotiator.receive(HiveWire.decode(text: text, cryptoKey: nil))
+                            return (replies, negotiator.connection, self.writer)
+                        }
+                        for reply in replies {
+                            try await writer.send(on: socket) { [.string(try HiveWire.encode(reply, cryptoKey: nil, encrypt: false))] }
+                        }
+                        if let connection, connection.ready {
+                            let hello = HiveWire.helloMessage(siteId: self.identity.siteId, publicKey: self.identity.publicKey,
+                                                            sessionId: "thalovant-swift-" + UUID().uuidString.lowercased())
+                            try await writer.send(on: socket) { try connection.encrypt(JSONEncoder().encode(hello)).map { .data($0) } }
+                            self.lock.locked {
+                                guard self.socket === socket else { return }
+                                self.handshakeCompleteFlag = true
+                                self.handshakeGate.open()
+                            }
+                        }
                     case .data(let data):
-                        try await self.handleFrame(HiveWire.decode(data: data, cryptoKey: self.identity.cryptoKey))
+                        let decoded = try self.lock.locked { () throws -> (Data, Bool)? in
+                            guard self.socket === socket, self.handshakeCompleteFlag, let connection = self.negotiator?.connection else {
+                                throw noiseError("Binary frame arrived before Noise negotiation completed.")
+                            }
+                            return try connection.decrypt(data)
+                        }
+                        if let (payload, isJSON) = decoded {
+                            guard isJSON else { throw noiseError("Hub sent binary content although this client negotiated JSON only.") }
+                            try self.handleFrame(JSONDecoder().decode(HiveMessage.self, from: payload), on: socket)
+                        }
                     @unknown default:
-                        break
+                        throw noiseError("Unknown WebSocket frame type.")
                     }
                 } catch {
-                    self.handleSocketFailure(error)
+                    self.handleSocketFailure(error, on: socket)
                     return
                 }
             }
         }
     }
 
-    func handleSocketOpen() {
-        openGate.open()
+    func handleSocketOpen(on socket: URLSessionWebSocketTask) {
+        lock.locked { if self.socket === socket { openGate.open() } }
     }
 
-    /// Called when the socket closes; fails pending waiters when the
-    /// handshake never completed.
-    func handleSocketClosed(_ error: ThalovantConnectionError) {
-        let handshakeWasComplete = lock.locked { () -> Bool in
-            connectedFlag = false
-            return handshakeCompleteFlag
-        }
-        if !handshakeWasComplete {
-            lock.locked { lastErrorMessage = error.message }
-            openGate.fail(error)
-            handshakeGate.fail(error)
-        }
+    func handleSocketClosed(_ error: ThalovantConnectionError, on socket: URLSessionWebSocketTask) {
+        handleSocketFailure(error, on: socket)
     }
 
-    private func handleSocketFailure(_ error: Error) {
-        // `String(describing:)` / `\(error)` on a URLError embeds
-        // `NSErrorFailingURLKey`, and the connection URL carries
-        // `?authorization=base64("<user agent>:<access key>")` — so use only the
-        // scrubbed, localized description here and in the surfaced error.
+    private func handleSocketFailure(_ error: Error, on socket: URLSessionWebSocketTask) {
         let detail = safeTransportErrorMessage(error)
-        lock.lock()
-        connectedFlag = false
-        lastErrorMessage = detail
-        lock.unlock()
-        let failure = (error as? ThalovantConnectionError)
-            ?? ThalovantConnectionError("HiveMind WSS connection failed: \(detail)")
-        openGate.fail(failure)
-        handshakeGate.fail(failure)
+        let explanation = detail.contains("WebSockets not supported by libcurl")
+            ? "This Linux FoundationNetworking/libcurl build has no WebSocket support. Use a Swift distribution compiled with WebSocket support; Noise negotiation has not started."
+            : "HiveMind WSS connection failed: \(detail)"
+        let failure = noiseError(explanation)
+        let detached = lock.locked { () -> (URLSession?, AsyncGate, AsyncGate)? in
+            guard self.socket === socket else { return nil }
+            let old = (session, openGate, handshakeGate)
+            self.socket = nil; session = nil; connectedFlag = false; handshakeCompleteFlag = false
+            lastErrorMessage = failure.message
+            negotiator?.connection?.close(); negotiator = nil
+            return old
+        }
+        guard let (session, open, handshake) = detached else { return }
+        open.fail(failure); handshake.fail(failure)
+        socket.cancel(with: .goingAway, reason: nil); session?.invalidateAndCancel()
     }
 
-    private func handleFrame(_ message: HiveMessage) async throws {
-        switch message.msgType {
-        case "handshake", "shake":
-            try await handleHandshake(message.payload)
-        case "bus":
-            let handlers = lock.locked { Array(busHandlers.values) }
-            for handler in handlers {
-                handler(message.payload)
+    func handleFrame(_ message: HiveMessage, on socket: URLSessionWebSocketTask) throws {
+        // Admit callbacks for the same socket that supplied the decrypted frame.
+        // There is no async hop between admission and delivery. Handlers run
+        // outside the lock so application callbacks can register/remove handlers.
+        let snapshot = try lock.locked { () throws -> ([(JSONObject) -> Void], [(HiveMessage) -> Void])? in
+            guard self.socket === socket, handshakeCompleteFlag else { return nil }
+            guard message.msgType != "handshake", message.msgType != "shake" else {
+                throw noiseError("Unexpected handshake inside an established Noise session.")
             }
-        default:
-            break
+            let bus = message.msgType == "bus" ? Array(busHandlers.values) : []
+            return (bus, Array(messageHandlers.values))
         }
-        let handlers = lock.locked { Array(messageHandlers.values) }
-        for handler in handlers {
-            handler(message)
-        }
+        guard let (bus, messages) = snapshot else { return }
+        for handler in bus { handler(message.payload) }
+        for handler in messages { handler(message) }
     }
 
-    private func handleHandshake(_ payload: JSONObject) async throws {
-        guard HiveWire.isPresharedKeyHandshake(payload) else {
-            throw ThalovantConnectionError("Only HiveMind preshared-key handshakes are supported by this SDK.")
+}
+
+/// Serialize encryption and socket sends together. Actor reentrancy does not
+/// reorder nonce assignment: each task waits for its predecessor before sealing.
+private actor NoiseSocketWriter {
+    private var tail: Task<Void, Error>?
+    func send(on socket: URLSessionWebSocketTask,
+              frames: @escaping @Sendable () throws -> [URLSessionWebSocketTask.Message]) async throws {
+        let previous = tail
+        let next = Task {
+            if let previous { try await previous.value }
+            for message in try frames() { try await socket.send(message) }
         }
-        guard ThalovantCrypto.runtimeKey(identity.cryptoKey) != nil else {
-            throw ThalovantConnectionError("HiveMind requested a preshared key, but identity.crypto_key is missing.")
-        }
-        let hello = HiveWire.helloMessage(
-            siteId: identity.siteId,
-            publicKey: identity.publicKey,
-            sessionId: "thalovant-swift-" + UUID().uuidString.lowercased()
-        )
-        let socket = lock.locked { self.socket }
-        guard let socket else {
-            throw ThalovantConnectionError("HiveMind WSS transport is not connected.")
-        }
-        // The hello reply is always sent unencrypted.
-        let payloadText = try HiveWire.encode(hello, cryptoKey: nil, encrypt: false)
-        try await sendText(payloadText, on: socket)
-        lock.locked { handshakeCompleteFlag = true }
-        handshakeGate.open()
+        tail = next
+        try await next.value
     }
 }
 
@@ -414,7 +419,7 @@ private final class WebSocketOpenDelegate: NSObject, URLSessionWebSocketDelegate
         webSocketTask: URLSessionWebSocketTask,
         didOpenWithProtocol protocol: String?
     ) {
-        transport?.handleSocketOpen()
+        transport?.handleSocketOpen(on: webSocketTask)
     }
 
     func urlSession(
@@ -425,7 +430,7 @@ private final class WebSocketOpenDelegate: NSObject, URLSessionWebSocketDelegate
     ) {
         let suffix = reason.flatMap { String(data: $0, encoding: .utf8) }.map { ": \($0)" } ?? ""
         transport?.handleSocketClosed(
-            ThalovantConnectionError("HiveMind WSS closed (\(closeCode.rawValue))\(suffix).")
+            ThalovantConnectionError("HiveMind WSS closed (\(closeCode.rawValue))\(suffix)."), on: webSocketTask
         )
     }
 }

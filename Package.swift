@@ -11,11 +11,14 @@ let package = Package(
         .library(name: "ThalovantSDK", targets: ["ThalovantSDK"]),
     ],
     targets: [
-        .target(name: "ThalovantSDK", path: "Sources/ThalovantSDK"),
+        .target(name: "CThalovantNoise", path: "Sources/CThalovantNoise", exclude: ["PROVENANCE.md", "source-hashes.json"], publicHeadersPath: "include"),
+        .target(name: "ThalovantSDK", dependencies: ["CThalovantNoise"], path: "Sources/ThalovantSDK"),
+        .executableTarget(name: "ThalovantNoiseStoreFixture", dependencies: ["ThalovantSDK", "CThalovantNoise"], path: "Tests/NoiseStoreFixture"),
         .testTarget(
             name: "ThalovantSDKTests",
             dependencies: ["ThalovantSDK"],
-            path: "Tests/ThalovantSDKTests"
+            path: "Tests/ThalovantSDKTests",
+            resources: [.copy("Fixtures/noise-node.json")]
         ),
     ]
 )

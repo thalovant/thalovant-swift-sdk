@@ -12,15 +12,59 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - run: swift --version
       - run: swift build
       - run: swift test
+
+      - name: Check out the independent Node reference
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          repository: thalovant/thalovant-node-sdk
+          ref: b28d3e5e099eba67506b59f4c47bce0762a858c9
+          path: .reference-node
+      - name: Build independent Noise peer
+        working-directory: .reference-node
+        run: npm ci && npm run build
+      - name: WSS XX to KK reconnect interoperability
+        run: tools/interop/run.sh "$GITHUB_WORKSPACE/.reference-node"
 
   test-linux:
     runs-on: ubuntu-latest
     container: swift:5.10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - run: swift --version
       - run: swift build
       - run: swift test
+
+  interop-linux:
+    runs-on: ubuntu-latest
+    container: swift:6.3.3@sha256:4e0fc24f0f93a5cf9a91bfcf182534bbc0571d70d757389c04ff1f616c1c460f
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+      - name: Install libcurl build tools
+        run: apt-get update -qq && apt-get install -y --no-install-recommends make gcc libssl-dev pkg-config curl xz-utils ca-certificates
+      - name: Build WebSocket-enabled platform libcurl
+        run: tools/interop/build-websocket-curl.sh "$GITHUB_WORKSPACE/.build/websocket-curl"
+      - name: Check out the independent Node reference
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          repository: thalovant/thalovant-node-sdk
+          ref: b28d3e5e099eba67506b59f4c47bce0762a858c9
+          path: .reference-node
+      - name: Build independent Noise peer
+        working-directory: .reference-node
+        run: npm ci && npm run build
+      - name: Linux WSS XX to KK reconnect interoperability
+        run: LD_LIBRARY_PATH="$GITHUB_WORKSPACE/.build/websocket-curl/lib:${LD_LIBRARY_PATH:-}" tools/interop/run.sh "$GITHUB_WORKSPACE/.reference-node"
