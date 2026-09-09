@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.3.1
+
+- Keep admitted physical writes independent of caller cancellation, with a
+  separate 20-second write budget. Real write failure or expiry retires only
+  the captured connection; successors wait until physical cleanup finishes.
+
+- Apply one Ask timeout across connection admission, authentication, sending and
+  reply collection. Clip fixed empty-reply and settling windows to that deadline.
+- Freeze Ask collection on policy denial or query timeout, retaining only speech
+  received before the hard failure, and interrupt optional waits immediately.
+- Apply Query deadlines and terminal replies independently of a retiring send,
+  preserving physical transport ownership without replay.
+- Propagate non-cancellation write failures during Ask reply phases before
+  terminal completion or phase expiry.
+- Return the first correlated runtime session ID from Ask and Query while preserving strict request
+  correlation and the original request ID.
+- Add regressions for blocked connection/send, clipped reply phases, cancellation
+  cleanup and explicit event-stream buffer overflow.
+
 ## 0.3.0
 
 - Validate both device authorization URLs before displaying a prompt, invoking

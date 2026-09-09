@@ -13,8 +13,16 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     private var emissions: [ThalovantEvent] = []
     private var sentFrames: [HiveMessage] = []
     var queryAnswer: ((HiveMessage) -> Void)?
+    var busAnswer: ((JSONObject) -> Void)?
+    var emitAction: ((JSONObject) async throws -> Void)?
+    private var retiredEmit = false
+    var emitRetired: Bool { lock.locked { retiredEmit } }
+    func markEmitRetired() { lock.locked { retiredEmit = true } }
+    var pausedConnect = false, pausedEmit = false
+    var queryAction: (() async throws -> Void)?
     var pausedSend = false
-    private(set) var sendCancelled = false
+    private var cancelledSend = false
+    var sendCancelled: Bool { lock.locked { cancelledSend } }
     var connected: Bool { lock.locked { online } }
     var handshakeComplete: Bool { connected }
     var supportsHiveMessages: Bool { true }
@@ -22,7 +30,10 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     var frameCount: Int { lock.locked { frames.count } }
     var emitted: [ThalovantEvent] { lock.locked { emissions } }
     var sent: [HiveMessage] { lock.locked { sentFrames } }
-    func connect(timeout: TimeInterval) async throws { lock.locked { online = true } }
+    func connect(timeout: TimeInterval) async throws {
+        if pausedConnect { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+        lock.locked { online = true }
+    }
     func disconnect() async { lock.locked { online = false } }
     func addBusHandler(_ handler: @escaping (JSONObject) -> Void) -> UUID {
         let id = UUID(); lock.locked { buses[id] = handler }; return id
@@ -34,13 +45,17 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     func removeMessageHandler(_ id: UUID) { _ = lock.locked { frames.removeValue(forKey: id) } }
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws {
         lock.locked { emissions.append(ThalovantEvent(name: type, data: data, context: context)) }
+        if pausedEmit { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+        try await emitAction?(context)
+        busAnswer?(context)
     }
     func sendHiveFrame(_ message: HiveMessage) async throws {
         lock.locked { sentFrames.append(message) }
         if pausedSend {
             do { try await AsyncGate().wait(timeout: nil, timeoutError: ThalovantTimeoutError("Unused.")) }
-            catch is CancellationError { sendCancelled = true; throw CancellationError() }
+            catch is CancellationError { lock.locked { cancelledSend = true }; throw CancellationError() }
         }
+        try await queryAction?()
         queryAnswer?(message)
     }
     func deliver(_ name: String, text: String = "", request: String? = nil, session: String? = nil) {
@@ -48,8 +63,8 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
         let payload: JSONObject = ["type": .string(name), "data": .object(["utterance": .string(text)]), "context": .object(context)]
         for handler in lock.locked({ Array(buses.values) }) { handler(payload) }
     }
-    func reply(_ id: String, _ name: String, _ text: String = "", cascade: Bool = false) {
-        let bus = HiveMessage(msgType: "bus", payload: ["type": .string(name), "data": .object(["utterance": .string(text)])])
+    func reply(_ id: String, _ name: String, _ text: String = "", cascade: Bool = false, session: String? = nil) {
+        let bus = HiveMessage(msgType: "bus", payload: ["type": .string(name), "data": .object(["utterance": .string(text)]), "context": .object(contextWithCorrelation([:], sessionId: session))])
         let message = HiveMessage(msgType: cascade ? "cascade" : "query", payload: encodedJSONObject(bus), metadata: ["query_id": .string(id)])
         for handler in lock.locked({ Array(frames.values) }) { handler(message) }
     }
@@ -81,6 +96,164 @@ final class RuntimeTests: XCTestCase {
             try await Task.sleep(nanoseconds: 1_000_000)
         }
     }
+    func testAskBudgetIncludesConnectSendEmptyWaitAndSettle() async throws {
+        for phase in ["connect", "send", "empty", "settle", "no_speech"] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.pausedConnect = phase == "connect"; fake.pausedEmit = phase == "send"
+            fake.busAnswer = { context in fake.deliver(["empty", "no_speech"].contains(phase) ? ThalovantEvents.utteranceHandled : "speak", text: "answer", request: context["request_id"]?.stringValue) }
+            let request = Task { try await sdk.ask("test", timeout: phase == "no_speech" ? 60 : 0.25, replySettle: ["settle", "no_speech"].contains(phase) ? 60 : 0, emptyReplyWait: phase == "no_speech" ? 0 : 60) }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel() }
+            defer { watchdog.cancel() }
+            do {
+                let reply = try await request.value
+                XCTAssertEqual(phase, "settle"); XCTAssertEqual(reply.text, "answer")
+            } catch is ThalovantTimeoutError { XCTAssertNotEqual(phase, "settle") }
+            catch { XCTFail("Unexpected result in \(phase): \(error)") }
+            XCTAssertEqual(fake.busCount, 0)
+        }
+    }
+    func testAskHardFailureFreezesCollectionAndSkipsSettle() async throws {
+        for partial in [false, true] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.busAnswer = { context in
+                let id = context["request_id"]?.stringValue
+                if partial { fake.deliver("speak", text: "partial", request: id) }
+                fake.deliver(ThalovantEvents.policyDenied, request: id)
+                fake.deliver("speak", text: "ignored", request: id)
+            }
+            let request = Task { try await sdk.ask("test", timeout: 0.5, replySettle: 60) }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel() }
+            defer { watchdog.cancel() }
+            do { let reply = try await request.value; XCTAssertTrue(partial); XCTAssertEqual(reply.text, "partial"); XCTAssertFalse(reply.ok); XCTAssertEqual(reply.events.count, 2) }
+            catch is ThalovantRuntimeError { XCTAssertFalse(partial) }
+            catch { XCTFail("Unexpected hard-failure result: \(error)") }
+            XCTAssertEqual(fake.busCount, 0)
+        }
+    }
+
+    func testAskReturnsSpeechWhileAnAdmittedSendRetires() async throws {
+        for hard in [false, true] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            let entered = AsyncGate(), release = AsyncGate(), retired = AsyncGate()
+            fake.emitAction = { context in
+                let id = context["request_id"]?.stringValue
+                fake.deliver("speak", text: "answer", request: id)
+                if hard { fake.deliver(ThalovantEvents.policyDenied, request: id); fake.deliver("speak", text: "ignored", request: id) }
+                entered.open()
+                do { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+                catch {
+                    // Simulate physical cleanup that remains owned after caller cancellation.
+                    await Task.detached { try? await release.wait(timeout: nil, timeoutError: nil) }.value
+                    fake.markEmitRetired(); retired.open(); throw error
+                }
+            }
+            let request = Task { try await sdk.ask("test", timeout: hard ? 60 : 0.25, replySettle: 60) }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel() }
+            defer { release.open(); watchdog.cancel() }
+            try await entered.wait(timeout: 1, timeoutError: ThalovantTimeoutError("Fixture did not send."))
+            let reply = try await request.value
+            XCTAssertEqual(reply.text, "answer"); XCTAssertEqual(reply.ok, !hard)
+            XCTAssertFalse(fake.emitRetired); XCTAssertEqual(fake.busCount, 0)
+            release.open()
+            try await retired.wait(timeout: 1, timeoutError: ThalovantTimeoutError("Fixture did not retire."))
+        }
+    }
+
+    func testAskPropagatesWriteFailuresDuringReplyPhasesAndPreservesHardTerminal() async throws {
+        for first in [ThalovantEvents.speak, ThalovantEvents.utteranceHandled, ThalovantEvents.intentUnmatched] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.emitAction = { context in
+                fake.deliver(first, text: "answer", request: context["request_id"]?.stringValue)
+                await Task.yield()
+                throw ThalovantConnectionError("Fixture write failed.")
+            }
+            let request = Task { try await sdk.ask("test", timeout: 60, replySettle: 60, emptyReplyWait: 60) }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel() }
+            defer { watchdog.cancel() }
+            do { _ = try await request.value; XCTFail("Expected write failure") }
+            catch is ThalovantConnectionError {} catch { XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(fake.busCount, 0)
+        }
+        let fake = RuntimeFake(), sdk = try client(fake)
+        fake.emitAction = { context in
+            let id = context["request_id"]?.stringValue
+            fake.deliver("speak", text: "partial", request: id)
+            fake.deliver(ThalovantEvents.policyDenied, request: id)
+            throw ThalovantConnectionError("Late fixture write failure.")
+        }
+        let reply = try await sdk.ask("test", replySettle: 60)
+        XCTAssertFalse(reply.ok); XCTAssertEqual(reply.text, "partial")
+    }
+
+    func testQueryReturnsTerminalRepliesOrExpiresWhileAnAdmittedSendRetires() async throws {
+        for ending in ["complete", "hard", "timeout"] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            let entered = AsyncGate(), release = AsyncGate(), retired = AsyncGate()
+            fake.queryAction = {
+                fake.reply("q", "speak", "answer")
+                if ending == "complete" { fake.reply("q", "hive.query.complete") }
+                if ending == "hard" { fake.reply("q", ThalovantEvents.policyDenied) }
+                entered.open()
+                do { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+                catch {
+                    await Task.detached { try? await release.wait(timeout: nil, timeoutError: nil) }.value
+                    fake.markEmitRetired(); retired.open(); throw error
+                }
+            }
+            let request = Task { try await sdk.query("test", timeout: ending == "timeout" ? 0.25 : 60, queryId: "q") }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel(); release.open() }
+            defer { release.open(); watchdog.cancel() }
+            try await entered.wait(timeout: 1, timeoutError: ThalovantTimeoutError("Fixture did not send."))
+            do {
+                let reply = try await request.value
+                XCTAssertNotEqual(ending, "timeout"); XCTAssertEqual(reply.text, "answer"); XCTAssertEqual(reply.ok, ending == "complete")
+            } catch is ThalovantTimeoutError { XCTAssertEqual(ending, "timeout") }
+            XCTAssertFalse(fake.emitRetired); XCTAssertEqual(fake.frameCount, 0)
+            release.open()
+            try await retired.wait(timeout: 1, timeoutError: ThalovantTimeoutError("Fixture did not retire."))
+        }
+    }
+
+    func testQueryWriteFailureWinsBeforeCompletionButPreservesTerminalReply() async throws {
+        for terminal in [false, true] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.queryAction = {
+                fake.reply("q", "speak", "answer")
+                if terminal { fake.reply("q", "hive.query.complete") }
+                throw ThalovantConnectionError("Fixture query write failure.")
+            }
+            do { let reply = try await sdk.query("test", queryId: "q"); XCTAssertTrue(terminal); XCTAssertEqual(reply.text, "answer") }
+            catch is ThalovantConnectionError { XCTAssertFalse(terminal) }
+            XCTAssertEqual(fake.frameCount, 0)
+        }
+    }
+
+    func testAskReturnsFirstCorrelatedRuntimeSessionReplacement() async throws {
+        let fake = RuntimeFake(), sdk = try client(fake)
+        fake.busAnswer = { context in
+            let id = context["request_id"]?.stringValue
+            fake.deliver("speak", text: "ignored", request: "other", session: "foreign")
+            fake.deliver(ThalovantEvents.utteranceHandled, request: id, session: "runtime-first")
+            fake.deliver("speak", text: "answer", request: id, session: "runtime-later")
+        }
+        let reply = try await sdk.ask("test", sessionId: "requested", requestId: "r")
+        XCTAssertEqual(reply.sessionId, "runtime-first"); XCTAssertEqual(reply.requestId, "r"); XCTAssertEqual(reply.text, "answer")
+        XCTAssertEqual(reply.events.map { $0.sessionId }, ["runtime-first", "runtime-later"])
+    }
+
+    func testQueryReturnsFirstAcceptedRuntimeSessionReplacement() async throws {
+        let fake = RuntimeFake(); let sdk = try client(fake)
+        fake.queryAnswer = { _ in
+            fake.reply("foreign", "speak", "ignored", session: "foreign")
+            fake.reply("q", ThalovantEvents.utteranceHandled, session: "runtime-first")
+            fake.reply("q", "speak", "answer", session: "runtime-later")
+            fake.reply("q", "hive.query.complete", session: "runtime-final")
+        }
+        let reply = try await sdk.query("test", sessionId: "requested", requestId: "r", queryId: "q")
+        XCTAssertEqual(reply.sessionId, "runtime-first"); XCTAssertEqual(reply.requestId, "r")
+        XCTAssertEqual(reply.text, "answer"); XCTAssertEqual(reply.events.count, 3)
+    }
+
     func testQueryScopesNestedCascadeAndDeduplicatesSpeech() async throws {
         let fake = RuntimeFake(), sdk = try client(fake)
         fake.queryAnswer = { _ in
@@ -121,7 +294,8 @@ final class RuntimeTests: XCTestCase {
         fake.pausedSend = true
         do { _ = try await sdk.query("test", timeout: 0.05); XCTFail("Expected send deadline") }
         catch is ThalovantTimeoutError {}
-        XCTAssertTrue(fake.sendCancelled); XCTAssertEqual(fake.frameCount, 0)
+        try await until { fake.sendCancelled }
+        XCTAssertEqual(fake.frameCount, 0)
         let cancelled = Task { try await sdk.query("test") }
         try await until { fake.frameCount == 1 }; cancelled.cancel()
         do { _ = try await cancelled.value; XCTFail("Expected cancellation") } catch is CancellationError {}
@@ -199,6 +373,15 @@ final class RuntimeTests: XCTestCase {
         XCTAssertTrue(health.ok); XCTAssertTrue(doctor.ok)
         let info = try await sdk.connectWithInfo(); XCTAssertEqual(info.phase, "ready")
     }
+    func testStreamOverflowIsExplicitAndClosesSubscription() async throws {
+        let fake = RuntimeFake(), sdk = try client(fake)
+        let stream = sdk.listen("speak")
+        for _ in 0..<65 { fake.deliver("speak") }
+        do { for try await _ in stream {} ; XCTFail("Expected overflow") }
+        catch let error as ThalovantRuntimeError { XCTAssertTrue(error.message.contains("overflow")) }
+        XCTAssertEqual(fake.busCount, 0)
+    }
+
     func testHTTPCancellationCancelsUnderlyingURLSessionTask() async throws {
         HangingURLProtocol.reset()
         let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [HangingURLProtocol.self]

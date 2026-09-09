@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.3.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.3.1"),
 ]
 ```
 
@@ -487,6 +487,28 @@ silent or explicitly failed discovery). `inventory.mayAnswer(lang)` is true
 when an enabled intent has phrases, a fallback handler exists, or fallback
 discovery is unknown. It is false only when discovery is known, no fallback
 handlers exist, and no enabled intent has phrases for the requested language.
+
+## Ask deadlines and correlation
+
+Ask uses one total timeout across connection, authentication, send, and replies.
+The first nonempty speech starts a fixed settling window (250ms by default).
+The first handled or soft-miss event without speech starts a fixed empty-reply
+window (5s by default); subsequent speech switches to settling. Both windows
+are clipped to the original deadline, and an empty window does not add settling.
+Hard policy denial or query timeout freezes collection immediately: prior speech
+is returned as a failed partial reply; otherwise the call raises a runtime error.
+Caller cancellation removes owned subscriptions and preserves a different caller's
+connection attempt. Ask requires a matching request ID and returns the first
+nonblank correlated runtime session ID, falling back to the requested session.
+Query replies use the same session selection from accepted query events.
+Query also uses one deadline across connection, send, and collection; completion
+or hard failure returns independently of a retiring send. Non-cancellation write
+failures before a terminal reply or phase expiry remain errors. An admitted write
+keeps transport ownership until its actual cleanup finishes and is never replayed.
+An admitted Swift write has an independent 20-second physical budget. Cancelling
+its caller leaves that write and the shared connection owned; only a real write
+failure or physical expiry retires the captured connection. Queued cancellation
+skips sealing and leaves the predecessor intact.
 
 ## Control-Plane HTTP Security
 

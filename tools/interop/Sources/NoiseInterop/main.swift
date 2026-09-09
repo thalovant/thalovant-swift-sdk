@@ -11,6 +11,18 @@ actor Replies {
     func accept(_ event: JSONObject) { if event["type"]?.stringValue == "fixture.pong" { count += 1 } }
     func received() -> Int { count }
 }
+actor PhysicalWriteBarrier {
+    private var started = false, released = false
+    private var waiter: CheckedContinuation<Void, Never>?
+    func pause() async {
+        started = true
+        if released { return }
+        await withCheckedContinuation { waiter = $0 }
+    }
+    func hasStarted() -> Bool { started }
+    func release() { released = true; waiter?.resume(); waiter = nil }
+}
+
 @main struct Interop {
     // Callback bridge also supports FoundationNetworking in Swift 5.10.
     static func request(_ request: URLRequest) async throws -> (Data, URLResponse) {
@@ -90,15 +102,37 @@ actor Replies {
                 try await group.waitForAll()
             }
             guard transport.connected && transport.handshakeComplete else { fatalError("Premature readiness") }
+            let base = attempt * 5
             for _ in 0..<100 {
-                if await replies.received() == (attempt + 1) * 3 { break }
+                if await replies.received() == base + 3 { break }
                 try await Task.sleep(nanoseconds: 50_000_000)
             }
-            guard await replies.received() == (attempt + 1) * 3 else { fatalError("Missing encrypted replies") }
+            guard await replies.received() == base + 3 else { fatalError("Missing encrypted replies") }
+            #if DEBUG
+            let barrier = PhysicalWriteBarrier()
+            transport._setNextApplicationWriteBarrier { await barrier.pause() }
+            let cancelled = Task { try await transport.emitBus(type: "fixture.ping", data: ["n": .integer(3)], context: [:]) }
+            let admissionDeadline = Date().addingTimeInterval(10)
+            while !(await barrier.hasStarted()) {
+                guard Date() < admissionDeadline else { throw FixtureFailure.barrierTimedOut }
+                try await Task.sleep(nanoseconds: 1_000_000)
+            }
+            let survivor = Task { try await transport.emitBus(type: "fixture.ping", data: ["n": .integer(4)], context: [:]) }
+            cancelled.cancel()
+            do { try await cancelled.value; fatalError("Caller cancellation was ignored") } catch is CancellationError {}
+            guard transport.connected && transport.handshakeComplete else { fatalError("Caller cancellation closed shared session") }
+            await barrier.release()
+            try await survivor.value
+            #endif
+            for _ in 0..<100 {
+                if await replies.received() == base + 5 { break }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+            guard await replies.received() == base + 5 else { fatalError("Missing retained-write or successor reply") }
             await transport.disconnect()
             guard !transport.connected && !transport.handshakeComplete else { fatalError("Stale readiness") }
             if attempt == 0 { try await waitForFirstSocketClose(endpoint: endpoint) }
         }
-        print("Swift WSS two three-caller barriers, XX -> KK reconnect, six encrypted exchanges: passed")
+        print("Swift WSS two three-caller barriers, XX -> KK reconnect, ten encrypted exchanges and active-write cancellation isolation: passed")
     }
 }

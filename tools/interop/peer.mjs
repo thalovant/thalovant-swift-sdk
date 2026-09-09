@@ -20,7 +20,7 @@ const httpServer = createServer((request, response) => {
   }
   const batch = Number(/^\/fixture\/release\/([12])$/.exec(request.url)?.[1]);
   if (request.method !== 'POST' || batch !== barriers + 1 || connections !== batch ||
-      closedBatches !== batch - 1 || exchanges !== (batch - 1) * 3 || !pending.has(batch)) {
+      closedBatches !== batch - 1 || exchanges !== (batch - 1) * 5 || !pending.has(batch)) {
     response.writeHead(409).end(JSON.stringify({connections, barriers}));
     finish(new Error('invalid concurrent-connect barrier'));
     return;
@@ -45,7 +45,7 @@ function finish(error) {
     console.error('loopback peer rejected:', error.message);
     process.exitCode = 1;
   } else {
-    console.log('Node peer verified two three-caller barriers, exactly two XX/KK connections and six encrypted exchanges');
+    console.log('Node peer verified two three-caller barriers, exactly two XX/KK connections and ten encrypted exchanges and active-write cancellation isolation');
   }
   server.close();
   for (const client of server.clients) client.terminate();
@@ -55,7 +55,7 @@ function finish(error) {
 
 server.on('connection', socket => {
   const batch = ++connections;
-  if (batch > 2 || barriers !== batch - 1 || closedBatches !== batch - 1 || exchanges !== (batch - 1) * 3) {
+  if (batch > 2 || barriers !== batch - 1 || closedBatches !== batch - 1 || exchanges !== (batch - 1) * 5) {
     finish(new Error('unexpected extra or overlapping connection'));
     return;
   }
@@ -80,9 +80,10 @@ server.on('connection', socket => {
         if (message.msg_type === 'hello') return;
         if (message.msg_type !== 'bus' || message.payload.type !== 'fixture.ping') throw new Error('unexpected application frame');
         const sequence = message.payload.data.n;
-        if (![0, 1, 2].includes(sequence) || received.has(sequence) || connections !== batch || barriers !== batch) {
+        if (![0, 1, 2, 3, 4].includes(sequence) || received.has(sequence) || connections !== batch || barriers !== batch) {
           throw new Error('duplicate exchange or wrong connection batch');
         }
+        if (sequence === 4 && !received.has(3)) throw new Error("successor overtook the retained physical write");
         received.add(sequence);
         exchanges++;
         const reply = Buffer.from(JSON.stringify({msg_type: 'bus', payload: {type: 'fixture.pong', data: message.payload.data, context: {}}}));
@@ -110,8 +111,8 @@ server.on('connection', socket => {
   socket.on('error', finish);
   socket.on('close', () => {
     if (finished) return;
-    if (!released || received.size !== 3 || connections !== batch || barriers !== batch || exchanges !== batch * 3) {
-      finish(new Error('connection closed before its barrier and three exchanges completed'));
+    if (!released || received.size !== 5 || connections !== batch || barriers !== batch || exchanges !== batch * 5) {
+      finish(new Error('connection closed before its barrier and five exchanges completed'));
       return;
     }
     closedBatches++;

@@ -189,6 +189,11 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     }
 
     #if DEBUG
+    private var applicationWriteBarrier: (@Sendable () async throws -> Void)?
+    /// Pause one application write after admission for the independent loopback peer fixture.
+    @_spi(Testing) public func _setNextApplicationWriteBarrier(_ barrier: @escaping @Sendable () async throws -> Void) {
+        lock.locked { applicationWriteBarrier = barrier }
+    }
     /// Loopback-test barrier: callers admitted to this socket's pending handshake.
     /// This test SPI is absent from release builds.
     @_spi(Testing) public var _pendingConnectHandshakeWaiters: Int {
@@ -314,20 +319,30 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             }
             return (socket, connection, self.writer)
         }
+        #if DEBUG
+        let barrier = lock.locked { () -> (@Sendable () async throws -> Void)? in
+            let saved = applicationWriteBarrier; applicationWriteBarrier = nil; return saved
+        }
+        #endif
         do {
-            try await writer.send(on: socket) {
+            try await writer.send(frames: {
                 let bytes = try JSONEncoder().encode(message)
                 return try connection.encrypt(bytes).map { .data($0) }
-            }
+            }, write: { frame in
+                #if DEBUG
+                try await barrier?()
+                #endif
+                try await socket.send(frame)
+            }, onPhysicalFailure: { [weak self] error in
+                // The callback remains owned by the physical task after its caller leaves.
+                self?.handleSocketFailure(error, on: socket)
+            })
         } catch is NoiseQueuedSendCancelled {
             throw CancellationError()
         } catch is CancellationError {
-            // Sealing or writing may already have advanced the send nonce.
-            // Retire this session instead of reusing uncertain cipher state.
-            handleSocketFailure(CancellationError(), on: socket)
+            // Caller cancellation does not cancel an already admitted physical write.
             throw CancellationError()
         } catch {
-            handleSocketFailure(error, on: socket)
             throw noiseError("HiveMind WSS send failed: \(safeTransportErrorMessage(error))")
         }
     }
@@ -442,16 +457,29 @@ struct NoiseQueuedSendCancelled: Error {}
 
 private final class NoiseWriteState: @unchecked Sendable {
     private let lock = NSLock()
-    private var cancelled = false, started = false
+    private var cancelled = false, started = false, finished = false
+    private var storedFailure: Error?
     func begin() -> Bool {
         lock.locked { if cancelled { return false }; started = true; return true }
     }
-    func cancel() -> Bool { lock.locked { cancelled = true; return started } }
+    func cancel() { lock.locked { cancelled = true } }
     var hasStarted: Bool { lock.locked { started } }
+    func finish(_ error: Error? = nil) -> Bool {
+        lock.locked {
+            guard !finished else { return false }
+            finished = true; storedFailure = error; return true
+        }
+    }
+    var failure: Error? { lock.locked { storedFailure } }
 }
 
 actor NoiseSocketWriter {
     private var tail: Task<Void, Error>?
+    private let physicalWriteTimeout: TimeInterval
+    init(physicalWriteTimeout: TimeInterval = 20) {
+        precondition(physicalWriteTimeout.isFinite && physicalWriteTimeout > 0 && physicalWriteTimeout <= Double(Int32.max) / 1000)
+        self.physicalWriteTimeout = physicalWriteTimeout
+    }
     #if DEBUG
     private(set) var queuedEntryCount = 0
     #endif
@@ -460,7 +488,8 @@ actor NoiseSocketWriter {
         try await send(frames: frames, write: { try await socket.send($0) })
     }
     func send(frames: @escaping @Sendable () throws -> [URLSessionWebSocketTask.Message],
-              write: @escaping @Sendable (URLSessionWebSocketTask.Message) async throws -> Void) async throws {
+              write: @escaping @Sendable (URLSessionWebSocketTask.Message) async throws -> Void,
+              onPhysicalFailure: @escaping @Sendable (Error) -> Void = { _ in }) async throws {
         let previous = tail
         let completion = AsyncGate(), state = NoiseWriteState()
         #if DEBUG
@@ -474,27 +503,43 @@ actor NoiseSocketWriter {
             }
             do {
                 if let previous { try await previous.value }
-                // A skipped queued entry succeeds for its successor. Starting
-                // sealing and cancelling are serialized before consuming a nonce.
+                // A skipped queued entry succeeds for its successor without consuming a nonce.
                 guard state.begin() else { completion.fail(NoiseQueuedSendCancelled()); return }
-                try Task.checkCancellation()
-                for message in try frames() {
-                    try Task.checkCancellation()
-                    try await write(message)
+                // Admission transfers ownership to this task; caller cancellation cannot cancel it.
+                let physical = Task {
+                    for message in try frames() {
+                        try Task.checkCancellation()
+                        try await write(message)
+                    }
                 }
-                completion.open()
+                let expiry = Task {
+                    do { try await Task.sleep(nanoseconds: UInt64(physicalWriteTimeout * 1_000_000_000)) }
+                    catch { return }
+                    let error = ThalovantTimeoutError("HiveMind physical write timed out.")
+                    if state.finish(error) {
+                        onPhysicalFailure(error); completion.fail(error); physical.cancel()
+                    }
+                }
+                defer { expiry.cancel() }
+                do {
+                    try await physical.value
+                    if state.finish() { completion.open() }
+                    if let failure = state.failure { throw failure }
+                } catch {
+                    if state.finish(error) { onPhysicalFailure(error); completion.fail(error) }
+                    throw state.failure ?? error
+                }
             } catch {
                 completion.fail(error)
                 throw error
             }
         }
+        // The tail remains pending through actual physical cleanup, even after timeout/cancellation.
         tail = next
         do {
             try await withTaskCancellationHandler(operation: {
                 try await completion.wait(timeout: nil, timeoutError: nil)
-            }, onCancel: {
-                if state.cancel() { next.cancel() }
-            })
+            }, onCancel: { state.cancel() })
         } catch is CancellationError where Task.isCancelled && !state.hasStarted {
             throw NoiseQueuedSendCancelled()
         }
