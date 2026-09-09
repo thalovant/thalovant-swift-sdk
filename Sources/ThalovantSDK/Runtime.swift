@@ -138,7 +138,6 @@ extension ThalovantClient {
         guard !prompt.isEmpty else { throw ThalovantRuntimeError("query() requires a non-empty prompt.") }
         try validateRuntimeTimeout(timeout)
         guard transport.supportsHiveMessages else { throw ThalovantRuntimeError("This transport does not support HiveMind query frames.") }
-        let started = ProcessInfo.processInfo.systemUptime
         let request = requestId ?? newRequestId(), session = sessionId ?? newSessionId(), query = queryId ?? request
         let state = RuntimeQueryState()
         let token = transport.addMessageHandler { message in
@@ -148,13 +147,23 @@ extension ThalovantClient {
             state.accept(event)
         }
         defer { transport.removeMessageHandler(token) }
-        try await connect(timeout: timeout)
-        let correlated = contextWithCorrelation(context, sessionId: session, siteId: identity.siteId, lang: lang, requestId: request)
-        let bus = HiveMessage(msgType: "bus", payload: ["type": .string(ThalovantEvents.recognizerLoopUtterance),
-            "data": .object(utterancePayload(text: prompt, lang: lang)), "context": .object(correlated)])
-        try await transport.sendHiveFrame(HiveMessage(msgType: "query", payload: encodedJSONObject(bus), metadata: ["query_id": .string(query)]))
-        try await waitRuntime(state.gate, timeout: max(0, timeout - (ProcessInfo.processInfo.systemUptime - started)))
-        return try state.reply(sessionId: session, requestId: request)
+        return try await withThrowingTaskGroup(of: ThalovantReply.self) { group in
+            defer { group.cancelAll() }
+            group.addTask {
+                try await self.connect(timeout: timeout)
+                let correlated = contextWithCorrelation(context, sessionId: session, siteId: self.identity.siteId, lang: lang, requestId: request)
+                let bus = HiveMessage(msgType: "bus", payload: ["type": .string(ThalovantEvents.recognizerLoopUtterance),
+                    "data": .object(utterancePayload(text: prompt, lang: lang)), "context": .object(correlated)])
+                try await self.transport.sendHiveFrame(HiveMessage(msgType: "query", payload: encodedJSONObject(bus), metadata: ["query_id": .string(query)]))
+                try await self.waitRuntime(state.gate, timeout: timeout)
+                return try state.reply(sessionId: session, requestId: request)
+            }
+            group.addTask {
+                try await AsyncGate().wait(timeout: timeout, timeoutError: ThalovantTimeoutError("Hub did not complete the query in time."))
+                throw ThalovantTimeoutError("Hub did not complete the query in time.")
+            }
+            return try await group.next()!
+        }
     }
 
     public func conversation(sessionId: String = newSessionId(), lang: String = "en-us", context: JSONObject = [:]) -> ThalovantConversation {
@@ -210,7 +219,9 @@ private final class RuntimeQueryState: @unchecked Sendable {
             else if [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains(event.name) {
                 let fragment = event.text.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
                 if !fragment.isEmpty && fragments.last != fragment { fragments.append(fragment) }
-            } else if event.isFailure { failure = event; complete = true; gate.open() }
+            } else if [ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout].contains(event.name) {
+                failure = event; complete = true; gate.open()
+            } else if event.isFailure { failure = event }
         }
     }
     func reply(sessionId: String, requestId: String) throws -> ThalovantReply {
@@ -219,8 +230,9 @@ private final class RuntimeQueryState: @unchecked Sendable {
                 if let failure { throw ThalovantRuntimeError("Hub reported \(failure.name).") }
                 throw ThalovantTimeoutError("Hub completed the query without a speak reply.")
             }
-            return ThalovantReply(text: fragments.joined(separator: " "), displayText: stripSsml(fragments.joined(separator: " ")), utterances: fragments, handled: failure == nil, ok: failure == nil,
-                sessionId: sessionId, requestId: requestId, events: events, failureEvent: failure)
+            let terminalFailure = failure.flatMap { [ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout].contains($0.name) ? $0 : nil }
+            return ThalovantReply(text: fragments.joined(separator: " "), displayText: stripSsml(fragments.joined(separator: " ")), utterances: fragments, handled: terminalFailure == nil, ok: terminalFailure == nil,
+                sessionId: sessionId, requestId: requestId, events: events, failureEvent: terminalFailure)
         }
     }
 }

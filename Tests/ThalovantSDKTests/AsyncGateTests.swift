@@ -1,8 +1,54 @@
 import Foundation
 import XCTest
 @testable import ThalovantSDK
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
 
 final class AsyncGateTests: XCTestCase {
+    private func waitForQueuedEntries(_ count: Int, writer: NoiseSocketWriter) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 3
+        while await writer.queuedEntryCount != count {
+            guard ProcessInfo.processInfo.systemUptime < deadline else { XCTFail("Writer barrier did not settle"); return }
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+    }
+
+    func testCancelledQueuedWriteSkipsSealingAndDoesNotPoisonSuccessor() async throws {
+        let writer = NoiseSocketWriter(), blocked = AsyncGate(), entered = AsyncGate()
+        let first = Task {
+            try await writer.send(frames: { [.string("first")] }, write: { _ in
+                entered.open(); try await blocked.wait(timeout: nil, timeoutError: nil)
+            })
+        }
+        try await entered.wait(timeout: 3, timeoutError: noiseError("First send did not start"))
+        let cancelled = Task {
+            try await writer.send(frames: { XCTFail("Cancelled queued write consumed a nonce"); return [] }, write: { _ in XCTFail("Cancelled write sent a frame") })
+        }
+        try await waitForQueuedEntries(2, writer: writer)
+        let sent = AsyncGate()
+        let survivor = Task { try await writer.send(frames: { [.string("survivor")] }, write: { _ in sent.open() }) }
+        try await waitForQueuedEntries(3, writer: writer)
+        cancelled.cancel()
+        do { try await cancelled.value; XCTFail("Expected queued cancellation") } catch is NoiseQueuedSendCancelled {}
+        XCTAssertFalse(sent.isOpen)
+        blocked.open(); try await first.value; try await survivor.value
+        XCTAssertTrue(sent.isOpen)
+    }
+
+    func testCancelledActiveWriteKeepsFailureForSuccessor() async throws {
+        let writer = NoiseSocketWriter(), entered = AsyncGate(), blocked = AsyncGate()
+        let active = Task { try await writer.send(frames: { [.string("sealed")] }, write: { _ in
+            entered.open(); try await blocked.wait(timeout: nil, timeoutError: nil)
+        }) }
+        try await entered.wait(timeout: 3, timeoutError: noiseError("Send did not start"))
+        let successor = Task { try await writer.send(frames: { XCTFail("Uncertain nonce state was reused"); return [] }, write: { _ in }) }
+        try await waitForQueuedEntries(2, writer: writer)
+        active.cancel()
+        do { try await active.value; XCTFail("Expected active cancellation") } catch is CancellationError {}
+        do { try await successor.value; XCTFail("Expected failed predecessor") } catch is CancellationError {}
+    }
+
     func testUntimedGateWaitStillRespondsToCancellation() async throws {
         let gate = AsyncGate()
         let waiter = Task { try await gate.wait(timeout: nil, timeoutError: nil) }

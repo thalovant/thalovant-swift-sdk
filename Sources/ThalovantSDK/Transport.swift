@@ -319,6 +319,13 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                 let bytes = try JSONEncoder().encode(message)
                 return try connection.encrypt(bytes).map { .data($0) }
             }
+        } catch is NoiseQueuedSendCancelled {
+            throw CancellationError()
+        } catch is CancellationError {
+            // Sealing or writing may already have advanced the send nonce.
+            // Retire this session instead of reusing uncertain cipher state.
+            handleSocketFailure(CancellationError(), on: socket)
+            throw CancellationError()
         } catch {
             handleSocketFailure(error, on: socket)
             throw noiseError("HiveMind WSS send failed: \(safeTransportErrorMessage(error))")
@@ -430,19 +437,50 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
 
 /// Serialize encryption and socket sends together. Actor reentrancy does not
 /// reorder nonce assignment: each task waits for its predecessor before sealing.
-private actor NoiseSocketWriter {
+// A queued cancellation has not consumed a nonce or touched the socket.
+struct NoiseQueuedSendCancelled: Error {}
+
+private final class NoiseWriteState: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelled = false, started = false
+    func begin() -> Bool {
+        lock.locked { if cancelled { return false }; started = true; return true }
+    }
+    func cancel() -> Bool { lock.locked { cancelled = true; return started } }
+    var hasStarted: Bool { lock.locked { started } }
+}
+
+actor NoiseSocketWriter {
     private var tail: Task<Void, Error>?
+    #if DEBUG
+    private(set) var queuedEntryCount = 0
+    #endif
     func send(on socket: URLSessionWebSocketTask,
               frames: @escaping @Sendable () throws -> [URLSessionWebSocketTask.Message]) async throws {
+        try await send(frames: frames, write: { try await socket.send($0) })
+    }
+    func send(frames: @escaping @Sendable () throws -> [URLSessionWebSocketTask.Message],
+              write: @escaping @Sendable (URLSessionWebSocketTask.Message) async throws -> Void) async throws {
         let previous = tail
-        let completion = AsyncGate()
+        let completion = AsyncGate(), state = NoiseWriteState()
+        #if DEBUG
+        queuedEntryCount += 1
+        #endif
         let next = Task {
+            defer {
+                #if DEBUG
+                queuedEntryCount -= 1
+                #endif
+            }
             do {
                 if let previous { try await previous.value }
+                // A skipped queued entry succeeds for its successor. Starting
+                // sealing and cancelling are serialized before consuming a nonce.
+                guard state.begin() else { completion.fail(NoiseQueuedSendCancelled()); return }
                 try Task.checkCancellation()
                 for message in try frames() {
                     try Task.checkCancellation()
-                    try await socket.send(message)
+                    try await write(message)
                 }
                 completion.open()
             } catch {
@@ -451,12 +489,15 @@ private actor NoiseSocketWriter {
             }
         }
         tail = next
-        // A cancelled caller must not remain stuck awaiting an unstructured
-        // predecessor task. The transport invalidates a possibly partial send;
-        // the queued task checks cancellation before consuming a Noise nonce.
-        try await withTaskCancellationHandler(operation: {
-            try await completion.wait(timeout: nil, timeoutError: nil)
-        }, onCancel: { next.cancel() })
+        do {
+            try await withTaskCancellationHandler(operation: {
+                try await completion.wait(timeout: nil, timeoutError: nil)
+            }, onCancel: {
+                if state.cancel() { next.cancel() }
+            })
+        } catch is CancellationError where Task.isCancelled && !state.hasStarted {
+            throw NoiseQueuedSendCancelled()
+        }
     }
 }
 

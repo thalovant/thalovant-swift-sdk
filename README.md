@@ -485,7 +485,8 @@ also makes an optional probe capped at 1.5 seconds across connection, send and
 reply wait. `fallbacksKnown` distinguishes known empty from unknown (denied,
 silent or explicitly failed discovery). `inventory.mayAnswer(lang)` is true
 when an enabled intent has phrases, a fallback handler exists, or fallback
-discovery is unknown. Missing phrases alone cannot rule out a language answer.
+discovery is unknown. It is false only when discovery is known, no fallback
+handlers exist, and no enabled intent has phrases for the requested language.
 
 ## Protocol Selection
 

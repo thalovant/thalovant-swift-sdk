@@ -7,10 +7,13 @@
 - Fall back to engine intent names when the detailed listing is silent as well
   as denied. Discover fallback handlers with a bounded optional probe and expose
   known/unknown discovery plus conservative language answerability.
+- Keep query collection open after soft intent misses, recover on later speech,
+  and retain partial speech when a policy denial or query timeout terminates it.
 - Ignore foreign correlated denials and describe replies; retain content-based
   describe matching only when a reply carries no request id.
 - Bound connection timeout across socket open and handshake, and let send
-  cancellation interrupt queued waits before consuming another Noise nonce.
+  cancellation skip queued writes without affecting successors. A cancelled write
+  that already began sealing retires its session and retains cancellation semantics.
 - Propagate task cancellation to URLSession HTTP requests, exclude non-JSON
   response bodies from ordinary errors, and reject unsafe JSON numeric-to-Int conversions.
 - Extend network-free inventory, runtime lifecycle, cancellation and security

@@ -13,6 +13,8 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     private var emissions: [ThalovantEvent] = []
     private var sentFrames: [HiveMessage] = []
     var queryAnswer: ((HiveMessage) -> Void)?
+    var pausedSend = false
+    private(set) var sendCancelled = false
     var connected: Bool { lock.locked { online } }
     var handshakeComplete: Bool { connected }
     var supportsHiveMessages: Bool { true }
@@ -34,7 +36,12 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
         lock.locked { emissions.append(ThalovantEvent(name: type, data: data, context: context)) }
     }
     func sendHiveFrame(_ message: HiveMessage) async throws {
-        lock.locked { sentFrames.append(message) }; queryAnswer?(message)
+        lock.locked { sentFrames.append(message) }
+        if pausedSend {
+            do { try await AsyncGate().wait(timeout: nil, timeoutError: ThalovantTimeoutError("Unused.")) }
+            catch is CancellationError { sendCancelled = true; throw CancellationError() }
+        }
+        queryAnswer?(message)
     }
     func deliver(_ name: String, text: String = "", request: String? = nil, session: String? = nil) {
         let context = contextWithCorrelation([:], sessionId: session, requestId: request)
@@ -89,6 +96,35 @@ final class RuntimeTests: XCTestCase {
         let frame = try XCTUnwrap(fake.sent.first)
         XCTAssertEqual(frame.msgType, "query")
         XCTAssertEqual(frame.payload["payload"]?.objectValue?["context"]?.objectValue?["request_id"], .string("r"))
+        XCTAssertEqual(fake.frameCount, 0)
+    }
+    func testQuerySoftMissesAllowSpeechAndHardFailuresRetainPartialSpeech() async throws {
+        for miss in [ThalovantEvents.intentUnmatched, ThalovantEvents.intentFailure] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.queryAnswer = { _ in fake.reply("q", miss); fake.reply("q", "speak", "answer"); fake.reply("q", "hive.query.complete") }
+            let reply = try await sdk.query("test", queryId: "q")
+            XCTAssertEqual(reply.text, "answer"); XCTAssertTrue(reply.ok); XCTAssertNil(reply.failureEvent)
+            XCTAssertEqual(reply.events.map { $0.name }, [miss, "speak", "hive.query.complete"])
+            fake.queryAnswer = { _ in fake.reply("q", miss); fake.reply("q", "hive.query.complete") }
+            do { _ = try await sdk.query("test", queryId: "q"); XCTFail("Expected empty soft miss failure") }
+            catch is ThalovantRuntimeError {}
+        }
+        for hard in [ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.queryAnswer = { _ in fake.reply("q", "speak", "partial"); fake.reply("q", hard); fake.reply("q", "speak", "ignored") }
+            let reply = try await sdk.query("test", queryId: "q")
+            XCTAssertEqual(reply.text, "partial"); XCTAssertFalse(reply.ok); XCTAssertEqual(reply.failureEvent?.name, hard)
+        }
+    }
+    func testWholeQueryDeadlineCancelsPausedSendAndRetiresHandler() async throws {
+        let fake = RuntimeFake(), sdk = try client(fake)
+        fake.pausedSend = true
+        do { _ = try await sdk.query("test", timeout: 0.05); XCTFail("Expected send deadline") }
+        catch is ThalovantTimeoutError {}
+        XCTAssertTrue(fake.sendCancelled); XCTAssertEqual(fake.frameCount, 0)
+        let cancelled = Task { try await sdk.query("test") }
+        try await until { fake.frameCount == 1 }; cancelled.cancel()
+        do { _ = try await cancelled.value; XCTFail("Expected cancellation") } catch is CancellationError {}
         XCTAssertEqual(fake.frameCount, 0)
     }
     func testQueryFailureTimeoutCancellationAndDisconnectCleanHandlers() async throws {

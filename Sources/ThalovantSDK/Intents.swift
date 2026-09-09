@@ -439,6 +439,7 @@ public struct HubFallback: Codable, Equatable, Sendable {
         let priority: Int
         switch raw["priority"] {
         case .integer(let value): priority = value
+        case .bool(let value): priority = value ? 1 : 0
         case .number(let value):
             guard value.isFinite, value >= Double(Int.min), value < Double(Int.max) else { return nil }
             priority = Int(value)

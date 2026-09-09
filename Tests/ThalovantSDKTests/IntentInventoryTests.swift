@@ -513,17 +513,27 @@ final class IntentInventoryTests: XCTestCase {
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - start, 3)
     }
 
+    func testInventoryDecoderAcceptsPreCapabilitiesPayload() throws {
+        let data = Data(#"{"languages":["en-us"],"skills":[],"source":"intent_manifest","denied":[]}"#.utf8)
+        let inventory = try JSONDecoder().decode(HubIntentInventory.self, from: data)
+        XCTAssertEqual(inventory.languages, ["en-us"])
+        XCTAssertTrue(inventory.fallbacks.isEmpty); XCTAssertFalse(inventory.fallbacksKnown)
+        XCTAssertTrue(inventory.mayAnswer("en-us"))
+        XCTAssertEqual(try JSONDecoder().decode(HubIntentInventory.self, from: JSONEncoder().encode(inventory)), inventory)
+    }
+
     func testFallbackDiscoveryParsesSortsAndRejectsUnsafePriority() async throws {
         let rows: [JSONValue] = [
             .object(["skill_id": .string("b"), "priority": .integer(20)]),
             .object(["skill_id": .string("a"), "priority": .number(20.5)]),
-            .object(["skill_id": .string("default"), "priority": .string("10")]),
+            .object(["skill_id": .string("true"), "priority": .bool(true)]),
+            .object(["skill_id": .string("default"), "priority": .string("42")]),
             .object(["skill_id": .string("huge"), "priority": .number(1e100)]),
             .object(["skill_id": .string("")]), .bool(false),
         ]
         let sdk = try client(FakeHubTransport(fallbackPayload: ["fallbacks": .array(rows)]))
         let handlers = try await sdk.listFallbacks()
-        XCTAssertEqual(handlers, [HubFallback(skillId: "default"), HubFallback(skillId: "a", priority: 20), HubFallback(skillId: "b", priority: 20)])
+        XCTAssertEqual(handlers, [HubFallback(skillId: "default"), HubFallback(skillId: "true", priority: 1), HubFallback(skillId: "a", priority: 20), HubFallback(skillId: "b", priority: 20)])
         let inventory = try await sdk.intents(languages: ["fr-fr"])
         XCTAssertTrue(inventory.mayAnswer("de-de"))
         XCTAssertTrue(inventory.fallbacksKnown)
