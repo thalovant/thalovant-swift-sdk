@@ -16,6 +16,18 @@ jobs:
       - run: swift build
       - run: swift test
 
+      - name: Check out the independent Node reference
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          repository: thalovant/thalovant-node-sdk
+          ref: b28d3e5e099eba67506b59f4c47bce0762a858c9
+          path: .reference-node
+      - name: Build independent Noise peer
+        working-directory: .reference-node
+        run: npm ci && npm run build
+      - name: WSS XX to KK reconnect interoperability
+        run: tools/interop/run.sh "$GITHUB_WORKSPACE/.reference-node"
+
   test-linux:
     runs-on: ubuntu-latest
     container: swift:5.10

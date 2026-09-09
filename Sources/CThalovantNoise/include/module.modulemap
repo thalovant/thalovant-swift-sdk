@@ -1,0 +1,4 @@
+module CThalovantNoise {
+    header "CThalovantNoise.h"
+    export *
+}

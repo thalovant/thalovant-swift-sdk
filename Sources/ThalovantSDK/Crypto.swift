@@ -1,6 +1,6 @@
 import Foundation
 
-/// AES-128-GCM primitives compatible with the HiveMind runtime wire format.
+/// Legacy HiveMind v2 AES-128-GCM primitives. The WSS transport uses v3 Noise.
 ///
 /// The runtime key is the first 16 UTF-8 bytes of the identity `crypto_key`.
 /// Encrypted JSON frames are `{"ciphertext": hex, "tag": hex, "nonce": hex}`

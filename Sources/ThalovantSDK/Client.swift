@@ -25,7 +25,7 @@ public final class ThalovantSubscription: @unchecked Sendable {
     }
 }
 
-/// Data-plane client for a Thalovant hub. Version 0.1 speaks WSS only;
+/// Data-plane client for a Thalovant hub. Version 0.2 speaks v3 Noise over WSS;
 /// requesting the HTTPS or MQTT transport throws
 /// `ThalovantUnsupportedProtocolError`.
 public final class ThalovantClient: @unchecked Sendable {
@@ -33,15 +33,14 @@ public final class ThalovantClient: @unchecked Sendable {
     let transport: any HiveMindBusTransport
     private let replySettle: TimeInterval
     private let emptyReplyWait: TimeInterval
-    private let lock = NSLock()
-    private var connected = false
 
     public init(
         identity: ThalovantIdentity,
         hubProtocol: HubProtocol = .wss,
         userAgent: String = defaultThalovantUserAgent,
         replySettle: TimeInterval = 0.25,
-        emptyReplyWait: TimeInterval = 5
+        emptyReplyWait: TimeInterval = 5,
+        noiseStore: (any ThalovantNoiseStore)? = nil
     ) throws {
         switch hubProtocol {
         case .wss:
@@ -61,7 +60,7 @@ public final class ThalovantClient: @unchecked Sendable {
             )
         }
         self.identity = identity
-        self.transport = HiveMindWSSTransport(identity: identity, userAgent: userAgent)
+        self.transport = HiveMindWSSTransport(identity: identity, userAgent: userAgent, noiseStore: noiseStore)
         self.replySettle = replySettle
         self.emptyReplyWait = emptyReplyWait
     }
@@ -85,15 +84,11 @@ public final class ThalovantClient: @unchecked Sendable {
     }
 
     public func connect(timeout: TimeInterval = 6) async throws {
-        let alreadyConnected = lock.locked { connected }
-        if alreadyConnected { return }
         try await transport.connect(timeout: timeout)
-        lock.locked { connected = true }
     }
 
     public func close() async {
         await transport.disconnect()
-        lock.locked { connected = false }
     }
 
     // MARK: Events

@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.2.0
+
+- Connect to HiveMind v3 using Noise XXpsk2 or pinned KKpsk0 and the mutually
+  advertised `25519_AESGCM_SHA256` suite. Implement exact Argon2id derivation,
+  canonical negotiation binding, X25519, ordered AES256-GCM frames and chunks
+  using first-party C code shared with the embedded SDK; no external package
+  dependency. WSS remains the supported runtime transport.
+- Persist static identity and authenticated hub pins in protected files by
+  default. Expose `ThalovantNoiseStore` for application Keychain/secure storage.
+  Conflicting pins and failed authentication are terminal; no legacy downgrade.
+- Send encrypted HELLO before readiness, serialize nonce assignment with socket
+  writes, clear state on disconnect/failure, and isolate old socket callbacks
+  during reconnect. Plaintext sends and sends before readiness fail closed.
+- Add independent Node XX/KK transcripts, PSK vectors, wire negotiation and
+  reconnect, framing/tamper/replay, and persistent-store security tests.
+
 ## 0.1.9
 
 - `listIntents(lang:options:)` throws `ThalovantRuntimeError` when the hub

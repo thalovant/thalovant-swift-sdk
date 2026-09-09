@@ -96,7 +96,7 @@ public enum HiveWire {
         return url
     }
 
-    /// The `hello` frame answering a preshared-key handshake.
+    /// Application HELLO, sent encrypted after the v3 Noise handshake.
     public static func helloMessage(siteId: String, publicKey: String?, sessionId: String) -> HiveMessage {
         HiveMessage(
             msgType: "hello",
@@ -157,7 +157,7 @@ public enum HiveWire {
     }
 
     /// True when a `handshake`/`shake` payload is a preshared-key challenge
-    /// (the only handshake style the SDK supports).
+    /// Retained only for callers handling legacy v2 frames; WSS uses v3 Noise.
     public static func isPresharedKeyHandshake(_ payload: JSONObject) -> Bool {
         isTruthy(payload["preshared_key"])
             && !isTruthy(payload["handshake"])

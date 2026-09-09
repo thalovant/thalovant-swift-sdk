@@ -22,12 +22,16 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.1.9"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.2.0"),
 ]
 ```
 
 and depend on the `ThalovantSDK` product. Swift 5.9 or newer is required, on
-iOS 15+, macOS 12+, or Linux (Foundation networking).
+iOS 15+, macOS 12+, or Linux (Foundation networking). On Linux, WSS also
+requires FoundationNetworking/libcurl compiled with WebSocket support.
+The stock `swift:5.10` and `swift:6.3.3` images build this SDK but their
+FoundationNetworking/libcurl rejects WebSockets. Such builds return a connection error and never
+report readiness; use a WebSocket-capable Swift distribution for runtime WSS.
 
 ## Quick Start
 
@@ -69,6 +73,50 @@ Keep `result.identity` secret — it carries the client credentials the hub
 trusts. `result.asJSON()` redacts the identity, hub, and client credentials, so
 only `result.asJSON(includeSecrets: true)` returns the real secrets; never log
 or persist that variant.
+
+## HiveMind v3 and persistent identity
+
+The WSS runtime transport uses HiveMind v3 Noise with `XXpsk2` on first
+contact and `KKpsk0` when both peers have pinned static identities. It selects
+`25519_AESGCM_SHA256` only when the hub advertises it. A ChaChaPoly-only offer,
+legacy preshared-key offer, conflicting hub pin or failed authentication
+rejects the connection. The old `crypto_key` is not used by this transport.
+
+The exact Argon2id password derivation uses 64 MiB temporarily. Transport
+messages use ordered AES256-GCM binary frames; `connect()` returns after the
+Noise exchange and encrypted application HELLO have been sent. Reconnect
+creates fresh ephemeral keys and counters while retaining the static identity
+and hub pin. Preserve that state across app restarts. Certificate verification
+uses Foundation's normal trust evaluation.
+
+By default the SDK stores client keys and hub pins in private 0600 files under
+`Application Support/Thalovant/noise-swift` (platform-specific base directory),
+with one client scope per access key. Directory mode is 0700. Existing insecure
+files and symlinks are rejected. To choose a directory:
+
+```swift
+let store = ThalovantFileNoiseStore(
+    directory: applicationSupportURL.appendingPathComponent("hub-identity"),
+    identityScope: identity.accessKey
+)
+let client = try ThalovantClient(identity: identity, noiseStore: store)
+try await client.connect(timeout: 15)
+```
+
+For Keychain or another protected store, implement `ThalovantNoiseStore` and
+pass it through the same initializer. Persist the 32-byte static private key
+and bind each 32-byte authenticated hub public key to its `nodeID`. A pin
+change requires verifying the new hub identity and explicitly updating your
+stored pin; failed connections never automatically erase it.
+
+`HiveWire` and `ThalovantCrypto` retain legacy v2 codecs for compatibility with
+existing callers. `HiveMindWSSTransport` always uses v3 and rejects
+`send(..., encrypt: false)` and application sends before readiness.
+
+The cryptographic core is first-party C shared with `thalovant-embedded-c`,
+compiled directly by SwiftPM on Apple and Linux with no third-party
+packages. [Source and fixture provenance](Sources/CThalovantNoise/PROVENANCE.md)
+documents the independent reference vectors and coordinated maintenance.
 
 ## Log In With MFA
 
