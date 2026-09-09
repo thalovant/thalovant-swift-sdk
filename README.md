@@ -505,6 +505,10 @@ Query also uses one deadline across connection, send, and collection; completion
 or hard failure returns independently of a retiring send. Non-cancellation write
 failures before a terminal reply or phase expiry remain errors. An admitted write
 keeps transport ownership until its actual cleanup finishes and is never replayed.
+An admitted Swift write has an independent 20-second physical budget. Cancelling
+its caller leaves that write and the shared connection owned; only a real write
+failure or physical expiry retires the captured connection. Queued cancellation
+skips sealing and leaves the predecessor intact.
 
 ## Control-Plane HTTP Security
 

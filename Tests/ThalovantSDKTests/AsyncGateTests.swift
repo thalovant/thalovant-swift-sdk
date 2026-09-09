@@ -36,17 +36,62 @@ final class AsyncGateTests: XCTestCase {
         XCTAssertTrue(sent.isOpen)
     }
 
-    func testCancelledActiveWriteKeepsFailureForSuccessor() async throws {
-        let writer = NoiseSocketWriter(), entered = AsyncGate(), blocked = AsyncGate()
+    func testCancelledActiveWriteKeepsPhysicalOwnershipAndAllowsSuccessor() async throws {
+        let writer = NoiseSocketWriter(), entered = AsyncGate(), blocked = AsyncGate(), failed = AsyncGate()
         let active = Task { try await writer.send(frames: { [.string("sealed")] }, write: { _ in
             entered.open(); try await blocked.wait(timeout: nil, timeoutError: nil)
-        }) }
+        }, onPhysicalFailure: { _ in failed.open() }) }
         try await entered.wait(timeout: 3, timeoutError: noiseError("Send did not start"))
-        let successor = Task { try await writer.send(frames: { XCTFail("Uncertain nonce state was reused"); return [] }, write: { _ in }) }
+        let sent = AsyncGate()
+        let successor = Task { try await writer.send(frames: { [.string("successor")] }, write: { _ in sent.open() }) }
         try await waitForQueuedEntries(2, writer: writer)
         active.cancel()
         do { try await active.value; XCTFail("Expected active cancellation") } catch is CancellationError {}
-        do { try await successor.value; XCTFail("Expected failed predecessor") } catch is CancellationError {}
+        XCTAssertFalse(failed.isOpen); XCTAssertFalse(sent.isOpen)
+        blocked.open(); try await successor.value
+        XCTAssertTrue(sent.isOpen); XCTAssertFalse(failed.isOpen)
+    }
+
+    func testPhysicalWriteTimeoutRetainsTailUntilNoncooperativeCleanupCompletes() async throws {
+        let writer = NoiseSocketWriter(physicalWriteTimeout: 0.05)
+        let entered = AsyncGate(), release = AsyncGate(), retired = AsyncGate(), failed = AsyncGate()
+        defer { release.open() }
+        let active = Task { try await writer.send(frames: { [.string("sealed")] }, write: { _ in
+            entered.open()
+            do { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+            catch {
+                await Task.detached { try? await release.wait(timeout: nil, timeoutError: nil) }.value
+                retired.open(); throw error
+            }
+        }, onPhysicalFailure: { _ in failed.open() }) }
+        try await entered.wait(timeout: 3, timeoutError: noiseError("Send did not start"))
+        let successor = Task { try await writer.send(frames: { XCTFail("Expired cipher state was reused"); return [] }, write: { _ in }) }
+        try await waitForQueuedEntries(2, writer: writer)
+        do { try await active.value; XCTFail("Expected physical deadline") } catch is ThalovantTimeoutError {}
+        XCTAssertTrue(failed.isOpen); XCTAssertFalse(retired.isOpen)
+        let owned = await writer.queuedEntryCount; XCTAssertEqual(owned, 2)
+        release.open()
+        do { try await successor.value; XCTFail("Expected physical predecessor failure") } catch is ThalovantTimeoutError {}
+        XCTAssertTrue(retired.isOpen)
+    }
+
+    func testPhysicalWriteFailureStillPoisonsGenerationAfterCallerCancellation() async throws {
+        let writer = NoiseSocketWriter(), entered = AsyncGate(), release = AsyncGate(), failed = AsyncGate()
+        defer { release.open() }
+        let active = Task { try await writer.send(frames: { [.string("sealed")] }, write: { _ in
+            entered.open(); try await release.wait(timeout: nil, timeoutError: nil)
+            throw noiseError("Actual physical write failure")
+        }, onPhysicalFailure: { _ in failed.open() }) }
+        try await entered.wait(timeout: 3, timeoutError: noiseError("Send did not start"))
+        let successor = Task { try await writer.send(frames: { XCTFail("Failed cipher state was reused"); return [] }, write: { _ in }) }
+        try await waitForQueuedEntries(2, writer: writer)
+        active.cancel()
+        do { try await active.value; XCTFail("Expected active cancellation") } catch is CancellationError {}
+        XCTAssertFalse(failed.isOpen)
+        release.open()
+        do { try await successor.value; XCTFail("Expected physical failure") }
+        catch { XCTAssertEqual(error.localizedDescription, "Actual physical write failure") }
+        XCTAssertTrue(failed.isOpen)
     }
 
     func testUntimedGateWaitStillRespondsToCancellation() async throws {

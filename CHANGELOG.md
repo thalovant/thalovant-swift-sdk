@@ -2,6 +2,10 @@
 
 ## 0.3.1
 
+- Keep admitted physical writes independent of caller cancellation, with a
+  separate 20-second write budget. Real write failure or expiry retires only
+  the captured connection; successors wait until physical cleanup finishes.
+
 - Apply one Ask timeout across connection admission, authentication, sending and
   reply collection. Clip fixed empty-reply and settling windows to that deadline.
 - Freeze Ask collection on policy denial or query timeout, retaining only speech
