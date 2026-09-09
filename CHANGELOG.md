@@ -2,6 +2,10 @@
 
 ## 0.3.0
 
+- Reject control-plane redirects and credential-bearing HTTP outside explicit
+  loopback development endpoints, including caller-supplied session configurations.
+  Preserve supplied trust callbacks while retaining SDK redirect ownership.
+
 - Add scoped conversations, direct HiveMind query/cascade replies, bounded event
   streams and waits, action/code input helpers, and local connection/health diagnostics.
 - Fall back to engine intent names when the detailed listing is silent as well

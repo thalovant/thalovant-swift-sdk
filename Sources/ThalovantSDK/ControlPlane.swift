@@ -114,18 +114,23 @@ public final class ThalovantControlPlane {
     public var accessToken: String?
     public let userAgent: String
     let session: URLSession
+    private let hasCustomTrustDelegate: Bool
 
     public init(
         apiURL: String = defaultControlAPIURL,
         accessToken: String? = nil,
         userAgent: String = defaultThalovantUserAgent,
-        session: URLSession = URLSession(configuration: .ephemeral)
+        session: URLSession? = nil
     ) {
         self.apiURL = ThalovantControlPlane.normalizeControlAPIURL(apiURL)
         self.accessToken = accessToken
         self.userAgent = userAgent
-        self.session = session
+        self.hasCustomTrustDelegate = session?.delegate != nil
+        self.session = URLSession(configuration: session?.configuration ?? .ephemeral,
+            delegate: ControlPlaneRedirectPolicy(upstream: session?.delegate), delegateQueue: nil)
     }
+
+    deinit { session.invalidateAndCancel() }
 
     /// Normalizes the control API base URL: trims trailing slashes and a
     /// trailing `/v1` path segment, and appends exactly one trailing `/`.
@@ -362,7 +367,24 @@ public final class ThalovantControlPlane {
             trimmedPath.removeFirst()
         }
         guard let url = URL(string: apiURL + trimmedPath) else {
-            throw ThalovantApiError(message: "Invalid Thalovant API URL: \(apiURL + trimmedPath)")
+            throw ThalovantApiError(message: "Invalid Thalovant API URL.")
+        }
+        guard ["https", "http"].contains(url.scheme?.lowercased() ?? "") else {
+            throw ThalovantApiError(message: "Thalovant API URLs require HTTP or HTTPS.")
+        }
+        guard url.user == nil && url.password == nil else {
+            throw ThalovantApiError(message: "Thalovant API URLs must not contain userinfo credentials.")
+        }
+        let secretHeaders = ["authorization", "proxy-authorization", "cookie"]
+        let configuredHeaders = session.configuration.httpAdditionalHeaders ?? [:]
+        let hasCookies = session.configuration.httpShouldSetCookies && !(session.configuration.httpCookieStorage?.cookies(for: url) ?? []).isEmpty
+        let hasStoredCredentials = session.configuration.urlCredentialStorage?.allCredentials.keys.contains { $0.host.caseInsensitiveCompare(url.host ?? "") == .orderedSame } ?? false
+        let carriesCredentials = auth || body != nil || hasCookies || hasStoredCredentials || hasCustomTrustDelegate ||
+            headers.keys.contains { secretHeaders.contains($0.lowercased()) } ||
+            configuredHeaders.keys.contains { secretHeaders.contains(String(describing: $0).lowercased()) }
+        let explicitLoopback = apiURL.range(of: #"^http://(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?(?:/|$)"#, options: [.regularExpression, .caseInsensitive]) != nil
+        guard !carriesCredentials || url.scheme?.lowercased() == "https" || explicitLoopback else {
+            throw ThalovantApiError(message: "Credential-bearing Thalovant API requests require HTTPS except explicit loopback development endpoints.")
         }
         var request = URLRequest(url: url)
         request.httpMethod = method
@@ -608,5 +630,35 @@ private final class HTTPRequestCancellation: @unchecked Sendable {
     func cancel() {
         let active = lock.locked { () -> URLSessionDataTask? in cancelled = true; return task }
         active?.cancel()
+    }
+}
+
+/// Own redirect policy while preserving only the injected delegate's trust callbacks.
+final class ControlPlaneRedirectPolicy: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    private let upstream: URLSessionDelegate?
+    init(upstream: URLSessionDelegate? = nil) { self.upstream = upstream }
+    func urlSession(_ session: URLSession, task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil)
+    }
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        #if canImport(ObjectiveC)
+        if upstream?.urlSession?(session, didReceive: challenge, completionHandler: completionHandler) != nil { return }
+        #else
+        if let upstream { upstream.urlSession(session, didReceive: challenge, completionHandler: completionHandler); return }
+        #endif
+        completionHandler(.performDefaultHandling, nil)
+    }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
+        completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        #if canImport(ObjectiveC)
+        if let upstream = upstream as? URLSessionTaskDelegate,
+            upstream.urlSession?(session, task: task, didReceive: challenge, completionHandler: completionHandler) != nil { return }
+        #else
+        if let upstream = upstream as? URLSessionTaskDelegate { upstream.urlSession(session, task: task, didReceive: challenge, completionHandler: completionHandler); return }
+        #endif
+        completionHandler(.performDefaultHandling, nil)
     }
 }

@@ -488,6 +488,19 @@ when an enabled intent has phrases, a fallback handler exists, or fallback
 discovery is unknown. It is false only when discovery is known, no fallback
 handlers exist, and no enabled intent has phrases for the requested language.
 
+## Control-Plane HTTP Security
+
+Control-plane requests never follow redirects automatically. Credentials and
+request bodies require HTTPS, except explicit `localhost`, `127.0.0.1`, and
+`[::1]` HTTP development endpoints. Anonymous body-free reads may use HTTP.
+URLs containing userinfo are rejected before I/O. Configure the intended API
+endpoint directly instead of relying on a redirect.
+
+If you supply a `URLSession`, the SDK creates its own session from that
+configuration. It retains redirect decisions and forwards only authentication-
+challenge callbacks to the supplied delegate, preserving custom trust handling.
+Supplied protocol implementations remain trusted application code.
+
 ## Protocol Selection
 
 Hubs advertise enabled protocols (`spec.protocols.{wss,http,mqtt}.enabled`,
