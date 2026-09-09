@@ -2,6 +2,9 @@
 
 ## 0.3.0
 
+- Restrict device-login browser launches to HTTP(S) URLs without userinfo or
+  control characters, passing the URL as one argument outside Windows URL handling.
+
 - Reject control-plane redirects and credential-bearing HTTP outside explicit
   loopback development endpoints, including caller-supplied session configurations.
   Preserve supplied trust callbacks while retaining SDK redirect ownership.

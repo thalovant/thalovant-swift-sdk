@@ -70,6 +70,15 @@ private final class PermissiveRedirectDelegate: NSObject, URLSessionTaskDelegate
 }
 
 final class ControlPlaneSecurityTests: XCTestCase {
+    func testDeviceBrowserLauncherRejectsNonWebSchemesOptionsUserinfoAndControls() {
+        var launches = 0
+        for input in ["file:///tmp/program", "javascript:alert(1)", "calc.exe", "--help", "https://user:PRIVATE-CREDENTIAL@example.test", "https://@example.test", "https://example.test/\n--help"] {
+            openBrowserBestEffort(input) { _ in launches += 1 }
+        }
+        XCTAssertEqual(launches, 0)
+        openBrowserBestEffort("https://example.test/verify?code=a&next=b") { url in launches += 1; XCTAssertEqual(url.scheme, "https") }
+        XCTAssertEqual(launches, 1)
+    }
     func testLoginRedirectsNeverReachDestinationEvenWithPermissiveSessionDelegate() async throws {
         for status in [307, 308] {
             let destination = try ControlHTTPServer(status: 200)
