@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.2.1
+
+- Join concurrent WSS connection attempts instead of rejecting overlapping
+  initial requests. Settle all admission waiters and isolate a joining caller's
+  cancellation/deadline from the shared handshake.
+- Consume the first-party C 0.4.1 pattern-specific handshake bounds fix and
+  legacy key-entropy contract; expose AES declarations through the C module.
+- Verify all shared C source/header hashes before CI and release artifacts,
+  and retain independent peer failure logs while terminating rejected sessions.
+- Add network-free gate cancellation/timeout tests, an imported AES-GCM known
+  answer, and simultaneous XX/KK connection plus encrypted-send interop.
+
 ## 0.2.0
 
 - Connect to HiveMind v3 using Noise XXpsk2 or pinned KKpsk0 and the mutually

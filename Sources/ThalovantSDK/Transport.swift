@@ -45,69 +45,64 @@ func safeTransportErrorMessage(_ error: Error) -> String {
     redactingAuthorizationQuery(error.localizedDescription)
 }
 
-/// One-shot async gate: `wait` suspends until `open`/`fail`, or until the
-/// timeout elapses. On timeout it either throws `timeoutError` or, when no
-/// error is configured, returns normally.
+/// One-shot async gate shared by connection waiters. Opening or failing the
+/// gate settles every waiter. Cancellation and deadlines affect only that
+/// waiter's registration; they never overwrite another task's continuation.
 final class AsyncGate: @unchecked Sendable {
     private let lock = NSLock()
     private var result: Result<Void, Error>?
-    private var continuation: CheckedContinuation<Void, Error>?
+    private var continuations: [UUID: CheckedContinuation<Void, Error>] = [:]
 
-    func open() {
-        settle(.success(()))
-    }
-
-    func fail(_ error: Error) {
-        settle(.failure(error))
-    }
+    func open() { settle(.success(())) }
+    func fail(_ error: Error) { settle(.failure(error)) }
 
     var isOpen: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        if case .success = result { return true }
-        return false
+        lock.locked {
+            if case .success = result { return true }
+            return false
+        }
     }
 
+    var waiterCount: Int { lock.locked { continuations.count } }
+
     private func settle(_ outcome: Result<Void, Error>) {
-        lock.lock()
-        guard result == nil else {
-            lock.unlock()
-            return
+        let waiters = lock.locked { () -> [CheckedContinuation<Void, Error>] in
+            guard result == nil else { return [] }
+            result = outcome
+            let waiters = Array(continuations.values)
+            continuations.removeAll()
+            return waiters
         }
-        result = outcome
-        let waiter = continuation
-        continuation = nil
-        lock.unlock()
+        for waiter in waiters { waiter.resume(with: outcome) }
+    }
+
+    private func finishWaiter(_ id: UUID, with outcome: Result<Void, Error>) {
+        let waiter = lock.locked { continuations.removeValue(forKey: id) }
         waiter?.resume(with: outcome)
     }
 
     func wait(timeout: TimeInterval, timeoutError: Error?) async throws {
-        try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
-            lock.lock()
-            if let result {
-                lock.unlock()
-                waiter.resume(with: result)
-                return
-            }
-            continuation = waiter
-            lock.unlock()
-            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
-                guard let self else { return }
-                self.lock.lock()
-                guard let pending = self.continuation else {
-                    self.lock.unlock()
+        let id = UUID()
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (waiter: CheckedContinuation<Void, Error>) in
+                let immediate = lock.locked { () -> Result<Void, Error>? in
+                    // Covers cancellation before registration, including a
+                    // cancellation handler that ran before taking this lock.
+                    if Task.isCancelled { return .failure(CancellationError()) }
+                    if let result { return result }
+                    continuations[id] = waiter
+                    return nil
+                }
+                if let immediate {
+                    waiter.resume(with: immediate)
                     return
                 }
-                self.continuation = nil
-                if let timeoutError {
-                    self.result = .failure(timeoutError)
-                    self.lock.unlock()
-                    pending.resume(throwing: timeoutError)
-                } else {
-                    self.lock.unlock()
-                    pending.resume()
+                DispatchQueue.global().asyncAfter(deadline: .now() + timeout) { [weak self] in
+                    self?.finishWaiter(id, with: timeoutError.map { .failure($0) } ?? .success(()))
                 }
             }
+        } onCancel: {
+            self.finishWaiter(id, with: .failure(CancellationError()))
         }
     }
 }
@@ -220,10 +215,11 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     // MARK: Lifecycle
 
     public func connect(timeout: TimeInterval = 6) async throws {
+        try Task.checkCancellation()
         let url = try endpointURL()
-        let setup = try lock.locked { () throws -> (URLSessionWebSocketTask, AsyncGate, AsyncGate)? in
+        let setup = lock.locked { () -> (URLSessionWebSocketTask, AsyncGate, AsyncGate, Bool)? in
             if connectedFlag && handshakeCompleteFlag { return nil }
-            guard socket == nil else { throw noiseError("A connection attempt is already in progress.") }
+            if let socket { return (socket, openGate, handshakeGate, false) }
             negotiator = NoiseNegotiator(identity: identity, store: noiseStore)
             writer = NoiseSocketWriter()
             openGate = AsyncGate(); handshakeGate = AsyncGate()
@@ -232,23 +228,29 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             let session = URLSession(configuration: .ephemeral, delegate: delegate, delegateQueue: nil)
             let socket = session.webSocketTask(with: url)
             self.session = session; self.socket = socket
-            return (socket, openGate, handshakeGate)
+            return (socket, openGate, handshakeGate, true)
         }
-        guard let (socket, open, handshake) = setup else { return }
-        socket.resume()
-        startReceiveLoop(on: socket)
+        guard let (socket, open, handshake, startsAttempt) = setup else { return }
+        if startsAttempt {
+            socket.resume()
+            startReceiveLoop(on: socket)
+        }
         do {
             try await open.wait(timeout: timeout, timeoutError: noiseError("HiveMind WSS connect timed out."))
+            try Task.checkCancellation()
             try lock.locked {
                 guard self.socket === socket else { throw noiseError("Connection attempt was interrupted.") }
                 connectedFlag = true
             }
             try await handshake.wait(timeout: timeout, timeoutError: ThalovantTimeoutError("HiveMind WSS handshake timed out."))
+            try Task.checkCancellation()
             try lock.locked {
                 guard self.socket === socket, handshakeCompleteFlag else { throw noiseError("Connection closed during Noise negotiation.") }
             }
         } catch {
-            handleSocketFailure(error, on: socket)
+            // Only the task that created the attempt owns its teardown. A
+            // joining caller's timeout/cancellation must not abort other users.
+            if startsAttempt { handleSocketFailure(error, on: socket) }
             throw error
         }
     }

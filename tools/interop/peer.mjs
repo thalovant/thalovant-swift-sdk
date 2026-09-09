@@ -41,7 +41,7 @@ server.on('connection',socket=>{
         socket.send(JSON.stringify({msg_type:'shake',payload:{noise:{msg:Buffer.from(reply).toString('hex')}}}));
       }else handshake.readMessage(Buffer.from(params.msg,'hex'));
       if(handshake.isFinished){session=handshake.intoSession();pinned=Buffer.from(session.remoteStaticKey,'hex');}
-    }catch(error){console.error('loopback peer rejected:',error.message);process.exitCode=1;socket.close();}
+    }catch(error){console.error('loopback peer rejected:',error.message);process.exitCode=1;server.close();for(const client of server.clients)client.terminate();}
   });
   socket.send(JSON.stringify({msg_type:'hello',payload:hello}));
   socket.send(JSON.stringify({msg_type:'shake',payload:offer}));

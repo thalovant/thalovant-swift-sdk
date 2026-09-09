@@ -20,9 +20,16 @@ actor Replies {
         let replies = Replies()
         transport.addBusHandler { event in Task { await replies.accept(event) } }
         for attempt in 0..<2 {
-            try await transport.connect(timeout: 20)
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for n in 0..<3 {
+                    group.addTask {
+                        try await transport.connect(timeout: 20)
+                        try await transport.emitBus(type: "fixture.ping", data: ["n":.integer(n)], context: [:])
+                    }
+                }
+                try await group.waitForAll()
+            }
             guard transport.connected && transport.handshakeComplete else { fatalError("Premature readiness") }
-            for n in 0..<3 { try await transport.emitBus(type: "fixture.ping", data: ["n":.integer(n)], context: [:]) }
             for _ in 0..<100 {
                 if await replies.received() == (attempt + 1) * 3 { break }
                 try await Task.sleep(nanoseconds: 50_000_000)
@@ -31,6 +38,6 @@ actor Replies {
             await transport.disconnect()
             guard !transport.connected && !transport.handshakeComplete else { fatalError("Stale readiness") }
         }
-        print("Swift WSS XX -> KK reconnect, six encrypted exchanges: passed")
+        print("Swift WSS concurrent connect, XX -> KK reconnect, six encrypted exchanges: passed")
     }
 }

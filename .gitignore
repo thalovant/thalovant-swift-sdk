@@ -4,3 +4,4 @@ DerivedData/
 Package.resolved
 .env
 _identity.json
+__pycache__/

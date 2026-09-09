@@ -42,6 +42,10 @@ jobs:
           test -n "$VERSION"
           test "$RELEASE_TAG" = "v$VERSION"
 
+      - name: Verify shared C provenance
+        run: python3 tools/check-source-hashes.py
+      - name: Test provenance drift rejection
+        run: python3 -m unittest discover -s tools/tests
       - run: swift --version
       - run: swift build
       - run: swift test
@@ -67,6 +71,9 @@ jobs:
           test -n "$VERSION"
           test "$RELEASE_TAG" = "v$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify shared C provenance before archiving
+        run: python3 tools/check-source-hashes.py
 
       - name: Build source archive and CycloneDX SBOM
         id: artifacts
