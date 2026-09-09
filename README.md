@@ -91,7 +91,9 @@ messages use ordered AES256-GCM binary frames; `connect()` returns after the
 Noise exchange and encrypted application HELLO have been sent. Reconnect
 creates fresh ephemeral keys and counters while retaining the static identity
 and hub pin. Preserve that state across app restarts. Certificate verification
-uses Foundation's normal trust evaluation.
+uses Foundation's normal trust evaluation. Before issuing concurrent requests,
+`try await client.connect()` once; overlapping initial connection attempts return
+an explicit in-progress error.
 
 By default the SDK stores client keys and hub pins in private 0600 files under
 `Application Support/Thalovant/noise-swift` (platform-specific base directory),

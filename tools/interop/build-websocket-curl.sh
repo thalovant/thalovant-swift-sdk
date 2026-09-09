@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Reproduce the Linux CI platform dependency, without changing the SDK sockets.
-# Requires make, gcc, pkg-config, and OpenSSL development headers.
+# Requires curl, xz-utils, make, gcc, pkg-config, and OpenSSL development headers.
 set -euo pipefail
 prefix="${1:?supply an absolute installation directory}"
 [[ "$prefix" == /* ]] || { echo 'Installation directory must be absolute.' >&2; exit 1; }
