@@ -201,7 +201,7 @@ public final class ThalovantClient: @unchecked Sendable {
                 try Task.checkCancellation()
                 try await self.transport.emitBus(type: ThalovantEvents.recognizerLoopUtterance,
                     data: utterancePayload(text: prompt, lang: lang), context: correlatedContext)
-            } catch { state.progressGate.fail(error) }
+            } catch { state.failOperation(error, deadline: started + timeout, replySettle: replySettle, emptyReplyWait: emptyReplyWait) }
         }
         defer { operation.cancel() }
         do {
@@ -209,7 +209,7 @@ public final class ThalovantClient: @unchecked Sendable {
                 timeoutError: ThalovantTimeoutError("Hub did not finish handling the utterance within the request budget."))
         } catch is ThalovantTimeoutError {
             let snapshot = state.snapshot()
-            if snapshot.fragments.isEmpty && snapshot.failureEvent == nil && snapshot.softFailureEvent == nil {
+            if snapshot.fragments.isEmpty && snapshot.failureEvent == nil && snapshot.softFailureEvent == nil && snapshot.operationFailure == nil {
                 throw ThalovantTimeoutError("Hub did not finish handling the utterance within the request budget.")
             }
         }
@@ -217,17 +217,18 @@ public final class ThalovantClient: @unchecked Sendable {
             min(remaining(), max(0, window - (since.map { ProcessInfo.processInfo.systemUptime - $0 } ?? 0)))
         }
         let afterProgress = state.snapshot()
-        if afterProgress.fragments.isEmpty && afterProgress.failureEvent == nil {
+        if afterProgress.fragments.isEmpty && afterProgress.failureEvent == nil && afterProgress.operationFailure == nil {
             try await state.replyGate.wait(timeout: bounded(emptyReplyWait, since: afterProgress.emptyStartedAt), timeoutError: nil)
         }
         // Settling is optional and shares the original budget. Hard failure wakes it immediately.
         let afterEmpty = state.snapshot()
-        if afterEmpty.failureEvent == nil && !afterEmpty.fragments.isEmpty {
+        if afterEmpty.failureEvent == nil && afterEmpty.operationFailure == nil && !afterEmpty.fragments.isEmpty {
             try await state.terminalGate.wait(timeout: bounded(replySettle, since: afterEmpty.firstSpeechAt), timeoutError: nil)
         }
         try Task.checkCancellation()
 
         let final = state.snapshot()
+        if let error = final.operationFailure { throw error }
         // A soft intent-miss becomes the surfaced failure only if no reply (not
         // even a fallback) arrived; a reply means a fallback recovered the turn.
         let effectiveFailure = final.failureEvent ?? (final.fragments.isEmpty ? final.softFailureEvent : nil)
@@ -323,6 +324,7 @@ final class AskState: @unchecked Sendable {
         let failureEvent: ThalovantEvent?
         let softFailureEvent: ThalovantEvent?
         let handled: Bool
+        let operationFailure: Error?
         let responseSessionId: String?
         let firstSpeechAt: TimeInterval?
         let emptyStartedAt: TimeInterval?
@@ -338,6 +340,7 @@ final class AskState: @unchecked Sendable {
     private var softFailureEvent: ThalovantEvent?
     private var handled = false
     private var firstSpeechAt: TimeInterval?, emptyStartedAt: TimeInterval?
+    private var operationFailure: Error?
     private var responseSessionId: String?
 
     /// Opens when the utterance is handled or the first fragment arrives.
@@ -349,7 +352,7 @@ final class AskState: @unchecked Sendable {
     func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        return Snapshot(fragments: fragments, events: events, failureEvent: failureEvent, softFailureEvent: softFailureEvent, handled: handled, responseSessionId: responseSessionId, firstSpeechAt: firstSpeechAt, emptyStartedAt: emptyStartedAt)
+        return Snapshot(fragments: fragments, events: events, failureEvent: failureEvent, softFailureEvent: softFailureEvent, handled: handled, operationFailure: operationFailure, responseSessionId: responseSessionId, firstSpeechAt: firstSpeechAt, emptyStartedAt: emptyStartedAt)
     }
 
     /// Correlation rule (mirrors the Node SDK): only events carrying the
@@ -358,7 +361,7 @@ final class AskState: @unchecked Sendable {
         guard event.requestId == requestId else { return }
         lock.lock()
         defer { lock.unlock() }
-        guard failureEvent == nil else { return }
+        guard failureEvent == nil && operationFailure == nil else { return }
         switch event.name {
         case ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak:
             events.append(event)
@@ -379,6 +382,17 @@ final class AskState: @unchecked Sendable {
         default: return
         }
         if responseSessionId == nil, let id = event.sessionId, !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { responseSessionId = id }
+    }
+
+    func failOperation(_ error: Error, deadline: TimeInterval, replySettle: TimeInterval, emptyReplyWait: TimeInterval) {
+        guard !(error is CancellationError) else { return }
+        lock.locked {
+            let phaseEnd = firstSpeechAt.map { $0 + replySettle } ?? emptyStartedAt.map { $0 + emptyReplyWait } ?? deadline
+            guard failureEvent == nil, operationFailure == nil,
+                  ProcessInfo.processInfo.systemUptime < min(deadline, phaseEnd) else { return }
+            operationFailure = error
+            progressGate.open(); replyGate.open(); terminalGate.open()
+        }
     }
 
     private func normalizeFragment(_ text: String) -> String {

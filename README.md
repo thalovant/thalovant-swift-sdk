@@ -501,6 +501,10 @@ Caller cancellation removes owned subscriptions and preserves a different caller
 connection attempt. Ask requires a matching request ID and returns the first
 nonblank correlated runtime session ID, falling back to the requested session.
 Query replies use the same session selection from accepted query events.
+Query also uses one deadline across connection, send, and collection; completion
+or hard failure returns independently of a retiring send. Non-cancellation write
+failures before a terminal reply or phase expiry remain errors. An admitted write
+keeps transport ownership until its actual cleanup finishes and is never replayed.
 
 ## Control-Plane HTTP Security
 

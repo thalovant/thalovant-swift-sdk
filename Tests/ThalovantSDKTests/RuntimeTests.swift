@@ -19,8 +19,10 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     var emitRetired: Bool { lock.locked { retiredEmit } }
     func markEmitRetired() { lock.locked { retiredEmit = true } }
     var pausedConnect = false, pausedEmit = false
+    var queryAction: (() async throws -> Void)?
     var pausedSend = false
-    private(set) var sendCancelled = false
+    private var cancelledSend = false
+    var sendCancelled: Bool { lock.locked { cancelledSend } }
     var connected: Bool { lock.locked { online } }
     var handshakeComplete: Bool { connected }
     var supportsHiveMessages: Bool { true }
@@ -51,8 +53,9 @@ private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
         lock.locked { sentFrames.append(message) }
         if pausedSend {
             do { try await AsyncGate().wait(timeout: nil, timeoutError: ThalovantTimeoutError("Unused.")) }
-            catch is CancellationError { sendCancelled = true; throw CancellationError() }
+            catch is CancellationError { lock.locked { cancelledSend = true }; throw CancellationError() }
         }
+        try await queryAction?()
         queryAnswer?(message)
     }
     func deliver(_ name: String, text: String = "", request: String? = nil, session: String? = nil) {
@@ -156,6 +159,75 @@ final class RuntimeTests: XCTestCase {
         }
     }
 
+    func testAskPropagatesWriteFailuresDuringReplyPhasesAndPreservesHardTerminal() async throws {
+        for first in [ThalovantEvents.speak, ThalovantEvents.utteranceHandled, ThalovantEvents.intentUnmatched] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.emitAction = { context in
+                fake.deliver(first, text: "answer", request: context["request_id"]?.stringValue)
+                await Task.yield()
+                throw ThalovantConnectionError("Fixture write failed.")
+            }
+            let request = Task { try await sdk.ask("test", timeout: 60, replySettle: 60, emptyReplyWait: 60) }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel() }
+            defer { watchdog.cancel() }
+            do { _ = try await request.value; XCTFail("Expected write failure") }
+            catch is ThalovantConnectionError {} catch { XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(fake.busCount, 0)
+        }
+        let fake = RuntimeFake(), sdk = try client(fake)
+        fake.emitAction = { context in
+            let id = context["request_id"]?.stringValue
+            fake.deliver("speak", text: "partial", request: id)
+            fake.deliver(ThalovantEvents.policyDenied, request: id)
+            throw ThalovantConnectionError("Late fixture write failure.")
+        }
+        let reply = try await sdk.ask("test", replySettle: 60)
+        XCTAssertFalse(reply.ok); XCTAssertEqual(reply.text, "partial")
+    }
+
+    func testQueryReturnsTerminalRepliesOrExpiresWhileAnAdmittedSendRetires() async throws {
+        for ending in ["complete", "hard", "timeout"] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            let entered = AsyncGate(), release = AsyncGate(), retired = AsyncGate()
+            fake.queryAction = {
+                fake.reply("q", "speak", "answer")
+                if ending == "complete" { fake.reply("q", "hive.query.complete") }
+                if ending == "hard" { fake.reply("q", ThalovantEvents.policyDenied) }
+                entered.open()
+                do { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+                catch {
+                    await Task.detached { try? await release.wait(timeout: nil, timeoutError: nil) }.value
+                    fake.markEmitRetired(); retired.open(); throw error
+                }
+            }
+            let request = Task { try await sdk.query("test", timeout: ending == "timeout" ? 0.25 : 60, queryId: "q") }
+            let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel(); release.open() }
+            defer { release.open(); watchdog.cancel() }
+            try await entered.wait(timeout: 1, timeoutError: ThalovantTimeoutError("Fixture did not send."))
+            do {
+                let reply = try await request.value
+                XCTAssertNotEqual(ending, "timeout"); XCTAssertEqual(reply.text, "answer"); XCTAssertEqual(reply.ok, ending == "complete")
+            } catch is ThalovantTimeoutError { XCTAssertEqual(ending, "timeout") }
+            XCTAssertFalse(fake.emitRetired); XCTAssertEqual(fake.frameCount, 0)
+            release.open()
+            try await retired.wait(timeout: 1, timeoutError: ThalovantTimeoutError("Fixture did not retire."))
+        }
+    }
+
+    func testQueryWriteFailureWinsBeforeCompletionButPreservesTerminalReply() async throws {
+        for terminal in [false, true] {
+            let fake = RuntimeFake(), sdk = try client(fake)
+            fake.queryAction = {
+                fake.reply("q", "speak", "answer")
+                if terminal { fake.reply("q", "hive.query.complete") }
+                throw ThalovantConnectionError("Fixture query write failure.")
+            }
+            do { let reply = try await sdk.query("test", queryId: "q"); XCTAssertTrue(terminal); XCTAssertEqual(reply.text, "answer") }
+            catch is ThalovantConnectionError { XCTAssertFalse(terminal) }
+            XCTAssertEqual(fake.frameCount, 0)
+        }
+    }
+
     func testAskReturnsFirstCorrelatedRuntimeSessionReplacement() async throws {
         let fake = RuntimeFake(), sdk = try client(fake)
         fake.busAnswer = { context in
@@ -222,7 +294,8 @@ final class RuntimeTests: XCTestCase {
         fake.pausedSend = true
         do { _ = try await sdk.query("test", timeout: 0.05); XCTFail("Expected send deadline") }
         catch is ThalovantTimeoutError {}
-        XCTAssertTrue(fake.sendCancelled); XCTAssertEqual(fake.frameCount, 0)
+        try await until { fake.sendCancelled }
+        XCTAssertEqual(fake.frameCount, 0)
         let cancelled = Task { try await sdk.query("test") }
         try await until { fake.frameCount == 1 }; cancelled.cancel()
         do { _ = try await cancelled.value; XCTFail("Expected cancellation") } catch is CancellationError {}
