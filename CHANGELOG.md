@@ -9,7 +9,9 @@
   dependency. WSS remains the supported runtime transport.
 - Persist static identity and authenticated hub pins in protected files by
   default. Expose `ThalovantNoiseStore` for application Keychain/secure storage.
-  Conflicting pins and failed authentication are terminal; no legacy downgrade.
+  Create keys atomically under a separate process lock and reject existing empty
+  or truncated state. Conflicting pins and failed authentication are terminal;
+  no legacy downgrade.
 - Send encrypted HELLO before readiness, serialize nonce assignment with socket
   writes, clear state on disconnect/failure, and isolate old socket callbacks
   during reconnect. Plaintext sends and sends before readiness fail closed.

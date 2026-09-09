@@ -162,6 +162,56 @@ final class NoiseTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: keyPath, withDestinationURL: directory.appendingPathComponent("elsewhere"))
         XCTAssertThrowsError(try store.privateKey())
     }
+    func testExistingEmptyOrTruncatedStaticKeyIsNeverReplaced() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ThalovantFileNoiseStore(directory: directory, identityScope: "fixture")
+        _ = try store.privateKey()
+        let keyPath = directory.appendingPathComponent("client-" + noiseHex(noiseHash(Data("fixture".utf8))))
+        for data in [Data(), Data([1, 2, 3])] {
+            try data.write(to: keyPath)
+            XCTAssertThrowsError(try store.privateKey())
+            XCTAssertEqual(try Data(contentsOf: keyPath), data)
+        }
+    }
+    func testMissingPinLookupDoesNotCreateADataFile() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ThalovantFileNoiseStore(directory: directory, identityScope: "fixture")
+        XCTAssertNil(try store.pinnedKey(nodeID: "hub"))
+        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertEqual(files.count, 1)
+        XCTAssertTrue(try XCTUnwrap(files.first).hasSuffix(".lock"))
+    }
+    func testConcurrentProcessesCreateOnePersistentIdentity() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var location = URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+        var executable: URL?
+        for _ in 0..<6 {
+            let candidate = location.appendingPathComponent("ThalovantNoiseStoreFixture")
+            if FileManager.default.isExecutableFile(atPath: candidate.path) { executable = candidate; break }
+            location.deleteLastPathComponent()
+        }
+        let helper = try XCTUnwrap(executable, "swift build/test must build the test fixture executable")
+        let processes: [(Process, Pipe)] = try (0..<8).map { _ in
+            let process = Process(), output = Pipe()
+            process.executableURL = helper; process.arguments = [directory.path]
+            process.standardOutput = output
+            try process.run()
+            return (process, output)
+        }
+        var publicKeys = Set<Data>()
+        for (process, output) in processes {
+            process.waitUntilExit()
+            XCTAssertEqual(process.terminationStatus, 0)
+            publicKeys.insert(output.fileHandleForReading.readDataToEndOfFile())
+        }
+        XCTAssertEqual(publicKeys.count, 1)
+        XCTAssertEqual(try XCTUnwrap(publicKeys.first).count, 65)
+        let files = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+        XCTAssertFalse(files.contains { $0.hasPrefix(".new-") })
+    }
     func testSendBeforeHandshakeAndPlaintextOptOutFail() async throws {
         let identity = try ThalovantIdentity(json: ["access_key": "fixture", "password": "fixture", "default_master": "ws://localhost", "site_id": "fixture"])
         let transport = HiveMindWSSTransport(identity: identity)

@@ -13,6 +13,7 @@ let package = Package(
     targets: [
         .target(name: "CThalovantNoise", path: "Sources/CThalovantNoise", exclude: ["PROVENANCE.md", "source-hashes.json"], publicHeadersPath: "include"),
         .target(name: "ThalovantSDK", dependencies: ["CThalovantNoise"], path: "Sources/ThalovantSDK"),
+        .executableTarget(name: "ThalovantNoiseStoreFixture", dependencies: ["ThalovantSDK", "CThalovantNoise"], path: "Tests/NoiseStoreFixture"),
         .testTarget(
             name: "ThalovantSDKTests",
             dependencies: ["ThalovantSDK"],

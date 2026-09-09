@@ -92,7 +92,9 @@ uses Foundation's normal trust evaluation.
 By default the SDK stores client keys and hub pins in private 0600 files under
 `Application Support/Thalovant/noise-swift` (platform-specific base directory),
 with one client scope per access key. Directory mode is 0700. Existing insecure
-files and symlinks are rejected. To choose a directory:
+files and symlinks are rejected. New keys are published atomically under a
+separate process lock; existing empty or truncated keys are treated as corruption
+and must be restored, never silently regenerated. To choose a directory:
 
 ```swift
 let store = ThalovantFileNoiseStore(

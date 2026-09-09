@@ -59,7 +59,7 @@ public final class ThalovantFileNoiseStore: ThalovantNoiseStore, @unchecked Send
     private func lockedFile<T>(_ name: String, _ body: (Data?) throws -> (T, Data?)) throws -> T {
         try lock.locked {
             let fm = FileManager.default
-            try fm.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try createDirectory(directory)
             let attributes = try fm.attributesOfItem(atPath: directory.path)
             guard attributes[.type] as? FileAttributeType == .typeDirectory,
                   ((attributes[.posixPermissions] as? NSNumber)?.intValue ?? 0o777) & 0o077 == 0,
@@ -67,34 +67,74 @@ public final class ThalovantFileNoiseStore: ThalovantNoiseStore, @unchecked Send
                 throw noiseError("Noise state directory must be owned by the current user with mode 0700.")
             }
             let path = directory.appendingPathComponent(name).path
-            let fd = open(path, O_RDWR | O_CREAT | O_NOFOLLOW, mode_t(0o600))
-            guard fd >= 0 else { throw noiseError("Cannot open protected Noise state.") }
-            defer { _ = close(fd) }
-            guard flock(fd, LOCK_EX) == 0 else { throw noiseError("Cannot lock Noise state.") }
-            defer { _ = flock(fd, LOCK_UN) }
-            var status = stat()
-            guard fstat(fd, &status) == 0, status.st_uid == getuid(),
-                  status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-                  status.st_mode & 0o077 == 0, status.st_nlink == 1,
-                  status.st_size == 0 || status.st_size == 32 else {
-                throw noiseError("Noise state must be a private regular file containing exactly 32 bytes.")
-            }
+            // The lock is separate from key material. Merely looking up a pin
+            // must not create an empty data file that resembles corruption.
+            let lockFD = open(path + ".lock", O_RDWR | O_CREAT | O_NOFOLLOW, mode_t(0o600))
+            guard lockFD >= 0 else { throw noiseError("Cannot open protected Noise state lock.") }
+            defer { _ = close(lockFD) }
+            guard flock(lockFD, LOCK_EX) == 0 else { throw noiseError("Cannot lock Noise state.") }
+            defer { _ = flock(lockFD, LOCK_UN) }
+            try validateFile(lockFD, expectedSize: 0)
+
             var existing: Data?
-            if status.st_size == 32 {
+            let readFD = open(path, O_RDONLY | O_NOFOLLOW)
+            if readFD >= 0 {
+                defer { _ = close(readFD) }
+                // Existing empty/truncated data is never a first-use identity.
+                try validateFile(readFD, expectedSize: 32)
                 var bytes = [UInt8](repeating: 0, count: 32)
-                guard read(fd, &bytes, 32) == 32 else { throw noiseError("Cannot read Noise state.") }
+                guard read(readFD, &bytes, 32) == 32 else { throw noiseError("Cannot read Noise state.") }
                 existing = Data(bytes)
+            } else if errno != ENOENT {
+                throw noiseError("Cannot read protected Noise state.")
             }
             let (result, replacement) = try body(existing)
             if let replacement {
-                guard replacement.count == 32 else { throw noiseError("Noise key must contain 32 bytes.") }
-                guard lseek(fd, 0, SEEK_SET) == 0 else { throw noiseError("Cannot seek Noise state.") }
-                let count = replacement.withUnsafeBytes { write(fd, $0.baseAddress, 32) }
-                guard count == 32, fsync(fd) == 0 else { throw noiseError("Cannot persist Noise state.") }
+                guard replacement.count == 32, existing == nil else { throw noiseError("Refusing to replace existing Noise state.") }
+                let staged = directory.appendingPathComponent(".new-" + UUID().uuidString).path
+                let writeFD = open(staged, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, mode_t(0o600))
+                guard writeFD >= 0 else { throw noiseError("Cannot stage protected Noise state.") }
+                defer { _ = close(writeFD); _ = unlink(staged) }
+                let count = replacement.withUnsafeBytes { write(writeFD, $0.baseAddress, 32) }
+                guard count == 32, fsync(writeFD) == 0 else { throw noiseError("Cannot persist Noise state.") }
+                // Linking a fully written file publishes atomically without
+                // overwriting an unexpected file created by another process.
+                guard link(staged, path) == 0 else { throw noiseError("Noise state appeared during creation; refusing to replace it.") }
+                guard unlink(staged) == 0 else { throw noiseError("Cannot finish publishing Noise state.") }
+                let directoryFD = open(directory.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+                guard directoryFD >= 0 else { throw noiseError("Cannot open Noise state directory.") }
+                defer { _ = close(directoryFD) }
+                guard fsync(directoryFD) == 0 else { throw noiseError("Cannot persist Noise state directory.") }
             }
             return result
         }
     }
+
+    private func createDirectory(_ url: URL) throws {
+        // Foundation may create with default permissions before chmod. POSIX
+        // mkdir applies 0700 atomically, including concurrent first use.
+        if mkdir(url.path, mode_t(0o700)) == 0 { return }
+        let error = errno
+        if error == EEXIST { return }
+        if error == ENOENT {
+            let parent = url.deletingLastPathComponent()
+            guard parent.path != url.path else { throw noiseError("Cannot create Noise state directory.") }
+            try createDirectory(parent)
+            if mkdir(url.path, mode_t(0o700)) == 0 || errno == EEXIST { return }
+        }
+        throw noiseError("Cannot create protected Noise state directory.")
+    }
+
+    private func validateFile(_ fd: Int32, expectedSize: Int) throws {
+        var status = stat()
+        guard fstat(fd, &status) == 0, status.st_uid == getuid(),
+              status.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              status.st_mode & 0o077 == 0, status.st_nlink == 1,
+              status.st_size == expectedSize else {
+            throw noiseError("Noise state must be a private regular file with its exact expected size; restore corrupted state.")
+        }
+    }
+
 }
 
 func noiseError(_ text: String) -> ThalovantConnectionError { ThalovantConnectionError(text) }
