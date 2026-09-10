@@ -109,6 +109,23 @@ final class ProvisioningTests: XCTestCase {
         }
     }
 
+    func testCreateRetryReusesCallerRetainedIdempotencyKey() async throws {
+        StubURLProtocol.enqueue(.init(status: 504, body: #"{"detail":"response lost after creation"}"#))
+        StubURLProtocol.enqueue(.init(body: #"{"id":"original-hub"}"#))
+        let payload: JSONObject = ["name": "retryable-hub", "spec": .object([:])]
+        let key = "one-logical-create"
+        do { _ = try await api.createHub(payload, idempotencyKey: key); XCTFail("expected initial failure") }
+        catch let error as ThalovantApiError { XCTAssertEqual(error.statusCode, 504) }
+        let first = try lastRequest()
+        let hub = try await api.createHub(payload, idempotencyKey: key)
+        let retry = try lastRequest()
+        XCTAssertEqual(first.header("Idempotency-Key"), key)
+        XCTAssertEqual(retry.header("Idempotency-Key"), key)
+        XCTAssertEqual(first.body, retry.body)
+        XCTAssertEqual(hub["id"]?.stringValue, "original-hub")
+        XCTAssertEqual(StubURLProtocol.requests.count, 2)
+    }
+
     func testUpdateHubSendsIfMatchAndPatches() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"id": "hub-1", "active": false}"#))
         _ = try await api.updateHub("hub-1", ["active": false, "isLocked": true], etag: "W/\"3\"")
@@ -169,16 +186,18 @@ final class ProvisioningTests: XCTestCase {
         StubURLProtocol.enqueue(.init(body: #"{"id": "hub-1"}"#))
         _ = try await api.releaseHub("hub-1", ReleaseOptions(channel: "stable"))
 
-        var request = try lastRequest()
+        let request = try lastRequest()
         XCTAssertEqual(request.method, "POST")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/hubs/hub-1/release")
-        var body = try XCTUnwrap(request.bodyObject())
+        let body = try XCTUnwrap(request.bodyObject())
         XCTAssertEqual(body["channel"]?.stringValue, "stable")
         XCTAssertNil(body["mode"])
         XCTAssertNil(body["version"])
         XCTAssertNil(body["images"])
         XCTAssertNil(body["reason"])
+    }
 
+    func testReleaseHubCustomOptions() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"id": "hub-1"}"#))
         _ = try await api.releaseHub("hub-1", ReleaseOptions(
             mode: "custom",
@@ -186,8 +205,8 @@ final class ProvisioningTests: XCTestCase {
             images: ["core": "ghcr.io/thalovant/core:2026.8.1"],
             reason: "pin for audit"
         ))
-        request = try lastRequest()
-        body = try XCTUnwrap(request.bodyObject())
+        let request = try lastRequest()
+        let body = try XCTUnwrap(request.bodyObject())
         XCTAssertNil(body["channel"])
         XCTAssertEqual(body["mode"]?.stringValue, "custom")
         XCTAssertEqual(body["version"]?.stringValue, "2026.8.1")
@@ -202,23 +221,25 @@ final class ProvisioningTests: XCTestCase {
         XCTAssertTrue(body.isEmpty)
     }
 
-    func testHubRatingSetAndClear() async throws {
+    func testHubRatingSet() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"id": "hub-1", "rating": 4}"#))
         _ = try await api.setHubRating("hub-1", rating: 4)
-        var request = try lastRequest()
+        let request = try lastRequest()
         XCTAssertEqual(request.method, "PUT")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/hubs/hub-1/rating")
         XCTAssertEqual(try XCTUnwrap(request.bodyObject())["rating"]?.intValue, 4)
+    }
 
+    func testHubRatingClear() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"id": "hub-1"}"#))
         _ = try await api.clearHubRating("hub-1")
-        request = try lastRequest()
+        let request = try lastRequest()
         XCTAssertEqual(request.method, "DELETE")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/hubs/hub-1/rating")
         XCTAssertNil(request.body)
     }
 
-    func testGetHubRuntimeCapabilitiesAnd409WhenNothingConnected() async throws {
+    func testGetHubRuntimeCapabilities() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"counts": {"total_intents": 12}}"#))
         let capabilities = try await api.getHubRuntimeCapabilities("hub-1")
         XCTAssertEqual(capabilities["counts"]?["total_intents"]?.intValue, 12)
@@ -226,7 +247,9 @@ final class ProvisioningTests: XCTestCase {
             try lastRequest().url.absoluteString,
             "https://api.example.com/v1/hubs/hub-1/runtime-capabilities"
         )
+    }
 
+    func testGetHubRuntimeCapabilities409WhenNothingConnected() async throws {
         StubURLProtocol.enqueue(.init(
             status: 409,
             body: #"{"detail": {"code": "no_connected_client", "message": "No connected client can report inventory."}}"#
@@ -248,7 +271,9 @@ final class ProvisioningTests: XCTestCase {
         StubURLProtocol.enqueue(.init(body: #"{"data": []}"#))
         _ = try await api.listRuntimeGroups()
         XCTAssertEqual(try lastRequest().url.absoluteString, "https://api.example.com/v1/runtime-groups")
+    }
 
+    func testListRuntimeGroupsIncludesOwnerId() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"data": []}"#))
         _ = try await api.listRuntimeGroups(ownerId: "owner-1")
         XCTAssertEqual(
@@ -305,30 +330,34 @@ final class ProvisioningTests: XCTestCase {
         XCTAssertEqual(body["spec"]?["replicas"]?.intValue, 3)
     }
 
-    func testRuntimeGroupConfigGetAndMergePatch() async throws {
+    func testRuntimeGroupConfigGet() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"config": {"lang": "en-us"}}"#))
         let config = try await api.getRuntimeGroupConfig("group-1")
         XCTAssertEqual(config["config"]?["lang"]?.stringValue, "en-us")
-        var request = try lastRequest()
+        let request = try lastRequest()
         XCTAssertEqual(request.method, "GET")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/runtime-groups/group-1/config")
+    }
 
+    func testRuntimeGroupConfigMergePatch() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"config": {"lang": "fr-ca"}}"#))
         _ = try await api.updateRuntimeGroupConfig("group-1", config: ["lang": "fr-ca"])
-        request = try lastRequest()
+        let request = try lastRequest()
         XCTAssertEqual(request.method, "PATCH")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/runtime-groups/group-1/config")
-        var body = try XCTUnwrap(request.bodyObject())
+        let body = try XCTUnwrap(request.bodyObject())
         XCTAssertEqual(body["config"]?["lang"]?.stringValue, "fr-ca")
         XCTAssertNil(body["personas"], "personas is omitted unless provided")
+    }
 
+    func testRuntimeGroupConfigPatchWithPersonas() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"config": {}}"#))
         _ = try await api.updateRuntimeGroupConfig(
             "group-1",
             config: ["lang": "fr-ca"],
             personas: ["default": .object(["name": .string("Ada")])]
         )
-        body = try XCTUnwrap(try lastRequest().bodyObject())
+        let body = try XCTUnwrap(try lastRequest().bodyObject())
         XCTAssertEqual(body["personas"]?["default"]?["name"]?.stringValue, "Ada")
     }
 
@@ -352,14 +381,16 @@ final class ProvisioningTests: XCTestCase {
         XCTAssertNil(body["images"])
     }
 
-    func testDeleteRuntimeGroupAnd409ForDefaultOrAttached() async throws {
+    func testDeleteRuntimeGroup() async throws {
         StubURLProtocol.enqueue(.init(status: 204, body: ""))
         try await api.deleteRuntimeGroup("group-1")
         let request = try lastRequest()
         XCTAssertEqual(request.method, "DELETE")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/runtime-groups/group-1")
         XCTAssertNil(request.header("If-Match"))
+    }
 
+    func testDeleteRuntimeGroup409WhenAttached() async throws {
         StubURLProtocol.enqueue(.init(
             status: 409,
             body: #"{"detail": {"code": "runtime_group_in_use", "message": "Runtime group still has hubs attached."}}"#
@@ -474,14 +505,16 @@ final class ProvisioningTests: XCTestCase {
         XCTAssertFalse(url.contains("owner_id"))
     }
 
-    func testListRuntimeGroupMarketplaceRefreshFlag() async throws {
+    func testListRuntimeGroupMarketplaceDefault() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"data": [], "source": "runtime-group-cache"}"#))
         _ = try await api.listRuntimeGroupMarketplace("group-1")
         XCTAssertEqual(
             try lastRequest().url.absoluteString,
             "https://api.example.com/v1/runtime-groups/group-1/marketplace"
         )
+    }
 
+    func testListRuntimeGroupMarketplaceRefreshFlag() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"data": []}"#))
         _ = try await api.listRuntimeGroupMarketplace("group-1", refreshInventory: true)
         XCTAssertEqual(
@@ -490,7 +523,7 @@ final class ProvisioningTests: XCTestCase {
         )
     }
 
-    func testListRuntimeGroupInventoryRefreshFlagAndPendingSource() async throws {
+    func testListRuntimeGroupInventoryPendingSource() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"data": [], "source": "ovos-runtime-operator-pending"}"#))
         let inventory = try await api.listRuntimeGroupInventory("group-1")
         // Nothing connected is not an error on this route: empty data, pending source.
@@ -500,7 +533,9 @@ final class ProvisioningTests: XCTestCase {
             try lastRequest().url.absoluteString,
             "https://api.example.com/v1/runtime-groups/group-1/inventory"
         )
+    }
 
+    func testListRuntimeGroupInventoryRefreshFlag() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"data": [], "source": "ovos-runtime-operator"}"#))
         _ = try await api.listRuntimeGroupInventory("group-1", refresh: true)
         XCTAssertEqual(
@@ -535,9 +570,10 @@ final class ProvisioningTests: XCTestCase {
         do {
             _ = try await anonymous.listMarketplaceSkills()
             XCTFail("expected ThalovantApiError")
-        } catch {
-            XCTAssertTrue(error is ThalovantApiError)
-        }
+        } catch let error as ThalovantApiError {
+            XCTAssertNil(error.statusCode)
+            XCTAssertEqual(error.message, "Missing Thalovant API access token.")
+        } catch { XCTFail("unexpected error: \(error)") }
         XCTAssertTrue(StubURLProtocol.requests.isEmpty, "no request is sent without a token")
     }
 

@@ -599,10 +599,10 @@ final class DescribeBatch: @unchecked Sendable {
         }
     }
 
-    var isEmpty: Bool {
+    var hasDefinitions: Bool {
         lock.lock()
         defer { lock.unlock() }
-        return found.isEmpty
+        return found.values.contains { !$0.isEmpty }
     }
 
     func snapshot() -> [IntentRequestKey: [IntentDefinition]] {
@@ -772,8 +772,8 @@ extension ThalovantClient {
                 // more than one window's worth of intents would otherwise turn
                 // the whole inventory into a timeout while the same skill with
                 // fewer intents only loses its sentences. A hub silent from the
-                // start still fails at the first window, since nothing is found.
-                if found.isEmpty { throw error }
+                // start still fails at the first window, unless usable definitions were found.
+                if !found.values.contains(where: { !$0.isEmpty }) { throw error }
             }
         }
         return found
@@ -837,7 +837,7 @@ extension ThalovantClient {
                 )
             )
         } catch let error as ThalovantTimeoutError {
-            if batch.isEmpty { throw error }
+            if !batch.hasDefinitions { throw error }
             // A partial answer is still an answer: the intents the hub did not
             // describe in time simply carry no sentences.
         }

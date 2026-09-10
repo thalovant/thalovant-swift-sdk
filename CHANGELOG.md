@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.3.2
+
+- Preserve a description timeout when earlier replies contain only empty or refused definitions; fully answered empty inventories still succeed.
+
+- Redact recognized credential fields recursively in default bootstrap and identity metadata displays, including case, underscore, and hyphen variants; preserve explicit secret serialization and reference fields.
+
+- Reject duplicate active Ask request IDs and Query IDs on the same client before subscribing or dispatching; preserve separate namespaces and remove reservations on collector cleanup.
+- Document fresh correlation IDs for later operations and caller-retained idempotency keys for retryable hub creation.
+- Isolate provisioning scenarios into named tests and verify the specific missing-token failure before I/O.
+
 ## 0.3.1
 
 - Keep admitted physical writes independent of caller cancellation, with a
@@ -201,8 +211,8 @@
 ## 0.1.3
 
 - Hub provisioning on `ThalovantControlPlane`: `createHub` (sends a generated
-  `Idempotency-Key` unless you pass your own, so a retried create returns the
-  first hub), `updateHub` and `deleteHub` (both take a **required** `etag`
+  `Idempotency-Key` unless you pass your own; retries must reuse the same
+  explicit key and payload), `updateHub` and `deleteHub` (both take a **required** `etag`
   sent as `If-Match` — the API rejects a stale *or missing* value with HTTP
   412 and changes nothing), `releaseHub`, `setHubRating`/`clearHubRating`, and
   `getHubRuntimeCapabilities`.

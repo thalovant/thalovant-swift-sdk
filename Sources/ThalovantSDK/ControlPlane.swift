@@ -4,7 +4,7 @@ import FoundationNetworking
 #endif
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.3.1"
+public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.3.2"
 
 /// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {
@@ -496,18 +496,14 @@ func appendParam(_ params: inout [(String, String)], _ name: String, _ value: St
 /// `initial_identify_token`, and the echoed `spec` apiKey/password/cryptoKey).
 /// The MQTT `username` is credential-equivalent — `MqttBrokerCredentials`
 /// itself gates it behind `includeSecrets` — so it is redacted here too, as the
-/// Go and Rust SDKs do. Compared case-insensitively.
+/// Go and Rust SDKs do. Known credential names in metadata use the same policy.
+/// Compared case-insensitively without underscores or hyphens; reference names
+/// such as apiKeyRef remain ordinary metadata.
 let redactedResultSecretKeys: Set<String> = [
-    "username",
-    "broker_username",
-    "password",
-    "access_key",
-    "accesskey",
-    "crypto_key",
-    "cryptokey",
-    "api_key",
-    "apikey",
-    "initial_identify_token",
+    "username", "brokerusername", "brokerpassword", "password", "accesskey",
+    "cryptokey", "apikey", "initialidentifytoken", "authorization", "clientsecret",
+    "privatekey", "apisecret", "secretkey", "credentials",
+    "token", "accesstoken", "refreshtoken", "authtoken", "initialidentify",
 ]
 
 /// Deep-copies `object`, dropping every secret-named field at any depth so a
@@ -517,7 +513,8 @@ let redactedResultSecretKeys: Set<String> = [
 func redactingSecretFields(_ object: JSONObject) -> JSONObject {
     object.reduce(into: JSONObject()) { result, entry in
         let (key, value) = entry
-        guard !redactedResultSecretKeys.contains(key.lowercased()) else { return }
+        let normalizedKey = key.lowercased().replacingOccurrences(of: "_", with: "").replacingOccurrences(of: "-", with: "")
+        guard !redactedResultSecretKeys.contains(normalizedKey) else { return }
         result[key] = redactedSecretValue(value)
     }
 }

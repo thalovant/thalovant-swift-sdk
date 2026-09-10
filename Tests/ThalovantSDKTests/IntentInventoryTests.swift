@@ -70,6 +70,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     /// When set, answers `ovos.intent.list` with `{"ok": false, "error": ...}`
     /// -- the query failed, which is not the same as a hub with no intents.
     let listError: String?
+    let describePayload: JSONObject?
     /// What `intent.service.adapt.manifest.get` answers (names only).
     let adaptNames: [String]
     let fallbackPayload: JSONObject
@@ -96,6 +97,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         replyDelay: TimeInterval? = nil,
         listRows: ((String) -> [JSONValue])? = nil,
         listError: String? = nil,
+        describePayload: JSONObject? = nil,
         adaptNames: [String] = [],
         fallbackPayload: JSONObject = ["fallbacks": .array([])],
         foreignFirst: Bool = false, fallbackDelay: TimeInterval = 0, connectDelay: TimeInterval = 0
@@ -111,6 +113,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.replyDelay = replyDelay
         self.listRows = listRows
         self.listError = listError
+        self.describePayload = describePayload
         self.adaptNames = adaptNames
         self.fallbackPayload = fallbackPayload
         self.foreignFirst = foreignFirst; self.fallbackDelay = fallbackDelay; self.connectDelay = connectDelay
@@ -262,6 +265,10 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
             let skillId = data["skill_id"]?.stringValue ?? ""
             let intentName = data["intent_name"]?.stringValue ?? ""
             if deafDescribeSkills.contains(skillId) || deafDescribeIntent?(intentName) == true {
+                return
+            }
+            if let describePayload {
+                deliver(ThalovantEvents.intentDescribeResponse, data: describePayload, context: context)
                 return
             }
             let known = (registered[lang] ?? []).first { $0.skillId == skillId && $0.intentName == intentName }
@@ -794,6 +801,30 @@ final class IntentInventoryTests: XCTestCase {
         let described = try await sdk.describeIntentBatch(wanted, timeout: 5, batchSize: 0)
         XCTAssertEqual(described.count, 69)
         XCTAssertEqual(hub.describeWindows, [69], "batchSize 0 restores one window for everything")
+    }
+
+    func testEmptyDescriptionsCannotTurnLaterSilenceIntoPartialSuccess() async throws {
+        let wanted = ["first", "second"].map { IntentRequestKey(skillId: weather, intentName: $0, lang: "en-us") }
+        for refused in [false, true] {
+            for batchSize in [0, 1] {
+                let hub = FakeHubTransport(deafDescribeIntent: { $0 == "second" }, describePayload: ["ok": .bool(!refused), "definitions": .array([])])
+                do {
+                    _ = try await client(hub).describeIntentBatch(wanted, timeout: 0.04, batchSize: batchSize)
+                    XCTFail("empty/error answers must not mask silence; refused=\(refused), batch=\(batchSize)")
+                } catch is ThalovantTimeoutError { }
+                XCTAssertEqual(hub.emitted.filter { $0.type == ThalovantEvents.intentDescribe }.count, 2)
+            }
+        }
+    }
+
+    func testFullyAnsweredEmptyDescriptionsRemainSuccessful() async throws {
+        let wanted = ["first", "second"].map { IntentRequestKey(skillId: weather, intentName: $0, lang: "en-us") }
+        for refused in [false, true] {
+            let hub = FakeHubTransport(describePayload: ["ok": .bool(!refused), "definitions": .array([])])
+            let found = try await client(hub).describeIntentBatch(wanted, timeout: 0.04, batchSize: 1)
+            XCTAssertEqual(found.count, 2)
+            XCTAssertTrue(found.values.allSatisfy { $0.isEmpty })
+        }
     }
 
     func testASilentHubFailsAfterOneBatchNotAfterEveryRequest() async throws {
