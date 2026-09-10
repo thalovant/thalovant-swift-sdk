@@ -15,6 +15,57 @@ import FoundationNetworking
 /// the intentional secret paths (`asJSON(includeSecrets:)`, the stored values,
 /// and `ThalovantApiError.body`) still carry the real data.
 final class SecurityHardeningTests: XCTestCase {
+    private func displayMetadata() -> JSONObject {
+        [
+            "label": .string("keep-me"),
+            "apiKeyRef": .string("key-reference"),
+            "passwordSecretRef": .string("password-reference"),
+            "nested": .array([.object([
+                "Authorization": .string("DISPLAY-CREDENTIAL-authorization"),
+                "token": .string("DISPLAY-CREDENTIAL-token"),
+                "access_token": .string("DISPLAY-CREDENTIAL-access-token"),
+                "refresh-token": .string("DISPLAY-CREDENTIAL-refresh-token"),
+                "authToken": .string("DISPLAY-CREDENTIAL-auth-token"),
+                "InitialIdentify": .string("{\"password\":\"DISPLAY-CREDENTIAL-serialized\"}"),
+                "client_secret": .string("DISPLAY-CREDENTIAL-client"),
+                "private-key": .string("DISPLAY-CREDENTIAL-private"),
+                "apiSecret": .string("DISPLAY-CREDENTIAL-api"),
+                "SECRET_KEY": .string("DISPLAY-CREDENTIAL-key"),
+                "credentials": .object(["opaque": .string("DISPLAY-CREDENTIAL-object")]),
+            ])]),
+        ]
+    }
+
+    private func displayIdentity() throws -> ThalovantIdentity {
+        try ThalovantIdentity(json: [
+            "access_key": .string("fixture-access"),
+            "password": .string("fixture-password"),
+            "site_id": .string("fixture-site"),
+            "default_master": .string("https://hub.example.com"),
+            "metadata": .object(displayMetadata()),
+        ])
+    }
+
+    func testDefaultIdentityDisplayNormalizesKnownCredentialKeysWithoutMutatingPersistence() throws {
+        let identity = try displayIdentity()
+        let redacted = identity.asJSON()
+        XCTAssertFalse(try ThalovantJSON.encodeToString(redacted).contains("DISPLAY-CREDENTIAL"))
+        XCTAssertEqual(redacted["metadata"]?["apiKeyRef"]?.stringValue, "key-reference")
+        XCTAssertEqual(redacted["metadata"]?["passwordSecretRef"]?.stringValue, "password-reference")
+        XCTAssertEqual(identity.asJSON(includeSecrets: true)["metadata"]?.objectValue, displayMetadata())
+        XCTAssertEqual(identity.metadata, displayMetadata())
+    }
+
+    func testDefaultBootstrapDisplayNormalizesKnownCredentialKeysWithoutMutatingResources() throws {
+        let result = BootstrapIdentityResult(identity: try displayIdentity(), hub: displayMetadata(), client: displayMetadata(), endpoint: nil)
+        let redacted = result.asJSON()
+        XCTAssertFalse(try ThalovantJSON.encodeToString(redacted).contains("DISPLAY-CREDENTIAL"))
+        XCTAssertEqual(redacted["hub"]?["apiKeyRef"]?.stringValue, "key-reference")
+        XCTAssertEqual(redacted["client"]?["passwordSecretRef"]?.stringValue, "password-reference")
+        XCTAssertEqual(result.asJSON(includeSecrets: true)["hub"]?.objectValue, displayMetadata())
+        XCTAssertEqual(result.client, displayMetadata())
+    }
+
     private var api: ThalovantControlPlane!
 
     override func setUp() {
@@ -95,16 +146,8 @@ final class SecurityHardeningTests: XCTestCase {
 
         // identity keeps its existing redaction.
         XCTAssertNil(redacted["identity"]?["access_key"])
-        // client.initial_identify secrets are gone; non-secrets remain.
-        let identify = redacted["client"]?["initial_identify"]
-        XCTAssertNil(identify?["access_key"])
-        XCTAssertNil(identify?["password"])
-        XCTAssertNil(identify?["crypto_key"])
-        XCTAssertNil(identify?["mqtt"]?["password"])
-        // The MQTT username is credential-equivalent and is redacted too.
-        XCTAssertNil(identify?["mqtt"]?["username"])
-        XCTAssertEqual(identify?["site_id"]?.stringValue, "swift-demo-client")
-        XCTAssertEqual(identify?["mqtt"]?["endpoint"]?.stringValue, "mqtts://mqtt.hub-1.hubs.thalovant.com:8883")
+        // Bootstrap payloads may be opaque serialized JSON: omit the entire field.
+        XCTAssertNil(redacted["client"]?["initial_identify"])
         // client.initial_identify_token and echoed spec secrets are gone.
         XCTAssertNil(redacted["client"]?["initial_identify_token"])
         XCTAssertNil(redacted["client"]?["spec"]?["apiKey"])

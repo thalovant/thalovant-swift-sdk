@@ -2,6 +2,8 @@
 
 ## 0.3.2
 
+- Redact recognized credential fields recursively in default bootstrap and identity metadata displays, including case, underscore, and hyphen variants; preserve explicit secret serialization and reference fields.
+
 - Reject duplicate active Ask request IDs and Query IDs on the same client before subscribing or dispatching; preserve separate namespaces and remove reservations on collector cleanup.
 - Document fresh correlation IDs for later operations and caller-retained idempotency keys for retryable hub creation.
 - Isolate provisioning scenarios into named tests and verify the specific missing-token failure before I/O.

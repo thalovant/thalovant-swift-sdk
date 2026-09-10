@@ -78,6 +78,14 @@ trusts. `result.asJSON()` redacts the identity, hub, and client credentials, so
 only `result.asJSON(includeSecrets: true)` returns the real secrets; never log
 or persist that variant.
 
+Default bootstrap and identity JSON displays also remove recognized credential
+fields recursively from metadata (`authorization`, `client_secret`,
+`private_key`, `api_secret`, `secret_key`, `credentials`, token fields, and
+`initial_identify`), ignoring case,
+underscores, and hyphens. Reference fields such as `apiKeyRef` remain intact.
+This does not sanitize arbitrary text or alter the explicit `includeSecrets`
+serialization used for persistence.
+
 ## HiveMind v3 and persistent identity
 
 The WSS runtime transport uses HiveMind v3 Noise with `XXpsk2` on first

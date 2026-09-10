@@ -189,7 +189,7 @@ public struct ThalovantIdentity: Sendable {
             data["data_plane_endpoints"] = .object(endpoints)
         }
         if !metadata.isEmpty {
-            data["metadata"] = .object(metadata)
+            data["metadata"] = .object(includeSecrets ? metadata : redactingSecretFields(metadata))
         }
         if includeSecrets {
             data["access_key"] = .string(accessKey)
