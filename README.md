@@ -217,7 +217,8 @@ let hubPayload: JSONObject = [
         "protocols": .object(["wss": .object(["enabled": .bool(true)])]),
     ]),
 ]
-let hub = try await api.createHub(hubPayload)
+let createKey = UUID().uuidString
+let hub = try await api.createHub(hubPayload, idempotencyKey: createKey)
 let hubId = hub["id"]?.stringValue ?? ""
 
 // 4. Install a skill from the marketplace catalog.
@@ -234,8 +235,7 @@ one key before the first attempt, then reuse that key and the same payload if
 you retry after a timeout. The SDK does not retry automatically:
 
 ```swift
-let createKey = UUID().uuidString
-// Use the hubPayload and runtime group from the provisioning example above.
+// Retry only when needed, using the original hubPayload and createKey above.
 let hub = try await api.createHub(hubPayload, idempotencyKey: createKey)
 // If this call times out, retry with the same hubPayload and createKey.
 ```
