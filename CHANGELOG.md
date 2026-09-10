@@ -2,6 +2,8 @@
 
 ## 0.3.2
 
+- Preserve a description timeout when earlier replies contain only empty or refused definitions; fully answered empty inventories still succeed.
+
 - Redact recognized credential fields recursively in default bootstrap and identity metadata displays, including case, underscore, and hyphen variants; preserve explicit secret serialization and reference fields.
 
 - Reject duplicate active Ask request IDs and Query IDs on the same client before subscribing or dispatching; preserve separate namespaces and remove reservations on collector cleanup.

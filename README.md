@@ -86,6 +86,11 @@ underscores, and hyphens. Reference fields such as `apiKeyRef` remain intact.
 This does not sanitize arbitrary text or alter the explicit `includeSecrets`
 serialization used for persistence.
 
+Intent descriptions may return partial results after a timeout only when at
+least one reply supplied parsed definitions. Empty or refused descriptions
+alone do not hide a missing reply, including in a later batch. When every
+requested description is answered explicitly, an empty inventory is valid.
+
 ## HiveMind v3 and persistent identity
 
 The WSS runtime transport uses HiveMind v3 Noise with `XXpsk2` on first
