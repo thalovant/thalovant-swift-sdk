@@ -209,11 +209,15 @@ let group = try await api.createRuntimeGroup(["name": "kiosks", "description": "
 let groupId = group["id"]?.stringValue ?? ""
 
 // 3. Create a hub attached to it.
-let hub = try await api.createHub([
+let hubPayload: JSONObject = [
     "name": "joke-garden",
     "runtimeGroupId": .string(groupId),
-    "spec": .object(["protocols": .object(["wss": .object(["enabled": .bool(true)])])]),
-])
+    "spec": .object([
+        "version": "1.0.0",
+        "protocols": .object(["wss": .object(["enabled": .bool(true)])]),
+    ]),
+]
+let hub = try await api.createHub(hubPayload)
 let hubId = hub["id"]?.stringValue ?? ""
 
 // 4. Install a skill from the marketplace catalog.
@@ -231,9 +235,9 @@ you retry after a timeout. The SDK does not retry automatically:
 
 ```swift
 let createKey = UUID().uuidString
-let payload: JSONObject = ["name": "retryable-hub", "spec": .object([:])]
-let hub = try await api.createHub(payload, idempotencyKey: createKey)
-// If this call times out, retry with the same payload and createKey.
+// Use the hubPayload and runtime group from the provisioning example above.
+let hub = try await api.createHub(hubPayload, idempotencyKey: createKey)
+// If this call times out, retry with the same hubPayload and createKey.
 ```
 
 Updating and deleting a hub use optimistic locking, so `etag` is a required
