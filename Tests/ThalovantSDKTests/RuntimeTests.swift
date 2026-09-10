@@ -96,6 +96,78 @@ final class RuntimeTests: XCTestCase {
             try await Task.sleep(nanoseconds: 1_000_000)
         }
     }
+    func testDuplicateLiveAskIdCannotShareReply() async throws { try await duplicateLiveId(query: false) }
+    func testDuplicateLiveQueryIdCannotShareReply() async throws { try await duplicateLiveId(query: true) }
+    private func duplicateLiveId(query: Bool) async throws {
+        let fake = RuntimeFake()
+        let client = try self.client(fake)
+        let duplicateFinished = AsyncGate()
+        func start(_ prompt: String) -> Task<ThalovantReply, Error> {
+            Task {
+                defer { if prompt == "duplicate" { duplicateFinished.open() } }
+                if query { return try await client.query(prompt, requestId: prompt, queryId: "shared") }
+                return try await client.ask(prompt, requestId: "shared")
+            }
+        }
+        let owner = start("owner")
+        defer { owner.cancel() }
+        try await until { query ? fake.sent.count == 1 : fake.emitted.count == 1 }
+        let duplicate = start("duplicate")
+        defer { duplicate.cancel() }
+        // Either the new guard rejects immediately or the baseline admits a
+        // second listener; allow it to register before delivering one reply.
+        try await until { duplicateFinished.isOpen || (query ? fake.frameCount == 2 : fake.busCount == 2) }
+        if query { fake.reply("shared", "speak", "only-owner"); fake.reply("shared", "hive.query.complete") }
+        else { fake.deliver("speak", text: "only-owner", request: "shared") }
+        let reply = try await owner.value
+        XCTAssertEqual(reply.text, "only-owner")
+        do { let leaked = try await duplicate.value; XCTFail("Duplicate call received another operation's reply: \(leaked.text)") }
+        catch let error as ThalovantRuntimeError { XCTAssertTrue(error.message.contains("already active")) }
+        XCTAssertEqual(query ? fake.sent.count : fake.emitted.count, 1)
+        XCTAssertEqual(query ? fake.frameCount : fake.busCount, 0)
+    }
+
+    func testCorrelationReservationsEndWithCollectorCancellation() async throws {
+        for query in [false, true] {
+            let fake = RuntimeFake()
+            let sdk = try self.client(fake)
+            func start() -> Task<ThalovantReply, Error> {
+                Task {
+                    if query { return try await sdk.query("test", queryId: "shared") }
+                    return try await sdk.ask("test", requestId: "shared")
+                }
+            }
+            let owner = start()
+            try await until { query ? fake.sent.count == 1 : fake.emitted.count == 1 }
+            owner.cancel()
+            do { _ = try await owner.value; XCTFail("expected cancellation") } catch is CancellationError { }
+            XCTAssertEqual(query ? fake.frameCount : fake.busCount, 0)
+            // The fake peer is quiescent; normal callers use fresh IDs for later operations.
+            let next = start()
+            defer { next.cancel() }
+            try await until { query ? fake.sent.count == 2 : fake.emitted.count == 2 }
+            if query { fake.reply("shared", "speak", "next-only"); fake.reply("shared", "hive.query.complete") }
+            else { fake.deliver("speak", text: "next-only", request: "shared") }
+            let reply = try await next.value
+            XCTAssertEqual(reply.text, "next-only")
+        }
+    }
+
+    func testAskQueryAndSeparateClientsHaveIndependentCorrelationNamespaces() async throws {
+        let fake = RuntimeFake(), other = RuntimeFake()
+        let sdk = try client(fake), second = try client(other)
+        let ask = Task { try await sdk.ask("ask", requestId: "shared") }
+        let query = Task { try await sdk.query("query", queryId: "shared") }
+        let remote = Task { try await second.ask("other", requestId: "shared") }
+        defer { ask.cancel(); query.cancel(); remote.cancel() }
+        try await until { fake.emitted.count == 1 && fake.sent.count == 1 && other.emitted.count == 1 }
+        fake.deliver("speak", text: "ask-only", request: "shared")
+        fake.reply("shared", "speak", "query-only"); fake.reply("shared", "hive.query.complete")
+        other.deliver("speak", text: "other-only", request: "shared")
+        let a = try await ask.value, q = try await query.value, r = try await remote.value
+        XCTAssertEqual(a.text, "ask-only"); XCTAssertEqual(q.text, "query-only"); XCTAssertEqual(r.text, "other-only")
+    }
+
     func testAskBudgetIncludesConnectSendEmptyWaitAndSettle() async throws {
         for phase in ["connect", "send", "empty", "settle", "no_speech"] {
             let fake = RuntimeFake(), sdk = try client(fake)

@@ -33,6 +33,21 @@ public final class ThalovantClient: @unchecked Sendable {
     let transport: any HiveMindBusTransport
     private let replySettle: TimeInterval
     private let emptyReplyWait: TimeInterval
+    private let correlationLock = NSLock()
+    private var activeAskIDs = Set<String>()
+    private var activeQueryIDs = Set<String>()
+
+    func reserveRuntimeID(_ id: String, query: Bool) throws -> ThalovantSubscription {
+        try correlationLock.locked {
+            let inserted = query ? activeQueryIDs.insert(id).inserted : activeAskIDs.insert(id).inserted
+            guard inserted else { throw ThalovantRuntimeError("The correlation ID is already active for this operation type on this client.") }
+        }
+        return ThalovantSubscription {
+            self.correlationLock.locked {
+                if query { self.activeQueryIDs.remove(id) } else { self.activeAskIDs.remove(id) }
+            }
+        }
+    }
 
     public init(
         identity: ThalovantIdentity,
@@ -175,6 +190,8 @@ public final class ThalovantClient: @unchecked Sendable {
         let started = ProcessInfo.processInfo.systemUptime
         @Sendable func remaining() -> TimeInterval { max(0, timeout - (ProcessInfo.processInfo.systemUptime - started)) }
         let requestId = requestId ?? newRequestId()
+        let correlation = try reserveRuntimeID(requestId, query: false)
+        defer { correlation.close() }
         let sessionId = sessionId ?? newSessionId()
         let correlatedContext = contextWithCorrelation(
             contextWithIdentityMetadata(context),
@@ -191,7 +208,7 @@ public final class ThalovantClient: @unchecked Sendable {
         defer { transport.removeBusHandler(handlerId) }
 
         // Keep I/O ownership in its task while the caller waits on correlated progress.
-        // Cancelling this task retires the transport writer; it cannot retract an admitted write.
+        // Cancellation stops the caller wait; an admitted physical write keeps its own lifetime.
         let operation = Task {
             do {
                 try Task.checkCancellation()

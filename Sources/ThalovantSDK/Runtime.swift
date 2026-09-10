@@ -142,6 +142,8 @@ extension ThalovantClient {
         let started = ProcessInfo.processInfo.systemUptime
         @Sendable func remaining() -> TimeInterval { max(0, timeout - (ProcessInfo.processInfo.systemUptime - started)) }
         let request = requestId ?? newRequestId(), session = sessionId ?? newSessionId(), query = queryId ?? request
+        let correlation = try reserveRuntimeID(query, query: true)
+        defer { correlation.close() }
         let state = RuntimeQueryState()
         let token = transport.addMessageHandler { message in
             guard ["query", "cascade"].contains(message.msgType),

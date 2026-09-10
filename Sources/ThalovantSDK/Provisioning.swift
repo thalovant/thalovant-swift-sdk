@@ -114,9 +114,10 @@ extension ThalovantControlPlane {
     /// `active`, `visibility`, `capacity_profile`, and `owner_id` are
     /// optional. camelCase keys are accepted and sent as snake_case.
     ///
-    /// The request is idempotent: a generated `Idempotency-Key` is sent unless
-    /// you pass your own, so a retried create returns the first hub instead of
-    /// making a second one.
+    /// An `Idempotency-Key` header is always sent. Omitting `idempotencyKey`
+    /// generates a new key for each call. To retry one logical create after a
+    /// timeout, retain and pass the same explicit key and payload on each
+    /// attempt. The SDK does not retry automatically.
     ///
     /// Requires a paid plan and a token with the `hubs:write` scope; a
     /// free-plan token fails with HTTP 402.
