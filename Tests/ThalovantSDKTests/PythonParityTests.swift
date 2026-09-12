@@ -18,6 +18,8 @@ final class PythonParityTests: XCTestCase {
         XCTAssertEqual(intent.examples(lang: "en-us",limit: 2,speakable: true),["x","a complete sentence"])
     }
     func testEmbeddedAudioIsStrictBoundedAndCollected() throws {
+        XCTAssertEqual(try ThalovantEvent(name: ThalovantEvents.audioQueue,data: ["binary_data":.string(" \t")]).audioBytes(),Data())
+        XCTAssertThrowsError(try ThalovantEvent(name: ThalovantEvents.audioQueue,data: ["binary_data":.string("00 ")]).audioBytes(maxBytes:1))
         let context: JSONObject = ["request_id":.string("r")]
         let event = ThalovantEvent(name: ThalovantEvents.audioQueue,data: ["binary_data":.string("00 ff\n10"),"lang":.string("fr")],context: context)
         XCTAssertEqual(try event.audioBytes(),Data([0,255,16]));XCTAssertEqual(event.lang,"fr")
