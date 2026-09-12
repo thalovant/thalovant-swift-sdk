@@ -3,6 +3,44 @@ import XCTest
 @testable import ThalovantSDK
 
 final class PythonParityTests: XCTestCase {
+    func testConfigNumbersRejectLossyCallerValuesBeforeIO() async throws {
+        for value in [Double.nan, Double.infinity, -Double.infinity, 1e25] {
+            for inPersonas in [false, true] {
+                StubURLProtocol.reset()
+                let api = ThalovantControlPlane(apiURL: "https://api.example.com", accessToken: "test", session: StubURLProtocol.makeSession())
+                let payload: JSONObject = ["nested": .array([.number(value)])]
+                do {
+                    _ = try await api.updateRuntimeGroupConfig("x", config: inPersonas ? [:] : payload, personas: inPersonas ? payload : nil)
+                    XCTFail("Expected numeric validation failure")
+                } catch let error as ThalovantApiError { XCTAssertTrue(error.message.contains("floating-point")) }
+                XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+            }
+        }
+    }
+
+    func testConfigNumbersRejectStoredIntegerOverflowBeforeWriting() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(body: "{\"config\":{\"id\":18446744073709551617},\"revision\":\"\(String(repeating: "a", count: 64))\"}"))
+        StubURLProtocol.enqueue(.init(body: "{}"))
+        let api = ThalovantControlPlane(apiURL: "https://api.example.com", accessToken: "test", session: StubURLProtocol.makeSession())
+        do {
+            _ = try await api.updateRuntimeGroupConfig("x", config: ["lang": .string("fr")])
+            XCTFail("Expected numeric validation failure")
+        } catch let error as ThalovantApiError { XCTAssertTrue(error.message.contains("floating-point")) }
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.method }, ["GET"])
+    }
+
+    func testConfigNumbersPreserveNativeIntegersExactly() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(body: "{\"config\":{\"id\":9223372036854775807},\"revision\":\"\(String(repeating: "a", count: 64))\"}"))
+        StubURLProtocol.enqueue(.init(body: "{}"))
+        let api = ThalovantControlPlane(apiURL: "https://api.example.com", accessToken: "test", session: StubURLProtocol.makeSession())
+        _ = try await api.updateRuntimeGroupConfig("x", config: ["min": .integer(Int.min)])
+        let body = try StubURLProtocol.requests[1].bodyObject()!
+        XCTAssertEqual(body["config"]?["id"], .integer(Int.max))
+        XCTAssertEqual(body["config"]?["min"], .integer(Int.min))
+    }
+
     func testRequestHintsAndLocationPreserveCaller() {
         let base: JSONObject = ["session": .object(["pipeline": .array([.string("old")]),"session_id": .string("kept")])]
         let location = buildLocation(city: " Montréal ",country: " ca ",latitude: 45.5,longitude: -73.5)!

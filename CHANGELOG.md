@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 — 2026-09-12
+
+- Reject non-finite or lossy floating-point values in guarded config/personas merges, including stored JSON integer overflow. Preserve native Int values exactly.
+
 ## 0.5.0 — 2026-09-12
 
 - Match Python 0.6.3 request hints, location construction, ordered embedded audio replies, strict bounded hex decoding, and speakable intent examples with original phrase priority.
