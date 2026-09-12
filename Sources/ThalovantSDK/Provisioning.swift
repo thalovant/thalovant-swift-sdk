@@ -263,11 +263,14 @@ extension ThalovantControlPlane {
     /// Deep merge using a revision precondition. Only 412 retries, at most three attempts.
     /// Older APIs fail before a write. Requires hubs:read and paid hubs:write.
     public func updateRuntimeGroupConfig(_ runtimeGroupId: String, config: JSONObject, personas: JSONObject? = nil) async throws -> JSONObject {
+        try validateConfigNumbers(.object(config))
+        if let personas { try validateConfigNumbers(.object(personas)) }
         for attempt in 0..<3 {
             let snapshot = try await getRuntimeGroupConfig(runtimeGroupId)
             guard let revision = snapshot["revision"]?.stringValue, revision.utf8.count == 64,
                 revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
                 let stored = snapshot["config"]?.objectValue else { throw ThalovantApiError(message: "Safe configuration merge requires a valid config and revision from the API.") }
+            try validateConfigNumbers(.object(stored))
             var body: JSONObject = ["config": .object(mergeRuntimeConfig(stored, config)), "expected_revision": .string(revision)]
             if let personas { body["personas"] = .object(personas) }
             do { return try await requestObject("PUT", "/v1/runtime-groups/\(encodePathComponent(runtimeGroupId))/config", body: body) }
@@ -480,6 +483,18 @@ func runtimeGroupPayload(_ payload: JSONObject) -> JSONObject {
         ("ownerId", "owner_id"),
         ("cloneFromDefault", "clone_from_default"),
     ])
+}
+
+private func validateConfigNumbers(_ value: JSONValue) throws {
+    switch value {
+    case .number(let number) where !number.isFinite || abs(number) > 9_007_199_254_740_991:
+        throw ThalovantApiError(message: "Safe configuration merge refuses non-finite or out-of-range floating-point values; use native integers or string identifiers.")
+    case .array(let values):
+        for value in values { try validateConfigNumbers(value) }
+    case .object(let values):
+        for value in values.values { try validateConfigNumbers(value) }
+    default: break
+    }
 }
 
 private func mergeRuntimeConfig(_ stored: JSONObject, _ delta: JSONObject) -> JSONObject {

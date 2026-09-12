@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.5.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.5.1"),
 ]
 ```
 
@@ -652,7 +652,7 @@ without waiting, retain the complete accepted response (including `operation_id`
 and `state`), then pass that response to the wait helper separately. Cancelling waiting does not undo the server operation. After a polling
 failure, inspect/resume that operation instead of submitting the write again.
 
-## Request helpers and safe configuration updates (0.5.0)
+## Request helpers and safe configuration updates
 
 Request hints carry a recognized language, ordered intent pipeline, and caller
 location without changing the caller's context. Empty hints are omitted. The
@@ -699,3 +699,9 @@ Distinct audio events may intentionally repeat identical sound content. Only
 repeated delivery of the same event object is suppressed where object identity
 is available, without counting it as a dropped clip. Rendered example ranking
 uses the original pattern's slot presence even when sample values are supplied.
+
+Guarded merges in 0.5.1 preserve native `Int` values, but reject non-finite
+`Double` values and floating-point magnitudes above 9,007,199,254,740,991 in
+configuration/personas or stored snapshots. This prevents silent rounding of
+JSON integers outside native `Int` storage. Use string identifiers for larger
+integers.
