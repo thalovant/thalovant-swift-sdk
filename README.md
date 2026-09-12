@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.6.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.6.1"),
 ]
 ```
 
@@ -711,8 +711,8 @@ retain their upstream MIT license notices. Both data notices ship with the SDK.
 
 ## Locale-aware intent listings
 
-Version 0.6.0 bundles the same language rules as Python 0.6.5 with
-`thalovant-languages` 0.1.1. Locale selection follows OVOS language distances,
+Version 0.6.1 bundles the same language rules as Python 0.6.8 with
+`thalovant-languages` 0.2.1. Locale selection follows OVOS language distances,
 including regional variants and stable ties. No network request is required.
 
 ```swift
@@ -732,3 +732,13 @@ fail construction; all regex matches within one `asks` or `asSentence` call shar
 throws on exhaustion and sentence rendering returns a bare line. Unknown locales
 and explicit nil data do not invent punctuation. Bundled data is packaged as a
 SwiftPM resource; source references and both licenses ship with it.
+
+### Language data refresh
+
+The bundled listing data follows `thalovant-languages` 0.2.1: 270 languages
+(290 base and regional entries), with regional rules resolved through the
+public package loader. Sentence marks and trailing words now match Python 0.6.8;
+for example Spanish `qué hora es` becomes `Qué hora es?`, while French
+`coupe le son` remains a complete sentence. Undescribed languages such as
+`tlh` still render bare. The reference fixtures cover 4,652 listing cases and
+990 OVOS language-selection cases.
