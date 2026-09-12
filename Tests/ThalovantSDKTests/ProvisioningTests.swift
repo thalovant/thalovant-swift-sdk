@@ -341,7 +341,7 @@ final class ProvisioningTests: XCTestCase {
 
     func testRuntimeGroupConfigMergePatch() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"config": {"lang": "fr-ca"}}"#))
-        _ = try await api.updateRuntimeGroupConfig("group-1", config: ["lang": "fr-ca"])
+        _ = try await api.replaceRuntimeGroupConfig("group-1", config: ["lang": "fr-ca"])
         let request = try lastRequest()
         XCTAssertEqual(request.method, "PATCH")
         XCTAssertEqual(request.url.absoluteString, "https://api.example.com/v1/runtime-groups/group-1/config")
@@ -352,7 +352,7 @@ final class ProvisioningTests: XCTestCase {
 
     func testRuntimeGroupConfigPatchWithPersonas() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"config": {}}"#))
-        _ = try await api.updateRuntimeGroupConfig(
+        _ = try await api.replaceRuntimeGroupConfig(
             "group-1",
             config: ["lang": "fr-ca"],
             personas: ["default": .object(["name": .string("Ada")])]
@@ -363,7 +363,7 @@ final class ProvisioningTests: XCTestCase {
 
     func testUpdateRuntimeGroupConfigSendsEmptyPersonasWhenGiven() async throws {
         StubURLProtocol.enqueue(.init(body: #"{"config": {}}"#))
-        _ = try await api.updateRuntimeGroupConfig("group-1", config: [:], personas: [:])
+        _ = try await api.replaceRuntimeGroupConfig("group-1", config: [:], personas: [:])
         let body = try XCTUnwrap(try lastRequest().bodyObject())
         XCTAssertEqual(body["personas"], .object([:]), "an explicit empty personas map clears them")
         XCTAssertEqual(body["config"], .object([:]))

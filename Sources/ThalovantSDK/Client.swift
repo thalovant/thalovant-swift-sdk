@@ -268,7 +268,8 @@ public final class ThalovantClient: @unchecked Sendable {
             sessionId: final.responseSessionId ?? sessionId,
             requestId: requestId,
             events: final.events,
-            failureEvent: effectiveFailure
+            failureEvent: effectiveFailure,
+            droppedMedia: final.droppedMedia
         )
     }
 
@@ -345,11 +346,13 @@ final class AskState: @unchecked Sendable {
         let responseSessionId: String?
         let firstSpeechAt: TimeInterval?
         let emptyStartedAt: TimeInterval?
+        let droppedMedia: Int
     }
 
     private let lock = NSLock()
     private var fragments: [String] = []
     private var events: [ThalovantEvent] = []
+    private var mediaBudget = ReplyMediaBudget()
     private var failureEvent: ThalovantEvent?
     // An intent miss (ovos.intent.unmatched / complete_intent_failure) is a SOFT
     // failure: it ends phase 1 promptly but still allows the empty-reply grace
@@ -369,7 +372,7 @@ final class AskState: @unchecked Sendable {
     func snapshot() -> Snapshot {
         lock.lock()
         defer { lock.unlock() }
-        return Snapshot(fragments: fragments, events: events, failureEvent: failureEvent, softFailureEvent: softFailureEvent, handled: handled, operationFailure: operationFailure, responseSessionId: responseSessionId, firstSpeechAt: firstSpeechAt, emptyStartedAt: emptyStartedAt)
+        return Snapshot(fragments: fragments, events: events, failureEvent: failureEvent, softFailureEvent: softFailureEvent, handled: handled, operationFailure: operationFailure, responseSessionId: responseSessionId, firstSpeechAt: firstSpeechAt, emptyStartedAt: emptyStartedAt, droppedMedia: mediaBudget.dropped)
     }
 
     /// Correlation rule (mirrors the Node SDK): only events carrying the
@@ -379,7 +382,10 @@ final class AskState: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         guard failureEvent == nil && operationFailure == nil else { return }
+        guard mediaBudget.accept(event) else { return }
         switch event.name {
+        case ThalovantEvents.audioQueue:
+            events.append(event)
         case ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak:
             events.append(event)
             let normalized = normalizeFragment(event.text)

@@ -329,17 +329,28 @@ public struct HubIntent: Codable, Equatable, Sendable {
     /// A few sentences worth showing: whole ones before ones with a slot,
     /// shorter ones first. `lang` defaults to the first language listed;
     /// a `limit` of zero or less returns them all in their original order.
-    public func examples(lang: String? = nil, limit: Int = 2) -> [String] {
-        let pool: [String]
+    public func examples(lang: String? = nil, limit: Int = 2, speakable render: Bool = false, slots: [String: String] = [:]) -> [String] {
+        var pool: [String]
         if let lang {
             pool = phrasesFor(lang)
         } else {
             pool = languages.first.map { phrasesFor($0) } ?? []
         }
+        var ranks: [String: Bool] = [:]
+        if render {
+            var rendered: [String] = []
+            for pattern in pool {
+                let sentence = speakable(pattern, slots: slots)
+                guard !sentence.isEmpty else { continue }
+                if ranks[sentence] == nil { rendered.append(sentence) }
+                ranks[sentence] = (ranks[sentence] ?? true) && pattern.contains("{")
+            }
+            pool = rendered
+        }
         guard limit > 0 else { return pool }
         let ranked = pool.enumerated().sorted { a, b in
-            let aSlot = a.element.contains("{")
-            let bSlot = b.element.contains("{")
+            let aSlot = (ranks[a.element] ?? a.element.contains("{"))
+            let bSlot = (ranks[b.element] ?? b.element.contains("{"))
             if aSlot != bSlot { return !aSlot }
             let aLength = a.element.unicodeScalars.count
             let bLength = b.element.unicodeScalars.count
