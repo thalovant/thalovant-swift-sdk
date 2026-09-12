@@ -61,4 +61,11 @@ final class ListingTests: XCTestCase {
         XCTAssertFalse(try rules.asks("été",lang:"xq"))
         XCTAssertTrue(try rules.asks("pétéx",lang:"xq"))
     }
+
+    func testManifestLanguageSpellingPreservesOrder() {
+        let intent = HubIntent(skillId:"s",name:"n",engine:"padatious",phrases:["en_us":["English"],"fr_fr":["Français"]],languages:["fr-FR","en-US"])
+        XCTAssertEqual(intent.examples(limit:1),["Français"])
+        let exact = HubIntent(skillId:"s",name:"n",engine:"padatious",phrases:["fr-FR":["Exact"],"fr_fr":["Other"]],languages:["fr-FR"])
+        XCTAssertEqual(exact.examples(limit:1),["Exact"])
+    }
 }

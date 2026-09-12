@@ -706,8 +706,8 @@ configuration/personas or stored snapshots. This prevents silent rounding of
 JSON integers outside native `Int` storage. Use string identifiers for larger
 integers.
 
-The SDK code and CLDR matching tables are MIT-licensed; bundled
-`thalovant-languages` data is Apache-2.0-licensed. Both notices ship with the SDK.
+The SDK code, CLDR matching tables and bundled `thalovant-languages` data
+retain their upstream MIT license notices. Both data notices ship with the SDK.
 
 ## Locale-aware intent listings
 

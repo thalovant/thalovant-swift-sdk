@@ -313,8 +313,13 @@ public struct HubIntent: Codable, Equatable, Sendable {
     }
 
     private var listingLanguages: [String] {
-        var result = languages.filter { phrases[$0] != nil }
-        for key in phrases.keys.sorted() where !result.contains(key) { result.append(key) }
+        var result: [String] = []
+        let keys = phrases.keys.sorted()
+        for tag in languages {
+            let key = phrases[tag] != nil ? tag : keys.first { sameLanguage($0, tag) }
+            if let key, !result.contains(key) { result.append(key) }
+        }
+        for key in keys where !result.contains(key) { result.append(key) }
         return result
     }
     /// Sentences for the closest OVOS-compatible registered locale.
