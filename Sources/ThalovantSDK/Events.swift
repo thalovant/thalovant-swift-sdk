@@ -2,6 +2,7 @@ import Foundation
 
 public enum ThalovantEvents {
     public static let recognizerLoopUtterance = "recognizer_loop:utterance"
+    public static let audioQueue = "mycroft.audio.queue"
     public static let speak = "speak"
     public static let ovosUtteranceSpeak = "ovos.utterance.speak"
     public static let utteranceHandled = "ovos.utterance.handled"
@@ -91,6 +92,23 @@ public struct ThalovantEvent: Equatable, Sendable {
         requestIdFromContext(context) ?? requestIdFromMapping(data)
     }
 
+    public var lang: String? { [data["lang"]?.stringValue, context["lang"]?.stringValue, context["session"]?["lang"]?.stringValue].compactMap { $0 }.first { !$0.isEmpty } }
+    public var isAudio: Bool { name == ThalovantEvents.audioQueue }
+    public var hasAudio: Bool { isAudio && !(data["binary_data"]?.stringValue ?? "").isEmpty }
+    /// Decode bounded embedded hex only. Never fetch a path or URL from a skill.
+    public func audioBytes(maxBytes: Int = maxAudioClipBytes) throws -> Data {
+        guard isAudio, maxBytes >= 0, let encoded = data["binary_data"]?.stringValue, !encoded.isEmpty,
+            encoded.utf8.count / 2 + encoded.utf8.count % 2 <= maxBytes else { throw ThalovantRuntimeError("Missing or oversized embedded audio.") }
+        var result = Data(), high: UInt8?
+        for byte in encoded.utf8 {
+            if [9, 10, 11, 12, 13, 32].contains(byte) { guard high == nil else { throw ThalovantRuntimeError("Invalid embedded audio hex.") }; continue }
+            let value: UInt8
+            switch byte { case 48...57: value = byte - 48; case 65...70: value = byte - 55; case 97...102: value = byte - 87; default: throw ThalovantRuntimeError("Invalid embedded audio hex.") }
+            if let first = high { result.append(first * 16 + value); high = nil } else { high = value }
+        }
+        guard high == nil else { throw ThalovantRuntimeError("Invalid embedded audio hex.") }; return result
+    }
+
     public var isFailure: Bool {
         ThalovantEvents.failureEvents.contains(name)
     }
@@ -119,6 +137,10 @@ public struct ThalovantReply: Sendable {
     public let requestId: String?
     public let events: [ThalovantEvent]
     public let failureEvent: ThalovantEvent?
+    public internal(set) var droppedMedia: Int = 0
+    public var lang: String? { events.compactMap { $0.lang }.first { !$0.isEmpty } }
+    public var hasAudio: Bool { events.contains { $0.isAudio } }
+    public var mediaEvents: [ThalovantEvent] { events.filter { $0.isAudio || [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains($0.name) } }
 }
 
 public func newSessionId() -> String {

@@ -260,15 +260,24 @@ extension ThalovantControlPlane {
         try await requestObject("GET", "/v1/runtime-groups/\(encodePathComponent(runtimeGroupId))/config")
     }
 
-    /// `PATCH /v1/runtime-groups/{runtimeGroupId}/config`.
-    ///
-    /// The API merges `config` into the stored configuration rather than
-    /// replacing it, and marks the group pending so the runtime operator
-    /// reconciles the change. `personas` is sent, and replaced, only when
-    /// provided.
-    ///
-    /// Requires a paid plan and a token with the `hubs:write` scope.
-    public func updateRuntimeGroupConfig(
+    /// Deep merge using a revision precondition. Only 412 retries, at most three attempts.
+    /// Older APIs fail before a write. Requires hubs:read and paid hubs:write.
+    public func updateRuntimeGroupConfig(_ runtimeGroupId: String, config: JSONObject, personas: JSONObject? = nil) async throws -> JSONObject {
+        for attempt in 0..<3 {
+            let snapshot = try await getRuntimeGroupConfig(runtimeGroupId)
+            guard let revision = snapshot["revision"]?.stringValue, revision.utf8.count == 64,
+                revision.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }),
+                let stored = snapshot["config"]?.objectValue else { throw ThalovantApiError(message: "Safe configuration merge requires a valid config and revision from the API.") }
+            var body: JSONObject = ["config": .object(mergeRuntimeConfig(stored, config)), "expected_revision": .string(revision)]
+            if let personas { body["personas"] = .object(personas) }
+            do { return try await requestObject("PUT", "/v1/runtime-groups/\(encodePathComponent(runtimeGroupId))/config", body: body) }
+            catch let error as ThalovantApiError where error.statusCode == 412 && attempt < 2 { }
+        }
+        preconditionFailure("Last attempt always returns")
+    }
+
+    /// Explicit unconditional configuration replacement via PATCH.
+    public func replaceRuntimeGroupConfig(
         _ runtimeGroupId: String,
         config: JSONObject,
         personas: JSONObject? = nil
@@ -471,4 +480,13 @@ func runtimeGroupPayload(_ payload: JSONObject) -> JSONObject {
         ("ownerId", "owner_id"),
         ("cloneFromDefault", "clone_from_default"),
     ])
+}
+
+private func mergeRuntimeConfig(_ stored: JSONObject, _ delta: JSONObject) -> JSONObject {
+    var result = stored
+    for (key, value) in delta {
+        if let old = stored[key]?.objectValue, let next = value.objectValue { result[key] = .object(mergeRuntimeConfig(old, next)) }
+        else { result[key] = value }
+    }
+    return result
 }

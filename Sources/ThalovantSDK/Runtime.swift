@@ -219,6 +219,7 @@ private final class RuntimeQueryState: @unchecked Sendable {
     let progressGate = AsyncGate()
     let gate = AsyncGate(); private let lock = NSLock()
     private var events: [ThalovantEvent] = [], fragments: [String] = []
+    private var mediaBudget = ReplyMediaBudget()
     private var failure: ThalovantEvent?, complete = false
     private var responseSessionId: String?
     func ready() { progressGate.open() }
@@ -230,7 +231,7 @@ private final class RuntimeQueryState: @unchecked Sendable {
     }
     func accept(_ event: ThalovantEvent) {
         lock.locked {
-            guard !complete else { return }; events.append(event)
+            guard !complete && mediaBudget.accept(event) else { return }; events.append(event)
             if responseSessionId == nil, let session = event.sessionId, !session.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { responseSessionId = session }
             if event.name == "hive.query.complete" { complete = true; gate.open(); progressGate.open() }
             else if [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains(event.name) {
@@ -249,7 +250,7 @@ private final class RuntimeQueryState: @unchecked Sendable {
             }
             let terminalFailure = failure.flatMap { [ThalovantEvents.policyDenied, ThalovantEvents.queryTimeout].contains($0.name) ? $0 : nil }
             return ThalovantReply(text: fragments.joined(separator: " "), displayText: stripSsml(fragments.joined(separator: " ")), utterances: fragments, handled: terminalFailure == nil, ok: terminalFailure == nil,
-                sessionId: responseSessionId ?? sessionId, requestId: requestId, events: events, failureEvent: terminalFailure)
+                sessionId: responseSessionId ?? sessionId, requestId: requestId, events: events, failureEvent: terminalFailure, droppedMedia: mediaBudget.dropped)
         }
     }
 }
