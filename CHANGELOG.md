@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0 — 2026-09-12
+
+- Add hub-addressed skill listing, history, install, update and removal.
+- Add optional bounded polling and explicit operation resumption without repeating accepted writes.
+- Document shared-runtime scope, authorization and cancellation behavior.
+
 ## 0.3.2
 
 - Preserve a description timeout when earlier replies contain only empty or refused definitions; fully answered empty inventories still succeed.

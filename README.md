@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.3.2"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.4.0"),
 ]
 ```
 
@@ -630,3 +630,24 @@ does not echo the request id.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+
+### Shared-runtime skill management
+
+Hub-addressed skill methods select the runtime group attached to the hub UUID.
+Every hub sharing that group sees the same skill changes and history. The API
+requires a restricted token to cover all served hubs. Reads need `hubs:inspect`
+(`hubs:read` implies it); writes need `hubs:write`, an eligible paid plan and ownership.
+
+The history response contains newest-first `event` and `operation` entries,
+including nullable actor/version fields. Its limit is 1–200 (50 where omitted).
+An accepted mutation is not proof the skill is ready. Optional waiting polls the
+operation, with a 120-second default timeout and two-second interval. Polling
+never repeats an accepted mutation and starts no new read after its deadline;
+an already-running HTTP request retains its normal request timeout.
+
+Methods: `listHubSkills / listHubSkillHistory / installHubSkill / updateHubSkill / removeHubSkill / waitForHubSkillOperation`. Responses preserve API JSON fields. Use
+`HubSkillWaitOptions` to opt into waiting. For cancellation-sensitive work, submit
+without waiting, retain the returned `operation_id`, then call the wait helper
+separately. Cancelling waiting does not undo the server operation. After a polling
+failure, inspect/resume that operation instead of submitting the write again.
