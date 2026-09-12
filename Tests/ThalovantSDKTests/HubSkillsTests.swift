@@ -38,6 +38,18 @@ final class HubSkillsTests: XCTestCase {
             XCTAssertEqual(StubURLProtocol.requests.count, 2)
         }
     }
+    func testRemovalResumesAfterReadFailureWithoutRepeatingWrite() async throws {
+        StubURLProtocol.enqueue(.init(status: 202, body: #"{"operation_id":"op-remove","state":"removing","skill":"s"}"#))
+        StubURLProtocol.enqueue(.init(status: 503, body: #"{"detail":"private-data"}"#))
+        StubURLProtocol.enqueue(.init(body: #"{"status":"ready"}"#))
+        let accepted = try await api.removeHubSkill("h", skill: "s")
+        do { _ = try await api.waitForHubSkillOperation(accepted); XCTFail("expected read failure") }
+        catch { XCTAssertTrue(String(describing: error).contains("op-remove")) }
+        let result = try await api.waitForHubSkillOperation(accepted)
+        XCTAssertEqual(result["state"]?.stringValue, "removed")
+        XCTAssertEqual(accepted["state"]?.stringValue, "removing")
+        XCTAssertEqual(StubURLProtocol.requests.map { $0.method }, ["DELETE", "GET", "GET"])
+    }
     func testInvalidLimitsAndDurationsDoNotSend() async {
         for limit in [0, 201] {
             do { _ = try await api.listHubSkillHistory("h", limit: limit); XCTFail("expected rejection") } catch {}

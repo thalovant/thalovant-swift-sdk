@@ -44,7 +44,7 @@ extension ThalovantControlPlane {
         let accepted = try await requestObject(method, path, body: body)
         return options.wait ? try await waitForHubSkillOperation(accepted, options: options) : accepted
     }
-    /// Resume without repeating a write. Retain accepted before waiting when cancellation is possible.
+    /// Resume without repeating a write. Retain the complete accepted response, including state, before waiting when cancellation is possible.
     public func waitForHubSkillOperation(_ accepted: JSONObject, options: HubSkillWaitOptions = HubSkillWaitOptions()) async throws -> JSONObject {
         try options.validate()
         guard let id = accepted["operation_id"]?.stringValue, !id.isEmpty else { throw ThalovantApiError(message: "Missing accepted operation_id.") }
@@ -57,7 +57,7 @@ extension ThalovantControlPlane {
             let operation: JSONObject
             do { operation = try await requestObject("GET", "/v1/operations/\(encodePathComponent(id))") }
             catch is CancellationError { throw CancellationError() }
-            catch { if Task.isCancelled { throw CancellationError() }; throw ThalovantApiError(message: "Could not read accepted operation \(id); resume using its ID.") }
+            catch { if Task.isCancelled { throw CancellationError() }; throw ThalovantApiError(message: "Could not read accepted operation \(id); inspect the operation by ID, or resume with the complete accepted response.") }
             let status = operation["status"]?.stringValue
             if status == "ready" { var result = accepted; result["state"] = .string(converged); result["operation"] = .object(operation); return result }
             if status == "failed" || status == "timed_out" { throw ThalovantApiError(message: "Accepted operation \(id) failed; inspect getOperation for details.") }
