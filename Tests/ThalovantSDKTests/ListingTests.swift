@@ -68,4 +68,14 @@ final class ListingTests: XCTestCase {
         let exact = HubIntent(skillId:"s",name:"n",engine:"padatious",phrases:["fr-FR":["Exact"],"fr_fr":["Other"]],languages:["fr-FR"])
         XCTAssertEqual(exact.examples(limit:1),["Exact"])
     }
+
+    func testMultiplePatternsShareOneEvaluationDeadline() throws {
+        let patterns = Array(repeating: JSONValue.string("^a+$"), count: 1024)
+        let rules = try ListingRules(data:["languages":.object(["xq":.object(["question_patterns":.array(patterns)])])])
+        let text = String(repeating:"a",count:100_000)+"x"
+        let start = DispatchTime.now().uptimeNanoseconds
+        XCTAssertThrowsError(try rules.asks(text,lang:"xq"))
+        XCTAssertLessThan(Double(DispatchTime.now().uptimeNanoseconds-start)/1_000_000_000,1.5)
+        XCTAssertEqual(rules.asSentence(text,lang:"xq"),"A"+text.dropFirst())
+    }
 }

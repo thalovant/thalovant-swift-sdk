@@ -728,7 +728,7 @@ prefixes and slot patterns. Rendered limits count unique nonempty results.
 Existing `examples` signatures remain available and raw patterns remain the default.
 
 `ListingRules(data:)` accepts a complete custom JSON snapshot. Invalid regexes
-fail construction; question evaluation has a bounded execution window. `asks`
+fail construction; all regex matches within one `asks` or `asSentence` call share a 100 ms deadline. `asks`
 throws on exhaustion and sentence rendering returns a bare line. Unknown locales
 and explicit nil data do not invent punctuation. Bundled data is packaged as a
 SwiftPM resource; source references and both licenses ship with it.

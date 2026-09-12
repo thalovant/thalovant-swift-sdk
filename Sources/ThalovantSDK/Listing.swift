@@ -54,8 +54,8 @@ public final class ListingRules: @unchecked Sendable {
         guard let last = words(text.trimmingCharacters(in:CharacterSet(charactersIn:sentenceEnds+" "))).last else { return false }
         return wordSet(lang,"trailing_words").contains(last.lowercased())
     }
-    private func matches(_ pattern: NSRegularExpression, _ text: String, firstOnly: Bool) throws -> [NSTextCheckingResult] {
-        let deadline = DispatchTime.now().uptimeNanoseconds + 100_000_000
+    private func matches(_ pattern: NSRegularExpression, _ text: String, firstOnly: Bool, deadline: UInt64) throws -> [NSTextCheckingResult] {
+        guard DispatchTime.now().uptimeNanoseconds < deadline else { throw ListingRuleError.regexBudgetExceeded }
         var found: [NSTextCheckingResult] = []; var interrupted = false
         pattern.enumerateMatches(in:text,options:[.reportProgress,.reportCompletion],range:NSRange(text.startIndex...,in:text)) { match, flags, stop in
             if DispatchTime.now().uptimeNanoseconds >= deadline || flags.contains(.internalError) { interrupted = true; stop.pointee = true; return }
@@ -65,13 +65,17 @@ public final class ListingRules: @unchecked Sendable {
     }
     /// Throws when a custom rule exceeds its bounded evaluation window.
     public func asks(_ text: String, lang: String? = nil) throws -> Bool {
-        if let tag = tag(lang) { for pattern in patterns[tag] ?? [] { if try !matches(pattern,text,firstOnly:true).isEmpty { return true } } }
+        try asks(text, lang: lang, deadline: DispatchTime.now().uptimeNanoseconds + 100_000_000)
+    }
+    private func asks(_ text: String, lang: String?, deadline: UInt64) throws -> Bool {
+        if let tag = tag(lang) { for pattern in patterns[tag] ?? [] { if try !matches(pattern,text,firstOnly:true,deadline:deadline).isEmpty { return true } } }
         let words = words(text).map { $0.trimmingCharacters(in:CharacterSet(charactersIn:",;:!?.’'\"()")).lowercased() }.filter { !$0.isEmpty }
         let openers = wordSet(lang,"question_openers"); let anywhere = wordSet(lang,"question_words_anywhere")
         return words.first.map { openers.contains($0) } == true || words.contains { anywhere.contains($0) }
     }
     /// Unknown, dangling or failed rules leave a bare line instead of guessing marks.
     public func asSentence(_ raw: String, lang: String? = nil) -> String {
+        let deadline = DispatchTime.now().uptimeNanoseconds + 100_000_000
         var text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
         guard let first = text.unicodeScalars.first else { return text }
         let index = text.unicodeScalars.index(after:text.unicodeScalars.startIndex)
@@ -82,13 +86,13 @@ public final class ListingRules: @unchecked Sendable {
         do {
             for (pattern,replacement) in written[tag] ?? [] {
                 var next = ""; var previous = text.startIndex
-                for match in try matches(pattern,text,firstOnly:false) {
+                for match in try matches(pattern,text,firstOnly:false,deadline:deadline) {
                     guard let range = Range(match.range,in:text) else { return text }
                     next += text[previous..<range.lowerBound]; next += replacement; previous = range.upperBound
                 }
                 next += text[previous...]; text = next
             }
-            text += try asks(text,lang:lang) ? "?" : "."
+            text += try asks(text,lang:lang,deadline:deadline) ? "?" : "."
         } catch { return text }
         return text
     }
