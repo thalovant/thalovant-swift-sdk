@@ -53,7 +53,7 @@ final class PythonParityTests: XCTestCase {
     func testSpeakableExamplesPreserveSourcePriority() {
         XCTAssertEqual(speakable("did i (already |)ask (about|for|to|) {thing}"),"did i ask about thing")
         let intent = HubIntent(skillId: "x",name: "x",engine: "padatious",phrases: ["en-us":["{x}","a complete sentence","[please]","(x|y)","x"]])
-        XCTAssertEqual(intent.examples(lang: "en-us",limit: 2,speakable: true),["x","a complete sentence"])
+        XCTAssertEqual(intent.examples(lang: "en-us",limit: 2,speakable: true),["a complete sentence","x"])
     }
     func testEmbeddedAudioIsStrictBoundedAndCollected() throws {
         XCTAssertEqual(try ThalovantEvent(name: ThalovantEvents.audioQueue,data: ["binary_data":.string(" \t")]).audioBytes(),Data())

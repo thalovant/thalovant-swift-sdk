@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.5.1"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.6.0"),
 ]
 ```
 
@@ -705,3 +705,30 @@ Guarded merges in 0.5.1 preserve native `Int` values, but reject non-finite
 configuration/personas or stored snapshots. This prevents silent rounding of
 JSON integers outside native `Int` storage. Use string identifiers for larger
 integers.
+
+The SDK code, CLDR matching tables and bundled `thalovant-languages` data
+retain their upstream MIT license notices. Both data notices ship with the SDK.
+
+## Locale-aware intent listings
+
+Version 0.6.0 bundles the same language rules as Python 0.6.5 with
+`thalovant-languages` 0.1.1. Locale selection follows OVOS language distances,
+including regional variants and stable ties. No network request is required.
+
+```swift
+let sentences = intent.examplesWithListing(lang: "fr-CA", sentence: true)
+let text = asSentence("what time is it", lang: "en-US")
+let example = speakableWithLanguage("play {song}", lang: "en-US")
+let bare = try ListingRules(data: nil)
+```
+
+Sentence rendering implies speakable rendering. Locale slot examples are defaults;
+explicit `slots` values override them. Original complete phrases rank before
+prefixes and slot patterns. Rendered limits count unique nonempty results.
+Existing `examples` signatures remain available and raw patterns remain the default.
+
+`ListingRules(data:)` accepts a complete custom JSON snapshot. Invalid regexes
+fail construction; all regex matches within one `asks` or `asSentence` call share a 100 ms deadline. `asks`
+throws on exhaustion and sentence rendering returns a bare line. Unknown locales
+and explicit nil data do not invent punctuation. Bundled data is packaged as a
+SwiftPM resource; source references and both licenses ship with it.

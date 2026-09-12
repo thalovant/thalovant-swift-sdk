@@ -12,13 +12,13 @@ let package = Package(
     ],
     targets: [
         .target(name: "CThalovantNoise", path: "Sources/CThalovantNoise", exclude: ["PROVENANCE.md", "source-hashes.json"], publicHeadersPath: "include"),
-        .target(name: "ThalovantSDK", dependencies: ["CThalovantNoise"], path: "Sources/ThalovantSDK"),
+        .target(name: "ThalovantSDK", dependencies: ["CThalovantNoise"], path: "Sources/ThalovantSDK", resources: [.copy("ListingData")]),
         .executableTarget(name: "ThalovantNoiseStoreFixture", dependencies: ["ThalovantSDK", "CThalovantNoise"], path: "Tests/NoiseStoreFixture"),
         .testTarget(
             name: "ThalovantSDKTests",
             dependencies: ["ThalovantSDK"],
             path: "Tests/ThalovantSDKTests",
-            resources: [.copy("Fixtures/noise-node.json")]
+            resources: [.copy("Fixtures/noise-node.json"), .copy("Fixtures/listing-vectors.json"), .copy("Fixtures/language-matching-vectors.json")]
         ),
     ]
 )

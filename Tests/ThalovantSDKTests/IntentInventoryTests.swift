@@ -1109,8 +1109,8 @@ final class IntentModelTests: XCTestCase {
         XCTAssertEqual(intent.phrasesFor("EN_US"), ["tell me a long joke", "joke", "a joke about {topic}"])
         XCTAssertEqual(intent.phrasesFor("fr-fr"), [])
         XCTAssertEqual(intent.phrasesFor("de-de"), [])
-        XCTAssertEqual(intent.examples(lang: "en-us"), ["joke", "tell me a long joke"])
-        XCTAssertEqual(intent.examples(lang: "en-us", limit: 3), ["joke", "tell me a long joke", "a joke about {topic}"])
+        XCTAssertEqual(intent.examples(lang: "en-us"), ["tell me a long joke", "joke"])
+        XCTAssertEqual(intent.examples(lang: "en-us", limit: 3), ["tell me a long joke", "joke", "a joke about {topic}"])
         XCTAssertEqual(intent.examples(), [], "defaults to the first language listed, which has no sentences")
         XCTAssertEqual(HubIntent(skillId: "s", name: "n", engine: "adapt", phrases: ["b": ["x"], "a": ["y"]]).languages, ["a", "b"])
     }
