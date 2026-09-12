@@ -312,52 +312,30 @@ public struct HubIntent: Codable, Equatable, Sendable {
         self.languages = languages ?? phrases.keys.sorted()
     }
 
-    /// The sentences for one language, matched case-insensitively with `_`
-    /// and `-` folded (`fr-FR` finds `fr-fr`). Empty when the intent was not
-    /// listed for that language.
-    public func phrasesFor(_ lang: String) -> [String] {
-        var candidates = languages
-        for key in phrases.keys.sorted() where !candidates.contains(key) {
-            candidates.append(key)
-        }
-        for candidate in candidates where sameLanguage(candidate, lang) {
-            return phrases[candidate] ?? []
-        }
-        return []
+    private var listingLanguages: [String] {
+        var result = languages.filter { phrases[$0] != nil }
+        for key in phrases.keys.sorted() where !result.contains(key) { result.append(key) }
+        return result
     }
-
-    /// A few sentences worth showing: whole ones before ones with a slot,
-    /// shorter ones first. `lang` defaults to the first language listed;
-    /// a `limit` of zero or less returns them all in their original order.
-    public func examples(lang: String? = nil, limit: Int = 2, speakable render: Bool = false, slots: [String: String] = [:]) -> [String] {
-        var pool: [String]
-        if let lang {
-            pool = phrasesFor(lang)
-        } else {
-            pool = languages.first.map { phrasesFor($0) } ?? []
+    /// Sentences for the closest OVOS-compatible registered locale.
+    public func phrasesFor(_ lang: String) -> [String] {
+        closestLanguage(lang,available:listingLanguages).flatMap { phrases[$0] } ?? []
+    }
+    public func examples(lang: String? = nil,limit: Int = 2,speakable render: Bool = false,slots: [String:String] = [:]) -> [String] {
+        examplesWithListing(lang:lang,limit:limit,speakable:render,slots:slots)
+    }
+    public func examplesWithListing(lang: String? = nil,limit: Int = 2,speakable render: Bool = false,sentence: Bool = false,slots: [String:String] = [:],listing: ListingRules = .bundled) -> [String] {
+        let renderLang = lang.flatMap { $0.isEmpty ? nil : $0 } ?? listingLanguages.first
+        let pool = renderLang.map { phrasesFor($0) } ?? []
+        if !render && !sentence { return limit <= 0 ? pool : Array(listing.rank(pool,lang:renderLang).prefix(limit)) }
+        var result: [String] = []; var seen: Set<String> = []
+        for pattern in listing.rank(pool,lang:renderLang) {
+            var text = listing.speakable(pattern,slots:slots,lang:renderLang)
+            if sentence { text = listing.asSentence(text,lang:renderLang) }
+            if text.isEmpty || !seen.insert(text).inserted { continue }; result.append(text)
+            if limit > 0 && result.count >= limit { break }
         }
-        var ranks: [String: Bool] = [:]
-        if render {
-            var rendered: [String] = []
-            for pattern in pool {
-                let sentence = speakable(pattern, slots: slots)
-                guard !sentence.isEmpty else { continue }
-                if ranks[sentence] == nil { rendered.append(sentence) }
-                ranks[sentence] = (ranks[sentence] ?? true) && pattern.contains("{")
-            }
-            pool = rendered
-        }
-        guard limit > 0 else { return pool }
-        let ranked = pool.enumerated().sorted { a, b in
-            let aSlot = (ranks[a.element] ?? a.element.contains("{"))
-            let bSlot = (ranks[b.element] ?? b.element.contains("{"))
-            if aSlot != bSlot { return !aSlot }
-            let aLength = a.element.unicodeScalars.count
-            let bLength = b.element.unicodeScalars.count
-            if aLength != bLength { return aLength < bLength }
-            return a.offset < b.offset
-        }
-        return ranked.prefix(limit).map { $0.element }
+        return result
     }
 
     public func asJSON() -> JSONObject {

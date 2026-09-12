@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 — 2026-09-12
+
+- Add locale-aware sentence listings, canonical slot examples, fuller phrase ranking and OVOS-compatible regional language selection.
+- Preserve existing example signatures, selected locale and unique rendered limits.
+- Snapshot custom rules and bound Foundation regex evaluation; keep zero third-party dependencies.
+
 ## 0.5.1 — 2026-09-12
 
 - Reject non-finite or lossy floating-point values in guarded config/personas merges, including stored JSON integer overflow. Preserve native Int values exactly.
