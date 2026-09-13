@@ -3,6 +3,11 @@ import XCTest
 @testable import ThalovantSDK
 
 final class ListingTests: XCTestCase {
+    func testQuestionReference() throws {
+        for row in try fixture("question-vectors")["cases"]!.arrayValue!.compactMap(\.objectValue) {
+            XCTAssertEqual(try ListingRules.bundled.asks(row["text"]!.stringValue!,lang:row["lang"]?.stringValue),row["expected"]?.boolValue,"\(row)")
+        }
+    }
     private func data(_ text: String) throws -> JSONObject { try JSONDecoder().decode(JSONObject.self,from:Data(text.utf8)) }
     private func fixture(_ name: String) throws -> JSONObject {
         let url = try XCTUnwrap(Bundle.module.url(forResource:name,withExtension:"json"))

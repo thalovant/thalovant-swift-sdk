@@ -18,7 +18,15 @@ permissions:
   contents: read
 
 jobs:
+  sdk-parity:
+    uses: ./.github/workflows/sdk-parity.yml
+    permissions:
+      contents: read
+    with:
+      source_ref: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag || github.ref }}
+
   test:
+    needs: sdk-parity
     name: Test (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
