@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
-    "216fafa88e0606baf35976f53392bda9152217d3797cebce5432bc2707c49847"
+    "91ddccd7d6a9b01b5722a9d22cd23a8f42a6edabee3e91462f2b4433efe37723"
   ],
   "capabilities": {
     "runtime": {
@@ -21,7 +21,7 @@
       "status": "required",
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
       "implementation": {
-        "Sources/ThalovantSDK/ControlPlane.swift": "6dc8b6b428ef3c0d6544e35426207cace851a18b30138a6026c067faffd0104f",
+        "Sources/ThalovantSDK/ControlPlane.swift": "7d14c85e1cec926d38d19c80ca149e7d75578d04552ea523990d2bd1c611204f",
         "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192"
       },
       "tests": {
@@ -57,11 +57,11 @@
       "status": "required",
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
       "implementation": {
-        "Sources/ThalovantSDK/Inventory.swift": "589d337df54947bf752cc988213f996b2fdbc3652c3e5c954eb2757112256fa9"
+        "Sources/ThalovantSDK/Inventory.swift": "9420f08ccf993bc3c48230f20f7b32ac0f575402c2cf50286e21ac6af81b8d20"
       },
       "tests": {
-        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "d23e02acc5e0af849f8b42977ef64ff2385a9d1836614280c6dd3d4764fd1c17",
-        "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json": "78c7bf51a748dc9b9f66277dc63d83f9cd75a54a341ca630fb8bc55d0b30bcf5"
+        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685",
+        "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json": "4deb456540b8b08aa4b59f8366d4295318b743245e7936febbdb199eb2dcfae0"
       }
     },
     "session": {
@@ -71,7 +71,7 @@
         "Sources/ThalovantSDK/Session.swift": "169e724aec29e39060b5a2df3ca965679ba2eddcdcbff4b3b36a05d990d5ea21"
       },
       "tests": {
-        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "d23e02acc5e0af849f8b42977ef64ff2385a9d1836614280c6dd3d4764fd1c17"
+        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685"
       }
     },
     "cli": {

@@ -16,10 +16,33 @@ private final class SessionCounter: @unchecked Sendable {
 }
 
 final class SessionInventoryTests: XCTestCase {
+  func testCacheKeysHashFullNormalizedHostsAndOversizedRecordsAreMisses() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let identity = directory.appendingPathComponent("identity.json")
+    let first = String(repeating: "a", count: 40) + "one.example"
+    let second = String(repeating: "a", count: 40) + "two.example"
+    try JSONEncoder().encode(["default_master": first]).write(to: identity)
+    XCTAssertEqual(identityHost(identity), first)
+    let key = InventoryCache.key(mode: "hub", identity: identity)
+    try JSONEncoder().encode(["default_master": second]).write(to: identity)
+    XCTAssertNotEqual(InventoryCache.key(mode: "hub", identity: identity), key)
+    let cache = try InventoryCache(directory: directory)
+    cache.store(
+      "large",
+      inventory: Inventory(
+        hubId: "hub", hubName: "Kitchen", source: "hub", generatedAt: "now",
+        notes: [String(repeating: "x", count: 8 * 1024 * 1024)]))
+    XCTAssertGreaterThan(try Data(contentsOf: cache.path("large")).count, 8 * 1024 * 1024)
+    XCTAssertNil(cache.load("large"))
+  }
+
   func testSharedPythonReferenceSurvivesSortedJSON() throws {
     let file = try XCTUnwrap(
       Bundle.module.url(forResource: "inventory-vectors", withExtension: "json"))
     let data = try ThalovantJSON.decodeObject(Data(contentsOf: file))
+    XCTAssertEqual(InventoryCache.key(mode: "hub"), data["cache_key"]!.stringValue)
     let inventory = try Inventory.fromJSON(JSONEncoder().encode(data["inventory"]!))
     for row in data["examples"]!.arrayValue!.compactMap(\.objectValue) {
       XCTAssertEqual(

@@ -192,7 +192,8 @@ public func identityHost(_ identity: URL?) -> String? {
     let object = try? JSONDecoder().decode(JSONObject.self, from: data),
     let master = object["default_master"]?.stringValue
   else { return nil }
-  return URLComponents(string: master)?.host
+  let host = hubHostname(master)
+  return host.isEmpty ? nil : host
 }
 public struct InventoryCache: Sendable {
   public let directory: URL
@@ -217,7 +218,7 @@ public struct InventoryCache: Sendable {
           ? Character(scalar) : "-"
       }.prefix(40))
     return
-      "\(mode)-\(readable)-\(noiseHex(noiseHash(Data("\(mode)|\(identity?.path ?? "")".utf8))).prefix(8))"
+      "\(mode)-\(readable)-\(noiseHex(noiseHash(Data("\(mode)|\(identity?.path ?? "")|\(host)".utf8))).prefix(8))"
   }
   public func path(_ key: String) throws -> URL {
     guard !key.isEmpty, key.utf8.count <= 160,
@@ -228,13 +229,19 @@ public struct InventoryCache: Sendable {
     return directory.appendingPathComponent("intents-\(key).json")
   }
   public func load(_ key: String) -> Inventory? {
-    guard let file = try? path(key),
-      let info = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
-      let modified = info.contentModificationDate, let size = info.fileSize,
-      size <= 8 * 1024 * 1024, Date().timeIntervalSince(modified) <= ttl,
-      let raw = try? Data(contentsOf: file)
-    else { return nil }
-    return try? Inventory.fromJSON(raw)
+    do {
+      let file = try path(key)
+      let handle = try FileHandle(forReadingFrom: file)
+      defer { try? handle.close() }
+      let limit = 8 * 1024 * 1024
+      guard try handle.seekToEnd() <= UInt64(limit) else { return nil }
+      try handle.seek(toOffset: 0)
+      let info = try file.resourceValues(forKeys: [.contentModificationDateKey])
+      guard let modified = info.contentModificationDate, Date().timeIntervalSince(modified) <= ttl,
+        let raw = try handle.read(upToCount: limit + 1), raw.count <= limit
+      else { return nil }
+      return try Inventory.fromJSON(raw)
+    } catch { return nil }
   }
   public func store(_ key: String, inventory: Inventory) {
     guard let target = try? path(key), let raw = try? inventory.asJSON() else { return }

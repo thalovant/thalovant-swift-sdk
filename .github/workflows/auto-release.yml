@@ -23,10 +23,15 @@ jobs:
     with:
       source_ref: ${{ github.sha }}
 
-  release:
+  plan:
     needs: sdk-parity
-    name: Release unpublished version
+    name: Plan release version
     runs-on: ubuntu-latest
+    outputs:
+      release_needed: ${{ steps.plan.outputs.release_needed }}
+      release_sha: ${{ steps.plan.outputs.release_sha }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -114,7 +119,7 @@ jobs:
                       handle.write(f"{key}={value}\n")
 
           changed = changed_since_latest_tag()
-          if changed[0] != "<initial-release>" and not any(is_relevant(path) for path in changed):
+          if "<initial-release>" not in changed and not any(is_relevant(path) for path in changed):
               version = current_version()
               write_output({
                   "release_needed": "false",
@@ -130,9 +135,7 @@ jobs:
               next_version = bump_patch(version)
               write_version_file(version, next_version)
               user_agent_paths = [
-                  "Sources/ThalovantSDK/ControlPlane.swift",
-                  "Tests/ThalovantSDKTests/RequestBuildingTests.swift",
-                  "Tests/ThalovantSDKTests/WireProtocolTests.swift",
+                  "Sources/ThalovantSDK/Version.swift",
               ]
               for path in user_agent_paths:
                   replace_required(path, f"ThalovantSwiftSDK/{version}", f"ThalovantSwiftSDK/{next_version}")
@@ -153,23 +156,44 @@ jobs:
           })
           PY
 
+  planned-parity:
+    needs: plan
+    if: needs.plan.outputs.release_needed == 'true'
+    uses: ./.github/workflows/sdk-parity.yml
+    permissions:
+      contents: read
+    with:
+      source_ref: ${{ needs.plan.outputs.release_sha }}
+
+  release:
+    needs: [plan, planned-parity]
+    if: needs.plan.outputs.release_needed == 'true'
+    name: Release unpublished version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.plan.outputs.release_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+
       - name: Run tests (Linux, swift:5.10)
-        if: steps.plan.outputs.release_needed == 'true'
+        if: needs.plan.outputs.release_needed == 'true'
         run: |
           docker run --rm -v "$GITHUB_WORKSPACE:/workspace" -w /workspace swift:5.10 \
             bash -c "swift --version && swift build && swift test"
 
       - name: Create GitHub release
-        if: steps.plan.outputs.release_needed == 'true'
+        if: needs.plan.outputs.release_needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.plan.outputs.tag }}
-          RELEASE_SHA: ${{ steps.plan.outputs.release_sha }}
+          TAG: ${{ needs.plan.outputs.tag }}
+          RELEASE_SHA: ${{ needs.plan.outputs.release_sha }}
         run: gh release create "$TAG" --target "$RELEASE_SHA" --title "$TAG" --notes "Release $TAG"
 
       - name: Dispatch release validation
-        if: steps.plan.outputs.release_needed == 'true'
+        if: needs.plan.outputs.release_needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.plan.outputs.tag }}
+          TAG: ${{ needs.plan.outputs.tag }}
         run: gh workflow run release.yml --ref main -f release_tag="$TAG"
