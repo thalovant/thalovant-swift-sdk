@@ -4,7 +4,6 @@ import FoundationNetworking
 #endif
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.6.1"
 
 /// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {

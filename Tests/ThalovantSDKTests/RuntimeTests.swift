@@ -5,7 +5,7 @@ import XCTest
 import FoundationNetworking
 #endif
 
-private final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
+final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     private let lock = NSLock()
     private var online = false
     private var buses: [UUID: (JSONObject) -> Void] = [:]

@@ -18,7 +18,7 @@ let package = Package(
             name: "ThalovantSDKTests",
             dependencies: ["ThalovantSDK"],
             path: "Tests/ThalovantSDKTests",
-            resources: [.copy("Fixtures/noise-node.json"), .copy("Fixtures/listing-vectors.json"), .copy("Fixtures/language-matching-vectors.json")]
+            resources: [.copy("Fixtures/noise-node.json"), .copy("Fixtures/question-vectors.json"), .copy("Fixtures/inventory-vectors.json"), .copy("Fixtures/listing-vectors.json"), .copy("Fixtures/language-matching-vectors.json")]
         ),
     ]
 )

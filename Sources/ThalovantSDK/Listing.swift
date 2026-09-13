@@ -68,7 +68,11 @@ public final class ListingRules: @unchecked Sendable {
         try asks(text, lang: lang, deadline: DispatchTime.now().uptimeNanoseconds + 100_000_000)
     }
     private func asks(_ text: String, lang: String?, deadline: UInt64) throws -> Bool {
-        if let tag = tag(lang) { for pattern in patterns[tag] ?? [] { if try !matches(pattern,text,firstOnly:true,deadline:deadline).isEmpty { return true } } }
+        if !available { return false }
+        let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let last = text.unicodeScalars.last, Set<UInt32>([0x3f, 0xbf, 0x37e, 0x55e, 0x61f, 0x1367, 0x1945, 0x2047, 0x2049, 0x2753, 0x2754, 0x2a7b, 0x2a7c, 0x2cfa, 0x2cfb, 0x2e2e, 0x2e54, 0xa60f, 0xa6f7, 0xfe16, 0xfe56, 0xff1f, 0x11143, 0x1e95f, 0x1fbc4, 0xe003f]).contains(last.value) { return true }
+        let rules = (lang == nil || lang == "") ? patterns.values.flatMap { $0 } : patterns[tag(lang) ?? ""] ?? []
+        for pattern in rules { if try !matches(pattern,text,firstOnly:true,deadline:deadline).isEmpty { return true } }
         let words = words(text).map { $0.trimmingCharacters(in:CharacterSet(charactersIn:",;:!?.’'\"()")).lowercased() }.filter { !$0.isEmpty }
         let openers = wordSet(lang,"question_openers"); let anywhere = wordSet(lang,"question_words_anywhere")
         return words.first.map { openers.contains($0) } == true || words.contains { anywhere.contains($0) }
