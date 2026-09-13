@@ -138,6 +138,19 @@ public struct ThalovantReply: Sendable {
     public let events: [ThalovantEvent]
     public let failureEvent: ThalovantEvent?
     public internal(set) var droppedMedia: Int = 0
+    public var pipelineIds: [String] { contextIdentifiers("pipeline_id") }
+    public var skillIds: [String] { contextIdentifiers("skill_id") }
+    /// Advisory claim status; successful unstamped legacy replies remain claimed.
+    public var claimed: Bool {
+        guard handled, ok, failureEvent == nil else { return false }
+        let stages = pipelineIds
+        return stages.isEmpty || stages.contains { !$0.contains("fallback") }
+    }
+    private func contextIdentifiers(_ key: String) -> [String] {
+        var seen = Set<String>()
+        return events.compactMap { $0.context[key]?.stringValue }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+    }
     public var lang: String? { events.compactMap { $0.lang }.first { !$0.isEmpty } }
     public var hasAudio: Bool { events.contains { $0.isAudio } }
     public var mediaEvents: [ThalovantEvent] { events.filter { $0.isAudio || [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains($0.name) } }
