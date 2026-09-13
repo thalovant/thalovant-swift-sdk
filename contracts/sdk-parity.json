@@ -2,12 +2,13 @@
   "schema_version": 1,
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
-    "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c"
+    "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
+    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd"
   ],
   "capabilities": {
     "runtime": {
       "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct.",
       "implementation": {
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
         "Sources/ThalovantSDK/Transport.swift": "2998639a6bc405fdb1678c02ac518f467a34a5f2c60e48f4503100e0e381bfe1"
