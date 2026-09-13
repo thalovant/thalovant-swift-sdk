@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.7.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.7.1"),
 ]
 ```
 
@@ -787,3 +787,12 @@ cools it down after a failure. In non-Python SDKs the factory must implement the
 address binding on its own transport, retain the public host for TLS/SNI, and
 finish failed-attempt cleanup before returning. Transport/platform restrictions
 still apply. This helper does not change global DNS or disable TLS validation.
+
+### Reply claims
+
+Replies expose advisory claim status and first-seen, unique pipeline and skill
+IDs. A failed or unhandled reply is not claimed; a successful fallback-only
+reply is not claimed. Successful replies without stage stamps retain legacy
+behavior and are claimed. Only nonempty string stamps are used; malformed
+metadata is ignored. Claim status does not authenticate a peer or suppress
+reply text. See the public SDK guide for native member names.

@@ -3,19 +3,24 @@
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
     "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
-    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd"
+    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd",
+    "4f17f2e999105c5629defd1c1ea71a197ecf725a9b559ff7b3bf9932638645bd",
+    "676e935e66330f8614d6c23cccddd48e1c4577c3af761775f18e1ea0128b8007"
   ],
   "capabilities": {
     "runtime": {
       "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "implementation": {
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
-        "Sources/ThalovantSDK/Transport.swift": "2998639a6bc405fdb1678c02ac518f467a34a5f2c60e48f4503100e0e381bfe1"
+        "Sources/ThalovantSDK/Transport.swift": "2998639a6bc405fdb1678c02ac518f467a34a5f2c60e48f4503100e0e381bfe1",
+        "Sources/ThalovantSDK/Events.swift": "07d514fd59aed3d20635133189e2978bb72b7f6088672367214556f8b9437925"
       },
       "tests": {
         "Tests/ThalovantSDKTests/RuntimeTests.swift": "935b050f7596286ffcc2e1c940905092808d404f8f2eb39d24575d873a48ea8b",
-        "Tests/ThalovantSDKTests/NoiseTests.swift": "7bb52c653a668d0a9d8bbbd3a9daefe37501de1c5cd2fbaf10e02ccd96f44725"
+        "Tests/ThalovantSDKTests/NoiseTests.swift": "7bb52c653a668d0a9d8bbbd3a9daefe37501de1c5cd2fbaf10e02ccd96f44725",
+        "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "9b8f5e731a4fdaab98eddbe4ed3f491094deb53bf3440fa043770f2a5b5fdfab",
+        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "bfcd4a649fa8ecb0cede0ccd495cdbdc1a9881760e4654cd776cf81bed558cb1"
       }
     },
     "control": {
