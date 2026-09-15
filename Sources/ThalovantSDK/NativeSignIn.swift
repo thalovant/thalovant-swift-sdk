@@ -122,6 +122,10 @@ public enum NativeSignIn {
         guard
             let components = URLComponents(string: url),
             components.scheme?.lowercased() == "https",
+            // Reject embedded credentials: https://evil.test@dash.thalovant.com/
+            // has a host that passes, and a URL somebody is about to be sent to
+            // should not read as one host and resolve to another.
+            components.user == nil, components.password == nil,
             let host = components.host?.lowercased()
         else { return false }
         return host == "thalovant.com" || host.hasSuffix(".thalovant.com")

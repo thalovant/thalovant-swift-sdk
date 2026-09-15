@@ -106,6 +106,8 @@ final class NativeSignInTests: XCTestCase {
         XCTAssertFalse(NativeSignIn.isThalovantURL("http://dash.thalovant.com"))
         // The one that matters: a lookalike host ending in the same letters.
         XCTAssertFalse(NativeSignIn.isThalovantURL("https://dash.thalovant.com.evil.test"))
+        // A host that passes, reached through credentials reading as another.
+        XCTAssertFalse(NativeSignIn.isThalovantURL("https://evil.test@dash.thalovant.com"))
         XCTAssertFalse(NativeSignIn.isThalovantURL("https://notthalovant.com"))
         XCTAssertFalse(NativeSignIn.isThalovantURL("nonsense"))
     }
