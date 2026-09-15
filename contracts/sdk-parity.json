@@ -9,7 +9,7 @@
         "Sources/ThalovantSDK/ControlPlane.swift": "7d14c85e1cec926d38d19c80ca149e7d75578d04552ea523990d2bd1c611204f",
         "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192",
         "Sources/ThalovantSDK/Hubs.swift": "6c29e442b6ab2021e00f3f3371e1aff6d93d70bd6b12ad72e095911c31acfe4c",
-        "Sources/ThalovantSDK/NativeSignIn.swift": "2f336bd7548d2eebc1a09c30e39c953ac2e125388685e7fa9b7d0432ae6ca9a7"
+        "Sources/ThalovantSDK/NativeSignIn.swift": "3e024fed6884b74b64c8ff98a2cc79bc4c02b938446a0b2a4adcbd1c5892248c"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The authorization-code grant with PKCE is covered here alongside the device grant: the challenge is checked to be S256 of the verifier, the verifier never to reach the browser, a redirect answering a different attempt or carrying error= to be refused, and the token exchange to refuse cleartext to a non-loopback host.",
       "status": "required",
@@ -90,7 +90,8 @@
     "8b71292c815a4b7219be7b1a7a5d01e9500faaa23e7c97c6a48683fc0411e1d0",
     "e1a17c218e70eb278e4a06161314076269c6d7f3fd24afc522711e1eedb2c2e8",
     "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b",
-    "c18d57ee45159a53773222e64586c9d36769ebc55475d1a283dc483296bb9107"
+    "c18d57ee45159a53773222e64586c9d36769ebc55475d1a283dc483296bb9107",
+    "d02b21380724ae606673f1b7e74b57f7962c2dea1b0640fe642856c2f2be97e2"
   ],
   "schema_version": 1
 }

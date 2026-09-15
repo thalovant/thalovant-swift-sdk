@@ -261,7 +261,6 @@ extension ThalovantControlPlane {
     ) async throws -> JSONObject {
         try NativeSignIn.requireSecureTokenExchange(apiURL)
         let payload: JSONObject = [
-            "grant_type": .string("authorization_code"),
             "code": .string(code),
             "code_verifier": .string(verifier),
             "client_id": .string(clientID),
