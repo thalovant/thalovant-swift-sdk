@@ -41,6 +41,9 @@ public enum NativeSignIn {
         public let state: String
         /// Never send this to the browser. Exchanged with the code, once.
         public let verifier: String
+        /// What this attempt asked the callback to arrive at. One that lands
+        /// anywhere else is not this attempt's, however good its state looks.
+        public let redirectURI: String
 
         /// The authorization code out of the redirect, or nil when it is not
         /// an answer to this attempt.
@@ -54,6 +57,10 @@ public enum NativeSignIn {
                 let components = URLComponents(string: redirect),
                 let items = components.queryItems
             else { return nil }
+            // The callback has to arrive where this attempt asked it to. State
+            // proves the answer belongs to this request; the address proves it
+            // came back to the app that made it.
+            guard NativeSignIn.sameTarget(components, redirectURI) else { return nil }
             var found: [String: String] = [:]
             for item in items where item.value != nil {
                 found[item.name] = item.value
@@ -85,6 +92,7 @@ public enum NativeSignIn {
         guard !redirectURI.trimmingCharacters(in: .whitespaces).isEmpty else {
             throw ThalovantApiError(message: "redirectURI is required to start a sign-in.")
         }
+        try requireSafeDashboard(dashboardURL)
         let verifier = newVerifier()
         let state = randomURLSafe(byteCount: 24)
         var components = URLComponents(string: dashboardURL.hasSuffix("/")
@@ -104,7 +112,51 @@ public enum NativeSignIn {
         guard let url = components?.string else {
             throw ThalovantApiError(message: "Could not build the sign-in address.")
         }
-        return Begun(authorizationURL: url, state: state, verifier: verifier)
+        return Begun(
+            authorizationURL: url, state: state, verifier: verifier,
+            redirectURI: redirectURI.trimmingCharacters(in: .whitespaces))
+    }
+
+    static func sameTarget(_ got: URLComponents, _ expected: String) -> Bool {
+        guard let want = URLComponents(string: expected) else { return false }
+        return got.scheme?.lowercased() == want.scheme?.lowercased()
+            && got.host?.lowercased() == want.host?.lowercased()
+            && trimmed(got.path) == trimmed(want.path)
+    }
+
+    private static func trimmed(_ path: String) -> String {
+        var value = path
+        while value.hasSuffix("/") { value.removeLast() }
+        return value
+    }
+
+    /// Refuse to hand the authorization request to a dashboard that cannot be
+    /// trusted with it.
+    ///
+    /// The request carries the challenge, the scopes and the state. A caller
+    /// may point this at their own dashboard -- a self-hosted control plane is
+    /// a real thing -- but not at a cleartext one, and not at one whose address
+    /// reads as a different host than it resolves to. Loopback is allowed: it
+    /// never leaves the machine.
+    static func requireSafeDashboard(_ url: String) throws {
+        guard let components = URLComponents(string: url) else {
+            throw ThalovantApiError(message: "dashboardURL is not a URL: \(url)")
+        }
+        guard components.user == nil, components.password == nil else {
+            throw ThalovantApiError(message: "dashboardURL must not carry credentials.")
+        }
+        if components.scheme?.lowercased() == "https" { return }
+        if components.scheme?.lowercased() == "http", isLoopback(components.host) { return }
+        throw ThalovantApiError(
+            message: "dashboardURL must be https (or a loopback address while developing), not \(url)")
+    }
+
+    /// Loopback, in both spellings a URL parser hands back for IPv6.
+    static func isLoopback(_ host: String?) -> Bool {
+        switch host?.lowercased() {
+        case "localhost", "127.0.0.1", "::1", "[::1]": return true
+        default: return false
+        }
     }
 
     /// A PKCE verifier: 64 random bytes, base64url, no padding.
@@ -149,10 +201,7 @@ public enum NativeSignIn {
             throw ThalovantApiError(message: "Thalovant API URL could not be read: \(apiURL)")
         }
         if components.scheme?.lowercased() == "https" { return }
-        switch components.host?.lowercased() {
-        case "localhost", "127.0.0.1", "::1": return
-        default: break
-        }
+        if isLoopback(components.host) { return }
         throw ThalovantApiError(
             message: "Refusing to send an authorization code and PKCE verifier in cleartext to "
                 + "\(components.host ?? apiURL). Use https, or a loopback address while developing.")

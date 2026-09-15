@@ -128,4 +128,25 @@ final class NativeSignInTests: XCTestCase {
             XCTAssertNoThrow(try NativeSignIn.requireSecureTokenExchange(allowed), allowed)
         }
     }
+
+    func testACallbackArrivingSomewhereElseIsRefused() throws {
+        // CodeRabbit: state proves the answer belongs to this request; it does
+        // not prove it came back to the app that made it.
+        let begun = try NativeSignIn.begin(clientID: "app", redirectURI: "app://auth")
+        XCTAssertEqual(begun.code(from: "app://auth?code=abc&state=\(begun.state)"), "abc")
+        XCTAssertNil(begun.code(from: "app://elsewhere?code=abc&state=\(begun.state)"))
+        XCTAssertNil(begun.code(from: "https://evil.test/auth?code=abc&state=\(begun.state)"))
+    }
+
+    func testADashboardThatIsNotSafeIsRefused() {
+        for bad in ["http://dash.example.test", "https://evil.test@dash.thalovant.com", "ftp://dash.thalovant.com"] {
+            XCTAssertThrowsError(
+                try NativeSignIn.begin(clientID: "app", redirectURI: "app://auth", dashboardURL: bad), bad)
+        }
+        // Self-hosted https is real, and loopback never leaves the machine.
+        for good in ["https://dash.example.test", "http://localhost:9000", "http://[::1]:9000"] {
+            XCTAssertNoThrow(
+                try NativeSignIn.begin(clientID: "app", redirectURI: "app://auth", dashboardURL: good), good)
+        }
+    }
 }
