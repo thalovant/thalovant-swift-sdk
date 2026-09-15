@@ -46,7 +46,8 @@ public enum NativeSignIn {
         /// an answer to this attempt.
         ///
         /// nil rather than a throw on a state mismatch, a missing code, or an
-        /// `error=` response: all three mean "do not continue", and an app that
+        /// `error=` response -- including one that also carries a code: all of
+        /// those mean "do not continue", and an app that
         /// treats them alike cannot accidentally treat one of them as success.
         public func code(from redirect: String) -> String? {
             guard
@@ -58,6 +59,10 @@ public enum NativeSignIn {
                 found[item.name] = item.value
             }
             guard found["state"] == state else { return nil }
+            // A refusal that also carries a code is still a refusal. Checking
+            // only for a missing code accepted that pair and would have
+            // started an exchange on a code the server had just declined.
+            guard found["error"] == nil else { return nil }
             guard let code = found["code"], !code.isEmpty else { return nil }
             return code
         }
@@ -120,6 +125,33 @@ public enum NativeSignIn {
             let host = components.host?.lowercased()
         else { return false }
         return host == "thalovant.com" || host.hasSuffix(".thalovant.com")
+    }
+
+    /// Refuse to put an authorization code and its PKCE verifier on the wire
+    /// in cleartext.
+    ///
+    /// The control-plane URL accepts an `http` scheme -- a self-hosted or
+    /// local deployment may legitimately be served that way -- and the request
+    /// path hands whatever it is given to URLSession without looking. Every
+    /// other call that would leak over http leaks a bearer token the caller
+    /// already holds; this one leaks the two secrets that are about to become
+    /// one, and a code is exchangeable by whoever sees it first.
+    ///
+    /// Loopback is allowed: a request that never leaves the machine has no
+    /// cleartext to observe, and that is how the control plane is run while
+    /// somebody is working on it.
+    static func requireSecureTokenExchange(_ apiURL: String) throws {
+        guard let components = URLComponents(string: apiURL) else {
+            throw ThalovantApiError(message: "Thalovant API URL could not be read: \(apiURL)")
+        }
+        if components.scheme?.lowercased() == "https" { return }
+        switch components.host?.lowercased() {
+        case "localhost", "127.0.0.1", "::1": return
+        default: break
+        }
+        throw ThalovantApiError(
+            message: "Refusing to send an authorization code and PKCE verifier in cleartext to "
+                + "\(components.host ?? apiURL). Use https, or a loopback address while developing.")
     }
 
     static func randomURLSafe(byteCount: Int) -> String {
@@ -223,6 +255,7 @@ extension ThalovantControlPlane {
         clientID: String,
         redirectURI: String
     ) async throws -> JSONObject {
+        try NativeSignIn.requireSecureTokenExchange(apiURL)
         let payload: JSONObject = [
             "grant_type": .string("authorization_code"),
             "code": .string(code),

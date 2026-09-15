@@ -109,4 +109,21 @@ final class NativeSignInTests: XCTestCase {
         XCTAssertFalse(NativeSignIn.isThalovantURL("https://notthalovant.com"))
         XCTAssertFalse(NativeSignIn.isThalovantURL("nonsense"))
     }
+
+    func testARefusalThatAlsoCarriesACodeIsStillARefusal() throws {
+        // CodeRabbit caught this: checking only for a missing code accepted
+        // error=access_denied&code=... and would have started an exchange on a
+        // code the authorization server had just declined to issue.
+        let begun = try NativeSignIn.begin(clientID: "app", redirectURI: "app://auth")
+        XCTAssertNil(begun.code(from: "app://auth?error=access_denied&code=abc&state=\(begun.state)"))
+        XCTAssertNil(begun.code(from: "app://auth?code=abc&error=server_error&state=\(begun.state)"))
+    }
+
+    func testTheTokenExchangeRefusesCleartextAndAllowsLoopback() {
+        XCTAssertThrowsError(try NativeSignIn.requireSecureTokenExchange("http://control.example.test"))
+        // Loopback has no cleartext to observe, and is how the API is run locally.
+        for allowed in ["http://localhost:8080", "http://127.0.0.1:8080", "https://api.thalovant.com"] {
+            XCTAssertNoThrow(try NativeSignIn.requireSecureTokenExchange(allowed), allowed)
+        }
+    }
 }
