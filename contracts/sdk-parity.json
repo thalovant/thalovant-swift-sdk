@@ -7,13 +7,17 @@
     "control": {
       "implementation": {
         "Sources/ThalovantSDK/ControlPlane.swift": "7d14c85e1cec926d38d19c80ca149e7d75578d04552ea523990d2bd1c611204f",
-        "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192"
+        "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192",
+        "Sources/ThalovantSDK/Hubs.swift": "6c29e442b6ab2021e00f3f3371e1aff6d93d70bd6b12ad72e095911c31acfe4c",
+        "Sources/ThalovantSDK/NativeSignIn.swift": "9416a71bbb888be7502ad9e4c1f30b197a4a81b001795b38e813721c4876a90b"
       },
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The authorization-code grant with PKCE is covered here alongside the device grant: the challenge is checked to be S256 of the verifier, the verifier never to reach the browser, a redirect answering a different attempt or carrying error= to be refused, and the token exchange to refuse cleartext to a non-loopback host.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ControlPlaneSecurityTests.swift": "956343b45d946283f26e956916da89a74b10323bc4f240cf80d0abc7f352a515",
-        "Tests/ThalovantSDKTests/HubSkillsTests.swift": "e701a4ac82c0a970a880ff2977eb9a4fcd13fb8cb89314be7b714e69cce6eb1c"
+        "Tests/ThalovantSDKTests/HubSkillsTests.swift": "e701a4ac82c0a970a880ff2977eb9a4fcd13fb8cb89314be7b714e69cce6eb1c",
+        "Tests/ThalovantSDKTests/HubsTests.swift": "ce8ef51f73d86f59a6935a434e442afa3d4765688caac50c946e4fb53fce3345",
+        "Tests/ThalovantSDKTests/NativeSignInTests.swift": "cf5a3e7eb99964c74bdef25c1741c3361929635e366ed5201225242057629a0c"
       }
     },
     "identity": {
@@ -49,18 +53,6 @@
       "tests": {
         "Tests/ThalovantSDKTests/Fixtures/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e",
         "Tests/ThalovantSDKTests/ListingTests.swift": "374fd87a4f5b3c6a9db413ec616026154ab4642f755328be4a1fb6dfdd1fa021"
-      }
-    },
-    "native_auth": {
-      "implementation": {
-        "Sources/ThalovantSDK/Hubs.swift": "6c29e442b6ab2021e00f3f3371e1aff6d93d70bd6b12ad72e095911c31acfe4c",
-        "Sources/ThalovantSDK/NativeSignIn.swift": "9416a71bbb888be7502ad9e4c1f30b197a4a81b001795b38e813721c4876a90b"
-      },
-      "reason": "Authorization-code sign-in with PKCE is implemented and exercised by the named regression suites: the challenge is checked to be S256 of the verifier, the verifier is checked never to reach the browser, a redirect answering a different attempt or carrying error= is refused, and the token exchange refuses cleartext to a non-loopback host. hubDisplayName is exercised against a catalog title, a name, a bare slug and a spec that is not shaped like a catalog.",
-      "status": "required",
-      "tests": {
-        "Tests/ThalovantSDKTests/HubsTests.swift": "ce8ef51f73d86f59a6935a434e442afa3d4765688caac50c946e4fb53fce3345",
-        "Tests/ThalovantSDKTests/NativeSignInTests.swift": "cf5a3e7eb99964c74bdef25c1741c3361929635e366ed5201225242057629a0c"
       }
     },
     "runtime": {
