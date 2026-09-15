@@ -1,89 +1,103 @@
 {
-  "schema_version": 1,
+  "capabilities": {
+    "cli": {
+      "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools.",
+      "status": "not-applicable"
+    },
+    "control": {
+      "implementation": {
+        "Sources/ThalovantSDK/ControlPlane.swift": "7d14c85e1cec926d38d19c80ca149e7d75578d04552ea523990d2bd1c611204f",
+        "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192"
+      },
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/ControlPlaneSecurityTests.swift": "956343b45d946283f26e956916da89a74b10323bc4f240cf80d0abc7f352a515",
+        "Tests/ThalovantSDKTests/HubSkillsTests.swift": "e701a4ac82c0a970a880ff2977eb9a4fcd13fb8cb89314be7b714e69cce6eb1c"
+      }
+    },
+    "identity": {
+      "implementation": {
+        "Sources/ThalovantSDK/Identity.swift": "47359a7835cc6f5b4596693b3720cb27b63b082bfa8920810d12bba8e688a712",
+        "Sources/ThalovantSDK/Protocols.swift": "2b8ca8b994d8ede83ccd848375be64237155badb53a502dd7a897a3760bc0cb7"
+      },
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/ModelRoundTripTests.swift": "d6392e12baf5992828b340379c277e4e6a81eca57308823e94f18ba655b6ff62",
+        "Tests/ThalovantSDKTests/ProtocolSelectionTests.swift": "84a641e4aa02a15ef36596ae4606f2570916573a2a162fd77a547d8e453678b8"
+      }
+    },
+    "inventory": {
+      "implementation": {
+        "Sources/ThalovantSDK/Inventory.swift": "9420f08ccf993bc3c48230f20f7b32ac0f575402c2cf50286e21ac6af81b8d20"
+      },
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json": "4deb456540b8b08aa4b59f8366d4295318b743245e7936febbdb199eb2dcfae0",
+        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685"
+      }
+    },
+    "listing": {
+      "implementation": {
+        "Sources/ThalovantSDK/Intents.swift": "049930079cb42ddd71e7d5a98eabe2e3596d48c1d14362443d8261fa55200b22",
+        "Sources/ThalovantSDK/Listing.swift": "bc1fb4cb834e48549aee379d0480e550353b08a7abd695cb1c852a271173a1a7"
+      },
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/Fixtures/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e",
+        "Tests/ThalovantSDKTests/ListingTests.swift": "374fd87a4f5b3c6a9db413ec616026154ab4642f755328be4a1fb6dfdd1fa021"
+      }
+    },
+    "native_auth": {
+      "implementation": {
+        "Sources/ThalovantSDK/Hubs.swift": "6c29e442b6ab2021e00f3f3371e1aff6d93d70bd6b12ad72e095911c31acfe4c",
+        "Sources/ThalovantSDK/NativeSignIn.swift": "9416a71bbb888be7502ad9e4c1f30b197a4a81b001795b38e813721c4876a90b"
+      },
+      "reason": "Authorization-code sign-in with PKCE is implemented and exercised by the named regression suites: the challenge is checked to be S256 of the verifier, the verifier is checked never to reach the browser, a redirect answering a different attempt or carrying error= is refused, and the token exchange refuses cleartext to a non-loopback host. hubDisplayName is exercised against a catalog title, a name, a bare slug and a spec that is not shaped like a catalog.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/HubsTests.swift": "ce8ef51f73d86f59a6935a434e442afa3d4765688caac50c946e4fb53fce3345",
+        "Tests/ThalovantSDKTests/NativeSignInTests.swift": "cf5a3e7eb99964c74bdef25c1741c3361929635e366ed5201225242057629a0c"
+      }
+    },
+    "runtime": {
+      "implementation": {
+        "Sources/ThalovantSDK/Events.swift": "07d514fd59aed3d20635133189e2978bb72b7f6088672367214556f8b9437925",
+        "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
+        "Sources/ThalovantSDK/Transport.swift": "2998639a6bc405fdb1678c02ac518f467a34a5f2c60e48f4503100e0e381bfe1"
+      },
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "bfcd4a649fa8ecb0cede0ccd495cdbdc1a9881760e4654cd776cf81bed558cb1",
+        "Tests/ThalovantSDKTests/NoiseTests.swift": "7bb52c653a668d0a9d8bbbd3a9daefe37501de1c5cd2fbaf10e02ccd96f44725",
+        "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "9b8f5e731a4fdaab98eddbe4ed3f491094deb53bf3440fa043770f2a5b5fdfab",
+        "Tests/ThalovantSDKTests/RuntimeTests.swift": "935b050f7596286ffcc2e1c940905092808d404f8f2eb39d24575d873a48ea8b"
+      }
+    },
+    "session": {
+      "implementation": {
+        "Sources/ThalovantSDK/Session.swift": "169e724aec29e39060b5a2df3ca965679ba2eddcdcbff4b3b36a05d990d5ea21"
+      },
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The connected-client factory owns failed connection cleanup; Python performs that dial internally and retains failed retirement before replacement.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685"
+      }
+    }
+  },
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
     "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
     "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd",
     "4f17f2e999105c5629defd1c1ea71a197ecf725a9b559ff7b3bf9932638645bd",
     "676e935e66330f8614d6c23cccddd48e1c4577c3af761775f18e1ea0128b8007",
-    "8b71292c815a4b7219be7b1a7a5d01e9500faaa23e7c97c6a48683fc0411e1d0"
+    "8b71292c815a4b7219be7b1a7a5d01e9500faaa23e7c97c6a48683fc0411e1d0",
+    "e1a17c218e70eb278e4a06161314076269c6d7f3fd24afc522711e1eedb2c2e8",
+    "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b"
   ],
-  "capabilities": {
-    "runtime": {
-      "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
-      "implementation": {
-        "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
-        "Sources/ThalovantSDK/Transport.swift": "2998639a6bc405fdb1678c02ac518f467a34a5f2c60e48f4503100e0e381bfe1",
-        "Sources/ThalovantSDK/Events.swift": "07d514fd59aed3d20635133189e2978bb72b7f6088672367214556f8b9437925"
-      },
-      "tests": {
-        "Tests/ThalovantSDKTests/RuntimeTests.swift": "935b050f7596286ffcc2e1c940905092808d404f8f2eb39d24575d873a48ea8b",
-        "Tests/ThalovantSDKTests/NoiseTests.swift": "7bb52c653a668d0a9d8bbbd3a9daefe37501de1c5cd2fbaf10e02ccd96f44725",
-        "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "9b8f5e731a4fdaab98eddbe4ed3f491094deb53bf3440fa043770f2a5b5fdfab",
-        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "bfcd4a649fa8ecb0cede0ccd495cdbdc1a9881760e4654cd776cf81bed558cb1"
-      }
-    },
-    "control": {
-      "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
-      "implementation": {
-        "Sources/ThalovantSDK/ControlPlane.swift": "7d14c85e1cec926d38d19c80ca149e7d75578d04552ea523990d2bd1c611204f",
-        "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192"
-      },
-      "tests": {
-        "Tests/ThalovantSDKTests/HubSkillsTests.swift": "e701a4ac82c0a970a880ff2977eb9a4fcd13fb8cb89314be7b714e69cce6eb1c",
-        "Tests/ThalovantSDKTests/ControlPlaneSecurityTests.swift": "956343b45d946283f26e956916da89a74b10323bc4f240cf80d0abc7f352a515"
-      }
-    },
-    "identity": {
-      "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
-      "implementation": {
-        "Sources/ThalovantSDK/Identity.swift": "47359a7835cc6f5b4596693b3720cb27b63b082bfa8920810d12bba8e688a712",
-        "Sources/ThalovantSDK/Protocols.swift": "2b8ca8b994d8ede83ccd848375be64237155badb53a502dd7a897a3760bc0cb7"
-      },
-      "tests": {
-        "Tests/ThalovantSDKTests/ModelRoundTripTests.swift": "d6392e12baf5992828b340379c277e4e6a81eca57308823e94f18ba655b6ff62",
-        "Tests/ThalovantSDKTests/ProtocolSelectionTests.swift": "84a641e4aa02a15ef36596ae4606f2570916573a2a162fd77a547d8e453678b8"
-      }
-    },
-    "listing": {
-      "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
-      "implementation": {
-        "Sources/ThalovantSDK/Listing.swift": "bc1fb4cb834e48549aee379d0480e550353b08a7abd695cb1c852a271173a1a7",
-        "Sources/ThalovantSDK/Intents.swift": "049930079cb42ddd71e7d5a98eabe2e3596d48c1d14362443d8261fa55200b22"
-      },
-      "tests": {
-        "Tests/ThalovantSDKTests/ListingTests.swift": "374fd87a4f5b3c6a9db413ec616026154ab4642f755328be4a1fb6dfdd1fa021",
-        "Tests/ThalovantSDKTests/Fixtures/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e"
-      }
-    },
-    "inventory": {
-      "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
-      "implementation": {
-        "Sources/ThalovantSDK/Inventory.swift": "9420f08ccf993bc3c48230f20f7b32ac0f575402c2cf50286e21ac6af81b8d20"
-      },
-      "tests": {
-        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685",
-        "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json": "4deb456540b8b08aa4b59f8366d4295318b743245e7936febbdb199eb2dcfae0"
-      }
-    },
-    "session": {
-      "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The connected-client factory owns failed connection cleanup; Python performs that dial internally and retains failed retirement before replacement.",
-      "implementation": {
-        "Sources/ThalovantSDK/Session.swift": "169e724aec29e39060b5a2df3ca965679ba2eddcdcbff4b3b36a05d990d5ea21"
-      },
-      "tests": {
-        "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685"
-      }
-    },
-    "cli": {
-      "status": "not-applicable",
-      "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools."
-    }
-  }
+  "schema_version": 1
 }
