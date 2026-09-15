@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- Automated patch release of the unreleased changes on `main` since v0.7.1.
+
 ## 0.7.1 — 2026-09-13
 
 - Expose advisory reply claim status and first-seen pipeline/skill identifiers, with shared conformance for fallback, mixed stages, legacy hubs and malformed stamps. Existing reply construction remains compatible.
