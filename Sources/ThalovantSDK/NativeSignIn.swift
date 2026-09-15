@@ -145,6 +145,14 @@ public enum NativeSignIn {
         guard components.user == nil, components.password == nil else {
             throw ThalovantApiError(message: "dashboardURL must not carry credentials.")
         }
+        // A query or a fragment breaks the address this builds: "<dash>#x"
+        // becomes "<dash>#x/authorize?client_id=..." and every parameter lands
+        // in the fragment, which a browser never sends. A query mangles the
+        // path the same way.
+        guard components.query == nil, components.fragment == nil else {
+            throw ThalovantApiError(
+                message: "dashboardURL must not carry a query or a fragment.")
+        }
         if components.scheme?.lowercased() == "https" { return }
         if components.scheme?.lowercased() == "http", isLoopback(components.host) { return }
         throw ThalovantApiError(

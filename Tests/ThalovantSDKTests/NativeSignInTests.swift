@@ -139,7 +139,14 @@ final class NativeSignInTests: XCTestCase {
     }
 
     func testADashboardThatIsNotSafeIsRefused() {
-        for bad in ["http://dash.example.test", "https://evil.test@dash.thalovant.com", "ftp://dash.thalovant.com"] {
+        for bad in [
+            "http://dash.example.test",
+            "https://evil.test@dash.thalovant.com",
+            "ftp://dash.thalovant.com",
+            // A fragment puts every parameter somewhere a browser never sends.
+            "https://dash.example.test#section",
+            "https://dash.example.test?next=/x",
+        ] {
             XCTAssertThrowsError(
                 try NativeSignIn.begin(clientID: "app", redirectURI: "app://auth", dashboardURL: bad), bad)
         }
