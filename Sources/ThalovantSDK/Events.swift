@@ -191,6 +191,62 @@ public func utterancePayload(text: String, lang: String) -> JSONObject {
 /// Merges correlation identifiers into an event context, matching the
 /// structure produced by the sibling SDKs (`request_id`,
 /// `thalovant_request_id`, and a `session` block).
+/// The hive's own frame kinds, which a client may subscribe to.
+///
+/// `query` and `cascade` are deliberately absent: they are this client's own
+/// request/response traffic and `ask` already owns them, so subscribing to one
+/// would quietly compete for the same replies.
+public let hiveKinds: [String] = ["broadcast", "propagate", "escalate", "intercom", "rendezvous"]
+
+/// Session fields a client carries from one turn of a conversation to the next.
+///
+/// A hub keeps nothing for a *named* session: OVOS-SESSION-2 §2.2 makes the
+/// orchestrator stateless for those, so the carrier a client sends is the whole
+/// snapshot and whatever the last turn activated is discarded the moment it
+/// ends. Without `converse_handlers` the converse pipeline has no skill to poll
+/// and every follow-up reaches the fallback instead of the skill that just
+/// answered.
+///
+/// An allow-list, not a deny-list. Deliberately absent: the caller's own
+/// per-turn settings (`lang`, `pipeline`, `site_id`), because a client that
+/// decides the language per utterance would otherwise be pinned to whichever
+/// one the conversation opened in; and the live device flags, which describe a
+/// moment that has passed by the time the next turn is sent.
+public let conversationSessionFields: [String] = [
+    "converse_handlers",
+    "active_handlers",
+    "active_skills",
+    "context",
+    "utterance_states",
+    "response_mode",
+]
+
+private func isCarried(_ value: JSONValue) -> Bool {
+    switch value {
+    case .null: return false
+    case .array(let items): return !items.isEmpty
+    case .object(let fields): return !fields.isEmpty
+    default: return true
+    }
+}
+
+/// Fill the conversation fields of `session` from the hub's last reply.
+///
+/// This turn's own values win: a field the caller set is never overwritten,
+/// only one it left out is taken from the turn before.
+public func carryConversation(
+    previous: [String: JSONValue]?,
+    session: [String: JSONValue]
+) -> [String: JSONValue] {
+    guard let previous else { return session }
+    var carried = session
+    for field in conversationSessionFields {
+        if carried[field] != nil { continue }
+        if let value = previous[field], isCarried(value) { carried[field] = value }
+    }
+    return carried
+}
+
 public func contextWithCorrelation(
     _ context: JSONObject,
     sessionId: String? = nil,

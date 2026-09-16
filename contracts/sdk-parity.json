@@ -1,5 +1,22 @@
 {
   "capabilities": {
+    "binary": {
+      "implementation": {
+        "Sources/ThalovantSDK/Client.swift": "c5b92271f120964c7cdfdbd4187e3f8d67bb6f7cb07b31e68863eb0c1437edc9",
+        "Sources/ThalovantSDK/HiveBinary.swift": "649c094f04c4b57c99a1cf65482762c3204d5e2bf629df26c68f5af1c26f8818",
+        "Sources/ThalovantSDK/Transport.swift": "b23b2a42e4dee7bc07f58c5220d105b411fdcf5b2a5db753339dba098acf26f8",
+        "Sources/ThalovantSDK/Wire.swift": "b3f7226d394d092413d48a571399da8ad1e0cf587911f0f39f71c04df69a5a30"
+      },
+      "reason": "HiveWire.decodeBinaryFrame reads WIRE-1: four bits of payload type, then the clip itself, never parsed or inflated. The Noise framing marks each frame JSON or not and a binary one was refused outright, so every such frame was unreachable; onBinary delivers it now. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e3bd954b15cb53c2c43229fcd6e7206120887dc7d34dbcd4f1283b2e3da75ec4"
+      },
+      "vectors": {
+        "binary-frames.json": "Tests/ThalovantSDKTests/Fixtures/binary-frames.json",
+        "binary-vectors.json": "Tests/ThalovantSDKTests/Fixtures/binary-vectors.json"
+      }
+    },
     "cli": {
       "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools.",
       "status": "not-applicable"
@@ -18,6 +35,20 @@
         "Tests/ThalovantSDKTests/HubSkillsTests.swift": "e701a4ac82c0a970a880ff2977eb9a4fcd13fb8cb89314be7b714e69cce6eb1c",
         "Tests/ThalovantSDKTests/HubsTests.swift": "ce8ef51f73d86f59a6935a434e442afa3d4765688caac50c946e4fb53fce3345",
         "Tests/ThalovantSDKTests/NativeSignInTests.swift": "11e7dd764b4462b3aee3c30101c580158d6992ad0cb521ba25986f6e7a6f9e0f"
+      }
+    },
+    "conversation": {
+      "implementation": {
+        "Sources/ThalovantSDK/Client.swift": "c5b92271f120964c7cdfdbd4187e3f8d67bb6f7cb07b31e68863eb0c1437edc9",
+        "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538"
+      },
+      "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/ConversationCarryTests.swift": "3d4cdc25a011de16ab1fe76e75549f834f0e0fe27028b4eb5af768d0fe660fff"
+      },
+      "vectors": {
+        "conversation-vectors.json": "Tests/ThalovantSDKTests/Fixtures/conversation-vectors.json"
       }
     },
     "identity": {
@@ -39,8 +70,11 @@
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json": "4deb456540b8b08aa4b59f8366d4295318b743245e7936febbdb199eb2dcfae0",
+        "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json": "f631ce993a84b21ae17d43f65ad4e062ebbd997ca7b9c02de4056c11ec73b1d0",
         "Tests/ThalovantSDKTests/SessionInventoryTests.swift": "91bd1baaed1df5814ec76b25af8ab5a026900af604d6410daed857aaf7ef6685"
+      },
+      "vectors": {
+        "inventory-vectors.json": "Tests/ThalovantSDKTests/Fixtures/inventory-vectors.json"
       }
     },
     "listing": {
@@ -51,23 +85,43 @@
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/Fixtures/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e",
+        "Tests/ThalovantSDKTests/Fixtures/question-vectors.json": "a6ae21cb27eac6a33cf1026677f0c36be50f0e13faa7ce724bedc9a3b8bb8386",
         "Tests/ThalovantSDKTests/ListingTests.swift": "374fd87a4f5b3c6a9db413ec616026154ab4642f755328be4a1fb6dfdd1fa021"
+      },
+      "vectors": {
+        "question-vectors.json": "Tests/ThalovantSDKTests/Fixtures/question-vectors.json"
+      }
+    },
+    "mesh": {
+      "implementation": {
+        "Sources/ThalovantSDK/Client.swift": "c5b92271f120964c7cdfdbd4187e3f8d67bb6f7cb07b31e68863eb0c1437edc9",
+        "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538"
+      },
+      "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e3bd954b15cb53c2c43229fcd6e7206120887dc7d34dbcd4f1283b2e3da75ec4"
+      },
+      "vectors": {
+        "mesh-vectors.json": "Tests/ThalovantSDKTests/Fixtures/mesh-vectors.json"
       }
     },
     "runtime": {
       "implementation": {
-        "Sources/ThalovantSDK/Events.swift": "07d514fd59aed3d20635133189e2978bb72b7f6088672367214556f8b9437925",
+        "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538",
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
-        "Sources/ThalovantSDK/Transport.swift": "2998639a6bc405fdb1678c02ac518f467a34a5f2c60e48f4503100e0e381bfe1"
+        "Sources/ThalovantSDK/Transport.swift": "b23b2a42e4dee7bc07f58c5220d105b411fdcf5b2a5db753339dba098acf26f8"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "bfcd4a649fa8ecb0cede0ccd495cdbdc1a9881760e4654cd776cf81bed558cb1",
+        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
         "Tests/ThalovantSDKTests/NoiseTests.swift": "7bb52c653a668d0a9d8bbbd3a9daefe37501de1c5cd2fbaf10e02ccd96f44725",
         "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "9b8f5e731a4fdaab98eddbe4ed3f491094deb53bf3440fa043770f2a5b5fdfab",
         "Tests/ThalovantSDKTests/RuntimeTests.swift": "935b050f7596286ffcc2e1c940905092808d404f8f2eb39d24575d873a48ea8b"
+      },
+      "vectors": {
+        "reply-claim-vectors.json": "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json"
       }
     },
     "session": {
@@ -82,25 +136,12 @@
     }
   },
   "reference_digests": [
-    "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
-    "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
-    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd",
-    "4f17f2e999105c5629defd1c1ea71a197ecf725a9b559ff7b3bf9932638645bd",
-    "676e935e66330f8614d6c23cccddd48e1c4577c3af761775f18e1ea0128b8007",
-    "8b71292c815a4b7219be7b1a7a5d01e9500faaa23e7c97c6a48683fc0411e1d0",
-    "e1a17c218e70eb278e4a06161314076269c6d7f3fd24afc522711e1eedb2c2e8",
-    "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b",
-    "c18d57ee45159a53773222e64586c9d36769ebc55475d1a283dc483296bb9107",
-    "d02b21380724ae606673f1b7e74b57f7962c2dea1b0640fe642856c2f2be97e2",
-    "8c8c6d952c7d86633eb65eee20415f06ee114389b3cd5efc138e59a858ffdbab",
-    "20cc677bf3ca8d61c32f0f2d3fbf6562899cf83f951685d57a2bdd10e8d30a45",
-    "9ef680aa6e5dd5519ade3954b16ac14219117df45a87ca7112dca961fad7486d",
-    "c4973d48241c9f14e0aaf6aab6b4b1c7e798b81099d0c5783079af7b4a138392",
-    "a6fe69439f14c75a2cf37d14a2d2ad1e2426639def8e1757a738a3ec6683af17",
-    "8669034d6987af946303913780cce419efaff2a9181de7d46fbffe7092d7be9e",
-    "c0d883e69ee7fa301c6e4c1b1a5c433ed290d63f79a3e6b397fdb0a988d111fa",
     "49bab2a8922b69b5cd886e7acadf217cdaa78bd94bfb48374e2f4b1cde85dfc0",
-    "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7"
+    "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7",
+    "9af92bcafd77385cd7c9cfede859eeb3586f65d0b24c9dbff36352089e94821c",
+    "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b",
+    "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
+    "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9"
   ],
   "schema_version": 1
 }

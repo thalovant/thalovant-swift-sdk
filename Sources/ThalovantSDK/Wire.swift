@@ -13,6 +13,9 @@ public struct HiveMessage: Codable, Equatable, Sendable {
     public var targetSiteId: String?
     public var targetPubkey: String?
     public var sourcePeer: String?
+    /// Set only on a BINARY frame, whose payload is bytes rather than JSON.
+    /// Not part of the wire encoding: there is no JSON shape for it.
+    public var binary: ThalovantBinary?
 
     enum CodingKeys: String, CodingKey {
         case msgType = "msg_type"

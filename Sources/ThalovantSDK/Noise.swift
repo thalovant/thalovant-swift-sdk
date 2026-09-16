@@ -249,6 +249,13 @@ final class NoiseConnection: @unchecked Sendable {
         try lock.locked {
             let clear = try operation(frame, 3)
             let marker = clear[0], payload = clear.dropFirst()
+            // The reassembled path is bounded below; a single-frame message was
+            // not, so any payload a hub chose to send in one frame went straight
+            // to the JSON decoder or the WIRE-1 reader unchecked.
+            guard payload.count <= 32 * 1024 * 1024 else {
+                thalovant_noise_wipe(&state, MemoryLayout<thalovant_noise>.size); state.failed = 1; reassembly = nil
+                throw noiseError("Noise message exceeds 32 MiB.")
+            }
             if marker < 2 { return (Data(payload), marker == 0) }
             if marker < 4 { reassembly = Data(); reassemblyJSON = marker == 2 }
             guard var buffer = reassembly, buffer.count <= 32 * 1024 * 1024 - payload.count else {
