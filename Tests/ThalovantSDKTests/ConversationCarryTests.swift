@@ -19,6 +19,11 @@ final class ConversationCarryTests: XCTestCase {
             let previous = row["previous"]?.objectValue ?? [:]
             let session = row["session"]?.objectValue ?? [:]
             let carried = carryConversation(previous: previous, session: session)
+            // Recorded before the assert: what this SDK produced, not a
+            // restatement of what the vector says it should have.
+            if case .some(.string(let name)) = row["name"] {
+                ConformanceRecord.record("conversation-vectors.json", name, JSONValue.object(carried))
+            }
             XCTAssertEqual(JSONValue.object(carried), row["expected"], "\(row["name"] ?? .null)")
         }
     }
