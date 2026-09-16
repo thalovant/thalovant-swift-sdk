@@ -390,8 +390,15 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                             return try connection.decrypt(data)
                         }
                         if let (payload, isJSON) = decoded {
-                            guard isJSON else { throw noiseError("Hub sent binary content although this client negotiated JSON only.") }
-                            try self.handleFrame(JSONDecoder().decode(HiveMessage.self, from: payload), on: socket)
+                            // The Noise framing marks each frame JSON or not.
+                            // A frame marked binary is a WIRE-1 one -- how a hub
+                            // answers speak:synth with the rendered audio, and
+                            // how a file arrives. Refusing it here is what made
+                            // every such frame unreachable.
+                            let message = isJSON
+                                ? try JSONDecoder().decode(HiveMessage.self, from: payload)
+                                : try HiveWire.decodeBinaryFrame(payload)
+                            try self.handleFrame(message, on: socket)
                         }
                     @unknown default:
                         throw noiseError("Unknown WebSocket frame type.")

@@ -181,6 +181,90 @@ public final class ThalovantClient: @unchecked Sendable {
         }
     }
 
+    /// Listens to one of the hive's own frame kinds.
+    ///
+    /// A hub relays more than this client's conversation: `broadcast` is aimed
+    /// down at every child, `propagate` walks the whole hive, `escalate` goes
+    /// up to the parent, `intercom` is addressed node to node, and `rendezvous`
+    /// is the mailbox peers use to find each other through NAT. See
+    /// `hiveKinds`. Returns a subscription; call `close()` to remove it.
+    @discardableResult
+    public func onHive(
+        _ kind: String,
+        handler: @escaping (HiveMessage) -> Void
+    ) throws -> ThalovantSubscription {
+        guard hiveKinds.contains(kind) else {
+            // Named rather than silently never firing: subscribing to "bus" or
+            // to a typo is the kind of mistake that looks like a quiet hub.
+            throw ThalovantRuntimeError(
+                "\(kind) is not a hive frame kind; expected one of \(hiveKinds.joined(separator: ", "))."
+            )
+        }
+        let id = transport.addMessageHandler { message in
+            guard message.msgType == kind else { return }
+            handler(message)
+        }
+        return ThalovantSubscription { [transport] in transport.removeMessageHandler(id) }
+    }
+
+    /// Listens for binary frames: rendered speech, and files.
+    ///
+    /// This is what a hub sends back for `speak:synth` -- the audio itself, so
+    /// a client with no synthesiser can still speak -- and how it hands over a
+    /// file. Delivered by subscription and not on a reply, because a binary
+    /// frame carries no request id: it cannot be attributed to one `ask`. Its
+    /// `utterance` is the only thread back to a turn.
+    @discardableResult
+    public func onBinary(handler: @escaping (ThalovantBinary) -> Void) -> ThalovantSubscription {
+        let id = transport.addMessageHandler { message in
+            guard let binary = message.binary else { return }
+            handler(binary)
+        }
+        return ThalovantSubscription { [transport] in transport.removeMessageHandler(id) }
+    }
+
+    /// Sends an event across the hive; every node sees it once.
+    public func propagate(_ eventType: String, data: JSONObject = [:], context: JSONObject = [:]) async throws {
+        try await sendHive("propagate", eventType, data: data, context: context)
+    }
+
+    /// Sends an event up to the parent node.
+    public func escalate(_ eventType: String, data: JSONObject = [:], context: JSONObject = [:]) async throws {
+        try await sendHive("escalate", eventType, data: data, context: context)
+    }
+
+    /// Sends an event down to every child of this hub. **Admin only.**
+    ///
+    /// A hub requires admin standing and the `can_broadcast` grant, and a
+    /// client that sends one without them is not answered with an error -- it
+    /// is disconnected for misbehaviour. Nothing here can check first: a hub's
+    /// HELLO carries its public key, peer name and node id, and nothing about
+    /// what this client may do, so a refusal arrives as a closed socket on the
+    /// next read.
+    public func broadcast(_ eventType: String, data: JSONObject = [:], context: JSONObject = [:]) async throws {
+        try await sendHive("broadcast", eventType, data: data, context: context)
+    }
+
+    private func sendHive(
+        _ kind: String,
+        _ eventType: String,
+        data: JSONObject,
+        context: JSONObject
+    ) async throws {
+        try await connect()
+        // Nested on purpose: a hub reads message.payload as a HiveMessage of its
+        // own and rewrites the route on it, so a flat frame loses the route.
+        let inner: JSONObject = [
+            "msg_type": .string("bus"),
+            "payload": .object([
+                "type": .string(eventType),
+                "data": .object(data),
+                "context": .object(contextWithIdentityMetadata(context)),
+            ]),
+        ]
+        try await transport.sendHiveFrame(HiveMessage(msgType: kind, payload: inner))
+    }
+
     /// Emits a bus event to the hub.
     public func emit(_ eventType: String, data: JSONObject = [:], context: JSONObject = [:]) async throws {
         try await connect()
