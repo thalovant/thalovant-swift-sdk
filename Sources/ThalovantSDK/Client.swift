@@ -37,6 +37,53 @@ public final class ThalovantClient: @unchecked Sendable {
     private var activeAskIDs = Set<String>()
     private var activeQueryIDs = Set<String>()
 
+    /// The conversation each session id is in the middle of.
+    ///
+    /// A hub keeps nothing for a named session, so what the last turn activated
+    /// comes back on `ovos.utterance.handled` and has to be sent again with the
+    /// next utterance or it is gone. Bounded, because a long-lived client
+    /// handed a fresh session id per turn must not accumulate one entry per
+    /// turn for ever; a satellite runs one session for its whole life.
+    private var conversations: [String: [String: JSONValue]] = [:]
+    private static let maxRememberedConversations = 32
+
+    /// Keep the session a hub returned, to send with the next utterance.
+    func rememberConversation(_ sessionId: String, session: [String: JSONValue]?) {
+        var kept: [String: JSONValue] = [:]
+        for field in conversationSessionFields {
+            guard let value = session?[field] else { continue }
+            switch value {
+            case .null: continue
+            case .array(let items) where items.isEmpty: continue
+            case .object(let fields) where fields.isEmpty: continue
+            default: kept[field] = value
+            }
+        }
+        correlationLock.lock()
+        defer { correlationLock.unlock() }
+        // Forgetting is the state, not the absence of one: a turn that ended
+        // with nothing active must not leave the old entry to resurrect it.
+        conversations.removeValue(forKey: sessionId)
+        guard !kept.isEmpty else { return }
+        if conversations.count >= Self.maxRememberedConversations, let oldest = conversations.keys.first {
+            conversations.removeValue(forKey: oldest)
+        }
+        conversations[sessionId] = kept
+    }
+
+    /// Put the last turn's conversation state back into this turn.
+    func continueConversation(_ context: [String: JSONValue], sessionId: String) -> [String: JSONValue] {
+        correlationLock.lock()
+        let previous = conversations[sessionId]
+        correlationLock.unlock()
+        guard let previous else { return context }
+        var next = context
+        var session: [String: JSONValue] = [:]
+        if case .object(let existing)? = context["session"] { session = existing }
+        next["session"] = .object(carryConversation(previous: previous, session: session))
+        return next
+    }
+
     func reserveRuntimeID(_ id: String, query: Bool) throws -> ThalovantSubscription {
         try correlationLock.locked {
             let inserted = query ? activeQueryIDs.insert(id).inserted : activeAskIDs.insert(id).inserted
@@ -194,16 +241,23 @@ public final class ThalovantClient: @unchecked Sendable {
         defer { correlation.close() }
         let sessionId = sessionId ?? newSessionId()
         let correlatedContext = contextWithCorrelation(
-            contextWithIdentityMetadata(context),
+            continueConversation(contextWithIdentityMetadata(context), sessionId: sessionId),
             sessionId: sessionId,
             siteId: identity.siteId,
             lang: lang,
             requestId: requestId
         )
         let state = AskState()
-        let handlerId = transport.addBusHandler { payload in
+        let handlerId = transport.addBusHandler { [weak self] payload in
             guard let event = ThalovantEvent.fromBusPayload(payload) else { return }
             state.process(event, requestId: requestId)
+            // The end of the turn is the one place a hub states what the
+            // conversation now is, and it keeps none of it for a named session.
+            if event.name == ThalovantEvents.utteranceHandled, event.requestId == requestId {
+                var session: [String: JSONValue]?
+                if case .object(let existing)? = event.context["session"] { session = existing }
+                self?.rememberConversation(sessionId, session: session)
+            }
         }
         defer { transport.removeBusHandler(handlerId) }
 
