@@ -2,7 +2,7 @@
   "capabilities": {
     "binary": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "66ba36bc6e973ab0e688e21a086651ce88aff72bde8988f1e021e3584a1cb534",
+        "Sources/ThalovantSDK/Client.swift": "c5b92271f120964c7cdfdbd4187e3f8d67bb6f7cb07b31e68863eb0c1437edc9",
         "Sources/ThalovantSDK/HiveBinary.swift": "649c094f04c4b57c99a1cf65482762c3204d5e2bf629df26c68f5af1c26f8818",
         "Sources/ThalovantSDK/Transport.swift": "b23b2a42e4dee7bc07f58c5220d105b411fdcf5b2a5db753339dba098acf26f8",
         "Sources/ThalovantSDK/Wire.swift": "b3f7226d394d092413d48a571399da8ad1e0cf587911f0f39f71c04df69a5a30"
@@ -39,7 +39,7 @@
     },
     "conversation": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "66ba36bc6e973ab0e688e21a086651ce88aff72bde8988f1e021e3584a1cb534",
+        "Sources/ThalovantSDK/Client.swift": "c5b92271f120964c7cdfdbd4187e3f8d67bb6f7cb07b31e68863eb0c1437edc9",
         "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538"
       },
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -94,7 +94,7 @@
     },
     "mesh": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "66ba36bc6e973ab0e688e21a086651ce88aff72bde8988f1e021e3584a1cb534",
+        "Sources/ThalovantSDK/Client.swift": "c5b92271f120964c7cdfdbd4187e3f8d67bb6f7cb07b31e68863eb0c1437edc9",
         "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538"
       },
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
