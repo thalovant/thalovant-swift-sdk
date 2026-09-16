@@ -341,6 +341,14 @@ public final class ThalovantClient: @unchecked Sendable {
                 var session: [String: JSONValue]?
                 if case .object(let existing)? = event.context["session"] { session = existing }
                 self?.rememberConversation(sessionId, session: session)
+                // And under the id the hub answered with, when it differs. A
+                // reply's `sessionId` is the first non-empty *event* session
+                // id, so a caller that passes it to the next ask looked up a
+                // key nothing was filed under and sent no carried state.
+                if let answeredWith = event.sessionId, !answeredWith.isEmpty,
+                   answeredWith != sessionId {
+                    self?.rememberConversation(answeredWith, session: session)
+                }
             }
         }
         defer { transport.removeBusHandler(handlerId) }

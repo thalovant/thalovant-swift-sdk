@@ -20,7 +20,16 @@ final class BinaryFrameTests: XCTestCase {
             XCTFail("no \(key)")
             return []
         }
-        return rows.compactMap { if case .object(let row) = $0 { return row } else { return nil } }
+        // Not compactMap: a row that is not an object would be dropped in
+        // silence, and the suite would pass while testing fewer cases than the
+        // file declares.
+        return try rows.map { value in
+            guard case .object(let row) = value else {
+                XCTFail("\(key) contains a row that is not an object")
+                throw ThalovantRuntimeError("malformed \(key) row")
+            }
+            return row
+        }
     }
 
     private func string(_ object: JSONObject, _ key: String) -> String? {
