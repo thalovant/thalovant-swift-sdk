@@ -161,6 +161,14 @@ extension HiveWire {
 /// of the two is shorter -- so a hub really does send both, and a frame whose
 /// metadata cannot be read arrives with no language and no filename beside its
 /// audio. The clip itself is never compressed, whatever the flag says.
+/// How much a single WIRE-1 payload may inflate to.
+///
+/// A raw-frame size limit bounds the *compressed* input, not the output, so a
+/// hub could send a small compressed metadata block or non-`bin` payload that
+/// expands until the client runs out of memory. zlib reaches ~1000:1, so the
+/// frame limit alone is no bound at all.
+private let wireInflationLimit = 32 * 1024 * 1024
+
 func inflateWireBytes(_ data: Data) -> Data? {
     if data.isEmpty { return data }
     var stream = z_stream()
@@ -183,6 +191,7 @@ func inflateWireBytes(_ data: Data) -> Data? {
                 return sink.count - Int(stream.avail_out)
             }
             if produced > 0 { output.append(contentsOf: buffer[0..<produced]) }
+            if output.count > wireInflationLimit { status = Z_MEM_ERROR; break }
         } while status == Z_OK
     }
     return status == Z_STREAM_END ? output : nil

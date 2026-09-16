@@ -44,11 +44,32 @@ public final class ThalovantClient: @unchecked Sendable {
     /// next utterance or it is gone. Bounded, because a long-lived client
     /// handed a fresh session id per turn must not accumulate one entry per
     /// turn for ever; a satellite runs one session for its whole life.
-    private var conversations: [String: [String: JSONValue]] = [:]
+    /// One conversation, however many session ids reach it.
+    ///
+    /// Filed as an entry per id they aged and were evicted separately, so a
+    /// caller continuing under the id it sent could lose the carry while one
+    /// using the hub's answering id kept it -- and the cap counted names
+    /// rather than conversations.
+    final class ConversationEntry {
+        let group: [String]
+        let kept: [String: JSONValue]
+        var sequence: UInt64
+        init(group: [String], kept: [String: JSONValue], sequence: UInt64) {
+            self.group = group; self.kept = kept; self.sequence = sequence
+        }
+    }
+
+    var conversations: [String: ConversationEntry] = [:]
+    private var conversationSequence: UInt64 = 0
     private static let maxRememberedConversations = 32
 
+    /// Session ids one conversation answers to. The cap above counts a group
+    /// once, so without this a hub that re-translates the id every turn could
+    /// grow a single group without limit.
+    private static let maxConversationAliases = 8
+
     /// Keep the session a hub returned, to send with the next utterance.
-    func rememberConversation(_ sessionId: String, session: [String: JSONValue]?) {
+    func rememberConversation(_ sessionIds: [String], session: [String: JSONValue]?) {
         var kept: [String: JSONValue] = [:]
         for field in conversationSessionFields {
             guard let value = session?[field] else { continue }
@@ -56,27 +77,65 @@ public final class ThalovantClient: @unchecked Sendable {
             case .null: continue
             case .array(let items) where items.isEmpty: continue
             case .object(let fields) where fields.isEmpty: continue
+            // An empty scalar is not carried state: keeping `response_mode: ""`
+            // spent one of the entries the cap allows on a cleared session, so
+            // eviction could drop a session that still had state.
+            case .string(let text) where text.isEmpty: continue
             default: kept[field] = value
             }
         }
+        var keys: [String] = []
+        for id in sessionIds where !keys.contains(id) { keys.append(id) }
+        guard !keys.isEmpty else { return }
+
         correlationLock.lock()
         defer { correlationLock.unlock() }
+        // Take over every id these already reach rather than dropping them: a
+        // turn continued under the hub's id must not forget the id a satellite
+        // still uses for the same conversation.
+        var index = 0
+        while index < keys.count {
+            if let previous = conversations.removeValue(forKey: keys[index]) {
+                for sibling in previous.group {
+                    conversations.removeValue(forKey: sibling)
+                    if !keys.contains(sibling) { keys.append(sibling) }
+                }
+            }
+            index += 1
+        }
         // Forgetting is the state, not the absence of one: a turn that ended
         // with nothing active must not leave the old entry to resurrect it.
-        conversations.removeValue(forKey: sessionId)
-        guard !kept.isEmpty else { return }
-        if conversations.count >= Self.maxRememberedConversations, let oldest = conversations.keys.first {
-            conversations.removeValue(forKey: oldest)
+        guard !kept.isEmpty else {
+            for key in keys { conversations.removeValue(forKey: key) }
+            return
         }
-        conversations[sessionId] = kept
+        // This turn's ids come first and inherited ones after, so the tail is
+        // the stalest and the id the next turn sends is kept.
+        if keys.count > Self.maxConversationAliases { keys.removeLast(keys.count - Self.maxConversationAliases) }
+        conversationSequence += 1
+        let entry = ConversationEntry(group: keys, kept: kept, sequence: conversationSequence)
+        for key in keys { conversations[key] = entry }
+        // Evict whole conversations, oldest first. `conversations.keys.first`
+        // is whatever the hash happens to yield, not the oldest entry, so it
+        // could drop the alias just stored.
+        while Set(conversations.values.map(\.sequence)).count > Self.maxRememberedConversations {
+            guard let oldest = conversations.values.min(by: { $0.sequence < $1.sequence }) else { break }
+            for sibling in oldest.group { conversations.removeValue(forKey: sibling) }
+        }
     }
 
     /// Put the last turn's conversation state back into this turn.
     func continueConversation(_ context: [String: JSONValue], sessionId: String) -> [String: JSONValue] {
         correlationLock.lock()
-        let previous = conversations[sessionId]
+        let entry = conversations[sessionId]
+        // Most recently used: a client juggling more conversations than the cap
+        // keeps the ones it is actually using.
+        if let entry {
+            conversationSequence += 1
+            entry.sequence = conversationSequence
+        }
         correlationLock.unlock()
-        guard let previous else { return context }
+        guard let previous = entry?.kept else { return context }
         var next = context
         var session: [String: JSONValue] = [:]
         if case .object(let existing)? = context["session"] { session = existing }
@@ -340,15 +399,17 @@ public final class ThalovantClient: @unchecked Sendable {
             if event.name == ThalovantEvents.utteranceHandled, event.requestId == requestId {
                 var session: [String: JSONValue]?
                 if case .object(let existing)? = event.context["session"] { session = existing }
-                self?.rememberConversation(sessionId, session: session)
-                // And under the id the hub answered with, when it differs. A
-                // reply's `sessionId` is the first non-empty *event* session
-                // id, so a caller that passes it to the next ask looked up a
-                // key nothing was filed under and sent no carried state.
+                // Both ids in one call: a satellite reuses its own, and a
+                // reply's `sessionId` -- the first non-empty *event* id -- is
+                // what an ordinary caller is handed. Filed separately they aged
+                // and were evicted separately, so with the cache full the
+                // second could evict the first.
+                var keys = [sessionId]
                 if let answeredWith = event.sessionId, !answeredWith.isEmpty,
                    answeredWith != sessionId {
-                    self?.rememberConversation(answeredWith, session: session)
+                    keys.append(answeredWith)
                 }
+                self?.rememberConversation(keys, session: session)
             }
         }
         defer { transport.removeBusHandler(handlerId) }
