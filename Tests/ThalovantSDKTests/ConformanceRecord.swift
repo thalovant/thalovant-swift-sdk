@@ -44,11 +44,21 @@ enum ConformanceRecord {
         case .number(let number):
             // conversation-vectors.json carries activated_at as 1.0, and every
             // other SDK writes that value as 1.
-            if number.rounded() == number && number.isFinite
-                && abs(number) < 9_007_199_254_740_992 {
-                return String(Int64(number))
-            }
-            return String(number)
+            //
+            // Refused rather than passed through when it is not whole. Only a
+            // whole number inside 2^53 is written the same way by every
+            // language here; 1.5 and 1e-7 have per-language spellings, and
+            // recording one would be a digest for a value nobody produced. No
+            // vector contains one, and if one ever does this should stop
+            // rather than lie.
+            precondition(
+                number.rounded() == number && number.isFinite
+                    && abs(number) <= 9_007_199_254_740_992,
+                """
+                conformance: cannot canonicalise \(number): only whole numbers \
+                within 2^53 are spelled the same way in every language
+                """)
+            return String(Int64(number))
         case .string(let text):
             return quote(text)
         case .array(let items):
@@ -144,12 +154,22 @@ enum ConformanceRecord {
             out[vectorFile] = ["digest": canonicalDigest(parsed), "cases": cases]
         }
         let document: [String: Any] = ["schema_version": 1, "results": out]
-        guard let body = try? JSONSerialization.data(
-            withJSONObject: document, options: [.prettyPrinted, .sortedKeys]) else { return }
-        let path = URL(fileURLWithPath: target)
-        try? FileManager.default.createDirectory(
-            at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? (String(decoding: body, as: UTF8.self) + "\n").write(
-            to: path, atomically: true, encoding: .utf8)
+        // Not `try?`. A path that is a directory, or unwritable, or whose
+        // parent cannot be created, would otherwise leave the process
+        // succeeding with no record at all -- or worse, with the record a
+        // previous run left there, which is exactly the stale artifact this
+        // whole mechanism exists to rule out. Failing loudly is the only
+        // honest answer when the record cannot be published.
+        do {
+            let body = try JSONSerialization.data(
+                withJSONObject: document, options: [.prettyPrinted, .sortedKeys])
+            let path = URL(fileURLWithPath: target)
+            try FileManager.default.createDirectory(
+                at: path.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try (String(decoding: body, as: UTF8.self) + "\n").write(
+                to: path, atomically: true, encoding: .utf8)
+        } catch {
+            fatalError("conformance: cannot write \(target): \(error)")
+        }
     }
 }

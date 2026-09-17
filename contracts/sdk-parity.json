@@ -10,7 +10,8 @@
       "reason": "HiveWire.decodeBinaryFrame reads WIRE-1: four bits of payload type, then the clip itself, never parsed or inflated. The Noise framing marks each frame JSON or not and a binary one was refused outright, so every such frame was unreachable; onBinary delivers it now. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e8914166143475b891e37faf322d618b5f6dad6277df5d2e86f1dd4c781ab608"
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e8914166143475b891e37faf322d618b5f6dad6277df5d2e86f1dd4c781ab608",
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646"
       },
       "vectors": {
         "binary-frames.json": "Tests/ThalovantSDKTests/Fixtures/binary-frames.json",
@@ -45,6 +46,7 @@
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646",
         "Tests/ThalovantSDKTests/ConversationCarryTests.swift": "db7384493f251a46a40604c035e0f09f480edd327d444604a72a29082de8112a"
       },
       "vectors": {
@@ -100,7 +102,8 @@
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e8914166143475b891e37faf322d618b5f6dad6277df5d2e86f1dd4c781ab608"
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e8914166143475b891e37faf322d618b5f6dad6277df5d2e86f1dd4c781ab608",
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646"
       },
       "vectors": {
         "mesh-vectors.json": "Tests/ThalovantSDKTests/Fixtures/mesh-vectors.json"
