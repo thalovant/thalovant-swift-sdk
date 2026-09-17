@@ -10,7 +10,8 @@
       "reason": "HiveWire.decodeBinaryFrame reads WIRE-1: four bits of payload type, then the clip itself, never parsed or inflated. The Noise framing marks each frame JSON or not and a binary one was refused outright, so every such frame was unreachable; onBinary delivers it now. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e3bd954b15cb53c2c43229fcd6e7206120887dc7d34dbcd4f1283b2e3da75ec4"
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e8914166143475b891e37faf322d618b5f6dad6277df5d2e86f1dd4c781ab608",
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646"
       },
       "vectors": {
         "binary-frames.json": "Tests/ThalovantSDKTests/Fixtures/binary-frames.json",
@@ -45,7 +46,8 @@
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/ConversationCarryTests.swift": "3d4cdc25a011de16ab1fe76e75549f834f0e0fe27028b4eb5af768d0fe660fff"
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646",
+        "Tests/ThalovantSDKTests/ConversationCarryTests.swift": "db7384493f251a46a40604c035e0f09f480edd327d444604a72a29082de8112a"
       },
       "vectors": {
         "conversation-vectors.json": "Tests/ThalovantSDKTests/Fixtures/conversation-vectors.json"
@@ -100,7 +102,8 @@
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e3bd954b15cb53c2c43229fcd6e7206120887dc7d34dbcd4f1283b2e3da75ec4"
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "e8914166143475b891e37faf322d618b5f6dad6277df5d2e86f1dd4c781ab608",
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646"
       },
       "vectors": {
         "mesh-vectors.json": "Tests/ThalovantSDKTests/Fixtures/mesh-vectors.json"
@@ -141,7 +144,8 @@
     "9af92bcafd77385cd7c9cfede859eeb3586f65d0b24c9dbff36352089e94821c",
     "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b",
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
-    "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9"
+    "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
+    "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd"
   ],
   "schema_version": 1
 }

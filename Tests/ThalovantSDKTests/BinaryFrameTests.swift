@@ -109,6 +109,15 @@ final class BinaryFrameTests: XCTestCase {
             guard case .some(.object(let expected)) = row["expected"] else {
                 return XCTFail("\(name): no expectation")
             }
+            // Recorded before the assert, for the same reason as the carry.
+            // Absent is already nil here, so nothing needs the translation the
+            // Go recorder gives its empty strings.
+            ConformanceRecord.record("binary-vectors.json", name, JSONValue.object([
+                "kind": .string(binary.kind),
+                "utterance": binary.utterance.map(JSONValue.string) ?? .null,
+                "lang": binary.lang.map(JSONValue.string) ?? .null,
+                "file_name": binary.fileName.map(JSONValue.string) ?? .null,
+            ]))
             XCTAssertEqual(binary.kind, string(expected, "kind"), name)
             // An empty name is no name: rendering "" would put a blank filename
             // in front of somebody as though the hub had chosen it.
