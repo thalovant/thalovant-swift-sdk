@@ -197,7 +197,11 @@ final class RuntimeTests: XCTestCase {
             let watchdog = Task { try await Task.sleep(nanoseconds: 1_000_000_000); request.cancel() }
             defer { watchdog.cancel() }
             do { let reply = try await request.value; XCTAssertTrue(partial); XCTAssertEqual(reply.text, "partial"); XCTAssertFalse(reply.ok); XCTAssertEqual(reply.events.count, 2) }
+            // A refusal is its own type. Swift's SDK errors are value types
+            // rather than a class hierarchy, so a caller that wants every hard
+            // failure catches both -- which is what changed here.
             catch is ThalovantRuntimeError { XCTAssertFalse(partial) }
+            catch is ThalovantPolicyDeniedError { XCTAssertFalse(partial) }
             catch { XCTFail("Unexpected hard-failure result: \(error)") }
             XCTAssertEqual(fake.busCount, 0)
         }

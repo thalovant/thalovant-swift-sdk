@@ -36,6 +36,8 @@ public final class ThalovantClient: @unchecked Sendable {
     private let correlationLock = NSLock()
     private var activeAskIDs = Set<String>()
     private var activeQueryIDs = Set<String>()
+    /// When each fire-and-forget utterance went out; see `utterancesInFlight()`.
+    private var untrackedSends: [Date] = []
 
     /// The conversation each session id is in the middle of.
     ///
@@ -141,6 +143,18 @@ public final class ThalovantClient: @unchecked Sendable {
         if case .object(let existing)? = context["session"] { session = existing }
         next["session"] = .object(carryConversation(previous: previous, session: session))
         return next
+    }
+
+    /// How many utterances this client may still have refused, for a denial
+    /// with no request id: asks and queries while they wait, and a
+    /// fire-and-forget utterance for the shared grace window after it went out.
+    func utterancesInFlight() -> (asks: Int, queries: Int, sends: Int) {
+        correlationLock.locked {
+            let cutoff = Date().addingTimeInterval(-Refusal.untrackedUtteranceGrace)
+            untrackedSends.removeAll { $0 <= cutoff }
+            if untrackedSends.count > 1024 { untrackedSends.removeFirst(untrackedSends.count - 1024) }
+            return (activeAskIDs.count, activeQueryIDs.count, untrackedSends.count)
+        }
     }
 
     func reserveRuntimeID(_ id: String, query: Bool) throws -> ThalovantSubscription {
@@ -326,6 +340,11 @@ public final class ThalovantClient: @unchecked Sendable {
 
     /// Emits a bus event to the hub.
     public func emit(_ eventType: String, data: JSONObject = [:], context: JSONObject = [:]) async throws {
+        if eventType == ThalovantEvents.recognizerLoopUtterance {
+            // A fire-and-forget utterance: nothing will wait on it, but the hub
+            // may refuse it, and that refusal carries no request id.
+            correlationLock.locked { untrackedSends.append(Date()) }
+        }
         try await connect()
         try await transport.emitBus(type: eventType, data: data, context: contextWithIdentityMetadata(context))
     }
@@ -390,7 +409,7 @@ public final class ThalovantClient: @unchecked Sendable {
             lang: lang,
             requestId: requestId
         )
-        let state = AskState()
+        let state = AskState(utterancesInFlight: { [weak self] in self?.utterancesInFlight() ?? (1, 0, 0) })
         let handlerId = transport.addBusHandler { [weak self] payload in
             guard let event = ThalovantEvent.fromBusPayload(payload) else { return }
             state.process(event, requestId: requestId)
@@ -462,8 +481,9 @@ public final class ThalovantClient: @unchecked Sendable {
             )
         }
         if let failure = effectiveFailure, final.fragments.isEmpty {
-            let message = failure.text.isEmpty ? "Hub reported \(failure.name)." : failure.text
-            throw ThalovantRuntimeError(message)
+            // Typed: a refusal, a question the hub has nothing for, and a fault
+            // need three different sentences.
+            throw Refusal.error(for: failure)
         }
         let replyText = final.fragments.joined(separator: " ")
         return ThalovantReply(
@@ -543,6 +563,15 @@ public final class ThalovantClient: @unchecked Sendable {
 
 /// Accumulates correlated events for one `ask()` call.
 final class AskState: @unchecked Sendable {
+    /// Asks, queries and recent fire-and-forget utterances, for a denial the
+    /// hub could not correlate. One ask and nothing else is what a lone
+    /// collector is: the tests that build one directly mean exactly that.
+    let utterancesInFlight: () -> (asks: Int, queries: Int, sends: Int)
+
+    init(utterancesInFlight: @escaping () -> (asks: Int, queries: Int, sends: Int) = { (1, 0, 0) }) {
+        self.utterancesInFlight = utterancesInFlight
+    }
+
     struct Snapshot {
         let fragments: [String]
         let events: [ThalovantEvent]
@@ -583,9 +612,24 @@ final class AskState: @unchecked Sendable {
     }
 
     /// Correlation rule (mirrors the Node SDK): only events carrying the
-    /// matching request id participate in the reply.
+    /// matching request id participate in the reply -- except the one reply the
+    /// hub cannot correlate. A denial carries no request id, only the type it
+    /// refused, and dropping it here turned a refusal the hub made at once into
+    /// a full timeout.
     func process(_ event: ThalovantEvent, requestId: String) {
-        guard event.requestId == requestId else { return }
+        if event.name == ThalovantEvents.policyDenied {
+            let counts = utterancesInFlight()
+            guard Refusal.belongsToAsk(
+                requestId: event.requestId,
+                ownRequestId: requestId,
+                deniedType: event.data["denied_type"]?.stringValue,
+                asksInFlight: counts.asks,
+                queriesInFlight: counts.queries,
+                sendsInFlight: counts.sends
+            ) else { return }
+        } else {
+            guard event.requestId == requestId else { return }
+        }
         lock.lock()
         defer { lock.unlock() }
         guard failureEvent == nil && operationFailure == nil else { return }

@@ -23,7 +23,7 @@ let package = Package(
             name: "ThalovantSDKTests",
             dependencies: ["ThalovantSDK"],
             path: "Tests/ThalovantSDKTests",
-            resources: [.copy("Fixtures/noise-node.json"), .copy("Fixtures/question-vectors.json"), .copy("Fixtures/inventory-vectors.json"), .copy("Fixtures/reply-claim-vectors.json"), .copy("Fixtures/listing-vectors.json"), .copy("Fixtures/language-matching-vectors.json"), .copy("Fixtures/conversation-vectors.json"), .copy("Fixtures/mesh-vectors.json"), .copy("Fixtures/binary-vectors.json"), .copy("Fixtures/binary-frames.json")]
+            resources: [.copy("Fixtures/noise-node.json"), .copy("Fixtures/question-vectors.json"), .copy("Fixtures/inventory-vectors.json"), .copy("Fixtures/reply-claim-vectors.json"), .copy("Fixtures/listing-vectors.json"), .copy("Fixtures/language-matching-vectors.json"), .copy("Fixtures/conversation-vectors.json"), .copy("Fixtures/mesh-vectors.json"), .copy("Fixtures/binary-vectors.json"), .copy("Fixtures/binary-frames.json"), .copy("Fixtures/refusal-vectors.json")]
         ),
     ]
 )
