@@ -19,6 +19,7 @@ final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     var emitRetired: Bool { lock.locked { retiredEmit } }
     func markEmitRetired() { lock.locked { retiredEmit = true } }
     var pausedConnect = false, pausedEmit = false
+    var connectError: Error?
     var queryAction: (() async throws -> Void)?
     var pausedSend = false
     private var cancelledSend = false
@@ -32,6 +33,7 @@ final class RuntimeFake: HiveMindBusTransport, @unchecked Sendable {
     var sent: [HiveMessage] { lock.locked { sentFrames } }
     func connect(timeout: TimeInterval) async throws {
         if pausedConnect { try await AsyncGate().wait(timeout: nil, timeoutError: nil) }
+        if let failure = connectError { throw failure }
         lock.locked { online = true }
     }
     func disconnect() async { lock.locked { online = false } }

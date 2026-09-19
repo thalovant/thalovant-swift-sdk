@@ -2,7 +2,7 @@
   "capabilities": {
     "binary": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "695d27eeebb14580d3af4a26d524b894b6442a6b3e20da748b35ff03352966ee",
+        "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
         "Sources/ThalovantSDK/HiveBinary.swift": "649c094f04c4b57c99a1cf65482762c3204d5e2bf629df26c68f5af1c26f8818",
         "Sources/ThalovantSDK/Transport.swift": "b23b2a42e4dee7bc07f58c5220d105b411fdcf5b2a5db753339dba098acf26f8",
         "Sources/ThalovantSDK/Wire.swift": "b3f7226d394d092413d48a571399da8ad1e0cf587911f0f39f71c04df69a5a30"
@@ -40,7 +40,7 @@
     },
     "conversation": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "695d27eeebb14580d3af4a26d524b894b6442a6b3e20da748b35ff03352966ee",
+        "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
         "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538"
       },
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -96,7 +96,7 @@
     },
     "mesh": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "695d27eeebb14580d3af4a26d524b894b6442a6b3e20da748b35ff03352966ee",
+        "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
         "Sources/ThalovantSDK/Events.swift": "6c5ad454bb7f9a41b54720617db0637bc35e2ba950b38698fc2c1e39be899538"
       },
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
@@ -111,16 +111,16 @@
     },
     "refusal": {
       "implementation": {
-        "Sources/ThalovantSDK/Client.swift": "695d27eeebb14580d3af4a26d524b894b6442a6b3e20da748b35ff03352966ee",
+        "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
         "Sources/ThalovantSDK/Errors.swift": "51072810e742cab509cfa68d1ad27a5f025aa354380bf8f10235a7db1f4b9756",
         "Sources/ThalovantSDK/Refusal.swift": "7dbd2c77f3cc8286d34fccc272ba8b57d721a66070628373af860aa783082335"
       },
-      "reason": "Refusal.belongsToAsk() and Refusal.error(for:) in Sources/ThalovantSDK/Refusal.swift, applied by AskState.process() and ask() in Client.swift, which counts asks, queries and fire-and-forget utterances inside the shared grace window and drops a send whose publish never happened. ThalovantPolicyDeniedError carries quota and ThalovantUnansweredError is new; Swift's SDK errors are distinct value types, so a caller that wants every hard failure catches both. Run against the shared refusal vectors.",
+      "reason": "Refusal.belongsToAsk() and Refusal.error(for:) in Sources/ThalovantSDK/Refusal.swift, applied by AskState.process() and ask() in Client.swift, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded once connected and immediately before the publish, and kept when that publish throws. ThalovantPolicyDeniedError carries quota and ThalovantUnansweredError is new; Swift's SDK errors are distinct value types, so a caller that wants every hard failure catches both. Run against the shared refusal vectors.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/Fixtures/refusal-vectors.json": "8795fcd9d8b5ac790176c13ea077b701a5dc1fd584a717ed08744bcab8d21c82",
-        "Tests/ThalovantSDKTests/RefusalVectorTests.swift": "5f12b08a19799b1566eba2b3be76cc2c893ab8c92d821ca14136cbe7919c7a15",
-        "Tests/ThalovantSDKTests/RuntimeTests.swift": "2413c1a701d3ff9d156317ab99f086bebd7283498a22af0af8e6de2ce53e4c26"
+        "Tests/ThalovantSDKTests/Fixtures/refusal-vectors.json": "08a55b252514427ea7123294685f1f6dd72306ee274cff77013590870d8fde7e",
+        "Tests/ThalovantSDKTests/RefusalVectorTests.swift": "d401f12a5f854d64bbec46ea7d45ca4de1cf7e1f9f0881bc755f1ff5b43d2f59",
+        "Tests/ThalovantSDKTests/RuntimeTests.swift": "ca22aac58b7543e853e531a21636f383438bdf19bf4dea7664fd5ad058b021b2"
       },
       "vectors": {
         "refusal-vectors.json": "Tests/ThalovantSDKTests/Fixtures/refusal-vectors.json"
@@ -138,7 +138,7 @@
         "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
         "Tests/ThalovantSDKTests/NoiseTests.swift": "7bb52c653a668d0a9d8bbbd3a9daefe37501de1c5cd2fbaf10e02ccd96f44725",
         "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "9b8f5e731a4fdaab98eddbe4ed3f491094deb53bf3440fa043770f2a5b5fdfab",
-        "Tests/ThalovantSDKTests/RuntimeTests.swift": "2413c1a701d3ff9d156317ab99f086bebd7283498a22af0af8e6de2ce53e4c26"
+        "Tests/ThalovantSDKTests/RuntimeTests.swift": "ca22aac58b7543e853e531a21636f383438bdf19bf4dea7664fd5ad058b021b2"
       },
       "vectors": {
         "reply-claim-vectors.json": "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json"
@@ -163,7 +163,7 @@
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
     "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
     "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
-    "4c7780ced5bb3e011d10a0ac502bba61c08eaebfd27de6c827c5d47351ac2b4e"
+    "e0de5ebc373fcec60d083651e4001e22da8978419ad0d24a24d326db1e4e8e2a"
   ],
   "schema_version": 1
 }

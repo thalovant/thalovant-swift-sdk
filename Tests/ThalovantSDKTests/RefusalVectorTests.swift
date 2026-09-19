@@ -91,6 +91,43 @@ final class RefusalVectorTests: XCTestCase {
         )
     }
 
+    private func client(_ fake: RuntimeFake) throws -> ThalovantClient {
+        var identity = try ThalovantJSON.decodeObject(Fixtures.clientIdentify)
+        identity["default_master"] = .string("wss://hub.example")
+        return ThalovantClient(identity: try ThalovantIdentity(json: identity),
+            transport: fake, replySettle: 0, emptyReplyWait: 0)
+    }
+
+    func testASendThatNeverConnectedIsNotInFlight() async throws {
+        // A connect that fails publishes nothing, so there is nothing for the
+        // hub to refuse -- and a phantom would suppress a real refusal for the
+        // whole grace window.
+        let fake = RuntimeFake()
+        fake.connectError = ThalovantConnectionError("no route to the hub")
+        let sdk = try client(fake)
+        defer { Task { await sdk.close() } }
+        do {
+            try await sdk.sendUtterance("turn the lights off")
+            XCTFail("the send should have failed")
+        } catch is ThalovantConnectionError {}
+        XCTAssertEqual(sdk.utterancesInFlight().sends, 0)
+    }
+
+    func testAPublishThatErroredStillCountsBecauseTheHubMayHoldIt() async throws {
+        // The transport can fail after the hub already has the frame, and the
+        // hub refuses what it holds. Forgetting the send would leave the next
+        // ask as the only candidate for a denial that was never its own.
+        let fake = RuntimeFake()
+        fake.emitAction = { _ in throw ThalovantConnectionError("the write reported a failure") }
+        let sdk = try client(fake)
+        defer { Task { await sdk.close() } }
+        do {
+            try await sdk.sendUtterance("turn the lights off")
+            XCTFail("the send should have failed")
+        } catch is ThalovantConnectionError {}
+        XCTAssertEqual(sdk.utterancesInFlight().sends, 1)
+    }
+
     func testTheVectorsCoverEveryKindOfRefusal() throws {
         // A copy that quietly lost its quota or its unanswered case would still pass.
         let classification = try cases()["classification"]!.arrayValue!.compactMap(\.objectValue)

@@ -150,11 +150,27 @@ public final class ThalovantClient: @unchecked Sendable {
     /// fire-and-forget utterance for the shared grace window after it went out.
     func utterancesInFlight() -> (asks: Int, queries: Int, sends: Int) {
         correlationLock.locked {
-            let cutoff = Date().addingTimeInterval(-Refusal.untrackedUtteranceGrace)
-            untrackedSends.removeAll { $0 <= cutoff }
-            if untrackedSends.count > 1024 { untrackedSends.removeFirst(untrackedSends.count - 1024) }
+            pruneUntrackedSends()
             return (activeAskIDs.count, activeQueryIDs.count, untrackedSends.count)
         }
+    }
+
+    /// Notes a fire-and-forget utterance, pruning as it goes: a client that only
+    /// ever sends and never asks would otherwise keep one entry per send for as
+    /// long as it lives.
+    private func recordUntrackedSend() {
+        correlationLock.locked {
+            untrackedSends.append(Date())
+            pruneUntrackedSends()
+        }
+    }
+
+    /// Drops what is past the grace window, and any excess beyond the cap.
+    /// The caller holds `correlationLock`.
+    private func pruneUntrackedSends() {
+        let cutoff = Date().addingTimeInterval(-Refusal.untrackedUtteranceGrace)
+        untrackedSends.removeAll { $0 <= cutoff }
+        if untrackedSends.count > 1024 { untrackedSends.removeFirst(untrackedSends.count - 1024) }
     }
 
     func reserveRuntimeID(_ id: String, query: Bool) throws -> ThalovantSubscription {
@@ -346,22 +362,21 @@ public final class ThalovantClient: @unchecked Sendable {
             return
         }
         // A fire-and-forget utterance: nothing will wait on it, but the hub may
-        // refuse it, and that refusal carries no request id. Recorded before
-        // the publish so a denial cannot beat the record, and dropped again if
-        // the publish never happened -- a send that failed to leave leaves
-        // nothing for the hub to refuse, and a phantom would suppress a real
-        // refusal for the whole grace window.
-        let sentAt = Date()
-        correlationLock.locked { untrackedSends.append(sentAt) }
-        do {
-            try await connect()
-            try await transport.emitBus(type: eventType, data: data, context: contextWithIdentityMetadata(context))
-        } catch {
-            correlationLock.locked {
-                if let at = untrackedSends.firstIndex(of: sentAt) { untrackedSends.remove(at: at) }
-            }
-            throw error
-        }
+        // refuse it, and that refusal carries no request id.
+        //
+        // Recorded once the connection is up and immediately before the
+        // publish. Connecting can wait on a transport and its handshake, and
+        // starting the window there would spend the grace on it -- leaving a
+        // denial to land after it, where an unrelated ask would take it. A
+        // connect that fails publishes nothing, so it records nothing.
+        //
+        // A publish that throws keeps its record: a transport can fail after
+        // the hub already holds the frame, and the hub refuses what it holds. A
+        // record that need not have been there costs one ask its deadline; a
+        // missing one ends a question the hub never refused.
+        try await connect()
+        recordUntrackedSend()
+        try await transport.emitBus(type: eventType, data: data, context: contextWithIdentityMetadata(context))
     }
 
     /// Sends an utterance without waiting for a reply.
