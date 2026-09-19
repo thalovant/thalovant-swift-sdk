@@ -234,13 +234,21 @@ public struct ThalovantPolicyDeniedError: Error, Equatable, CustomStringConverti
     /// guess. A negative limit, usage or reset time is not something a policy
     /// can mean, and passing one through would have an app say "-1 of -5
     /// questions used".
+    /// The largest count the wire can carry, being the largest whole number
+    /// every JSON decoder holds exactly. Above it a decoder backed by a double
+    /// can no longer tell one whole number from the next, so two SDKs would
+    /// report different allowances for the same denial -- and a count nobody
+    /// can agree on is worse than none.
+    static let maxCount = (1 << 53) - 1
+
     private static func wholeCount(_ value: JSONValue?) -> Int {
         // `.integer` as well as `.number`: JSONValue keeps them apart, and a
         // whole number off the wire decodes as the former -- reading only
         // `.number` made every quota come back as zeros.
+        let whole: Int
         switch value {
         case .integer(let number):
-            return max(number, 0)
+            whole = number
         case .number(let number):
             // Whole, and inside what an Int holds: a finite 1e20 passes every
             // other guard and traps on conversion. Compared as a Double
@@ -248,12 +256,13 @@ public struct ThalovantPolicyDeniedError: Error, Equatable, CustomStringConverti
             guard number.isFinite, number == number.rounded(),
                   number >= 0, number < 9_223_372_036_854_775_808.0
             else { return 0 }
-            return Int(number)
+            whole = Int(number)
         case .string(let text):
-            return max(Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0, 0)
+            whole = Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
         default:
             return 0
         }
+        return (0...maxCount).contains(whole) ? whole : 0
     }
 
     public var description: String { message }
