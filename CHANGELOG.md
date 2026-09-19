@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.8.1
+
+- A refusal ends an `ask` at once instead of letting it run to the deadline. The hub sends `hive.policy.denied` the instant it refuses, with no request id, and the collector's correlation gate dropped it: the ask waited out its whole budget while a caller told somebody their hub "did not answer in time" about a question it had refused and explained. A denial with no request id is taken when it names the type this ask sent and this ask is the only utterance the client has out; a second ask, a query, or a fire-and-forget utterance still inside the shared 10-second grace window makes it ambiguous, so neither takes it.
+- `ask` throws `ThalovantPolicyDeniedError` with `quota` -- `period`, `limit`, `used`, `resetAfter` -- for a spent `intent_quota_exceeded`, and a message that fits the refusal rather than offering allow-list advice for a spent day or for `backend_unavailable`.
+- An unmatched intent throws the new `ThalovantUnansweredError`.
+- **Callers that catch `ThalovantRuntimeError` from `ask` should add the two new types.** This SDK's errors are distinct value types rather than a class hierarchy, so a refusal no longer matches `catch is ThalovantRuntimeError`.
+- `ThalovantUnansweredError.said` carries what the person said. Both event names put the input in the event's text; the old read of `reason`/`error` left it empty.
+- A fire-and-forget utterance whose publish never happened is dropped again, rather than suppressing a real refusal for the rest of the grace window.
+- A refusal on a quota the hub sent no numbers for says a quota has run out, rather than claiming "all questions used".
+- Quota counts read `.integer` as well as `.number` -- `JSONValue` keeps them apart, and a whole number off the wire decodes as the former -- are never negative, and a finite double past what an `Int` holds reads as 0 rather than trapping on conversion.
+- Declares the parity contract's new `refusal` capability, run against the Python reference's `refusal-vectors.json`.
+
 ## 0.8.0
 
 - Speak the rest of the HiveMind protocol. `onHive(_:handler:)` listens to the five hive kinds -- `broadcast`, `propagate`, `escalate`, `intercom`, `rendezvous` -- and `propagate`, `escalate` and `broadcast` send. A refusal is a disconnection rather than an error: a hub's HELLO says nothing about what a client may do, so nothing can check first.
