@@ -47,8 +47,10 @@ enum Refusal {
         case ThalovantEvents.policyDenied:
             return ThalovantPolicyDeniedError.fromEvent(failure)
         case ThalovantEvents.intentUnmatched, ThalovantEvents.intentFailure:
-            let said = failure.data["reason"]?.stringValue ?? failure.data["error"]?.stringValue ?? ""
-            return ThalovantUnansweredError(said: said.trimmingCharacters(in: .whitespacesAndNewlines))
+            // What the person said: both names carry the input, and that is
+            // what a caller shows. `reason` is not on these events at all, so
+            // reading it left `said` empty.
+            return ThalovantUnansweredError(said: failure.text.trimmingCharacters(in: .whitespacesAndNewlines))
         default:
             return ThalovantRuntimeError(failure.text.isEmpty ? "Hub reported \(failure.name)." : failure.text)
         }

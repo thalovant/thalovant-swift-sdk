@@ -340,13 +340,28 @@ public final class ThalovantClient: @unchecked Sendable {
 
     /// Emits a bus event to the hub.
     public func emit(_ eventType: String, data: JSONObject = [:], context: JSONObject = [:]) async throws {
-        if eventType == ThalovantEvents.recognizerLoopUtterance {
-            // A fire-and-forget utterance: nothing will wait on it, but the hub
-            // may refuse it, and that refusal carries no request id.
-            correlationLock.locked { untrackedSends.append(Date()) }
+        guard eventType == ThalovantEvents.recognizerLoopUtterance else {
+            try await connect()
+            try await transport.emitBus(type: eventType, data: data, context: contextWithIdentityMetadata(context))
+            return
         }
-        try await connect()
-        try await transport.emitBus(type: eventType, data: data, context: contextWithIdentityMetadata(context))
+        // A fire-and-forget utterance: nothing will wait on it, but the hub may
+        // refuse it, and that refusal carries no request id. Recorded before
+        // the publish so a denial cannot beat the record, and dropped again if
+        // the publish never happened -- a send that failed to leave leaves
+        // nothing for the hub to refuse, and a phantom would suppress a real
+        // refusal for the whole grace window.
+        let sentAt = Date()
+        correlationLock.locked { untrackedSends.append(sentAt) }
+        do {
+            try await connect()
+            try await transport.emitBus(type: eventType, data: data, context: contextWithIdentityMetadata(context))
+        } catch {
+            correlationLock.locked {
+                if let at = untrackedSends.firstIndex(of: sentAt) { untrackedSends.remove(at: at) }
+            }
+            throw error
+        }
     }
 
     /// Sends an utterance without waiting for a reply.

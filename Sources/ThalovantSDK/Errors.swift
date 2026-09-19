@@ -180,6 +180,12 @@ public struct ThalovantPolicyDeniedError: Error, Equatable, CustomStringConverti
         // their day to "allow this connection to publish
         // recognizer_loop:utterance" sent them to a page that could not help.
         if let quota {
+            if quota.limit == 0, quota.used == 0, quota.resetAfter == 0, quota.period.isEmpty {
+                // Refused on a quota, with none of the numbers. "All questions
+                // used" would be inventing one.
+                self.message = "The hub refused '\(deniedType)': a quota has run out."
+                return
+            }
             let used = quota.limit > 0 ? "\(quota.used) of \(quota.limit)" : "all"
             let period = quota.period.isEmpty ? "" : " \(quota.period)"
             let resets = quota.resetAfter > 0 ? "; it resets in \(quota.resetAfter)s" : ""
@@ -235,8 +241,14 @@ public struct ThalovantPolicyDeniedError: Error, Equatable, CustomStringConverti
         switch value {
         case .integer(let number):
             return max(number, 0)
-        case .number(let number) where number.isFinite && number == number.rounded():
-            return max(Int(number), 0)
+        case .number(let number):
+            // Whole, and inside what an Int holds: a finite 1e20 passes every
+            // other guard and traps on conversion. Compared as a Double
+            // against exact bounds, since Int.max is not representable.
+            guard number.isFinite, number == number.rounded(),
+                  number >= 0, number < 9_223_372_036_854_775_808.0
+            else { return 0 }
+            return Int(number)
         case .string(let text):
             return max(Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0, 0)
         default:

@@ -31,7 +31,11 @@ final class RefusalVectorTests: XCTestCase {
             let expect = row["expect"]!.objectValue!
             let produced = Refusal.error(for: event(row["event"]!.objectValue!))
             if expect["kind"]?.stringValue == "unanswered" {
-                XCTAssertTrue(produced is ThalovantUnansweredError, "\(name): \(produced)")
+                guard let unanswered = produced as? ThalovantUnansweredError else {
+                    return XCTFail("\(name): wanted an unanswered question, got \(produced)")
+                }
+                // What the person said, which is what a caller shows.
+                XCTAssertEqual(unanswered.said, expect["said"]?.stringValue, name)
                 continue
             }
             guard let refused = produced as? ThalovantPolicyDeniedError else {
