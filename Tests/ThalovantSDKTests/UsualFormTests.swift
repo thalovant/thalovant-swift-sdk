@@ -21,9 +21,12 @@ final class UsualFormTests: XCTestCase {
     func testATagAlreadyUsualHasNothingToRetryWith() {
         // nil rather than the same tag, so a hub that answered is never asked
         // twice.
-        XCTAssertNil(usualForm("en-US"))
+        // Only byte-for-byte. The capital spelling is a different string to
+        // a manifest keyed `en-us`, and suppressing its retry was the bug.
+        XCTAssertEqual(usualForm("en-US"), "en-us")
+        XCTAssertEqual(usualForm("fr-FR"), "fr-fr")
         XCTAssertNil(usualForm("en-us"))
-        XCTAssertNil(usualForm("fr-FR"))
+        XCTAssertNil(usualForm("fr-fr"))
     }
 
     func testALanguageNobodyHasHeardOfIsNilAndNotAGuess() {
