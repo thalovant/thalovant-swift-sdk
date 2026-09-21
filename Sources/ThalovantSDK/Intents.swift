@@ -50,11 +50,17 @@ public struct IntentInventoryOptions: Sendable {
     /// When the hub refuses `ovos.intent.list`, fall back to the engines' own
     /// manifests and return names only, marked `source: .engineManifests`.
     public var fallback: Bool
+    /// Retry an empty listing once in the language's usual form. On by
+    /// default: a listing that returns nothing from a hub which demonstrably
+    /// answers in that language is a fault, not a preference. See
+    /// `usualForm`.
+    public var nearest: Bool
 
-    public init(timeout: TimeInterval = 5, describe: Bool = true, fallback: Bool = true) {
+    public init(timeout: TimeInterval = 5, describe: Bool = true, fallback: Bool = true, nearest: Bool = true) {
         self.timeout = timeout
         self.describe = describe
         self.fallback = fallback
+        self.nearest = nearest
     }
 }
 
@@ -461,6 +467,12 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
     public let denied: [String]
     public let fallbacks: [HubFallback]
     public let fallbacksKnown: Bool
+    /// The tag the hub actually listed each requested language under, in
+    /// `languages` order. Equal to `languages` unless a listing came back
+    /// empty and the language's usual form answered instead, which is the
+    /// only way the two differ. Callers rendering sentences must read them
+    /// from the tag that answered.
+    public let listedIn: [String]
 
     enum CodingKeys: String, CodingKey {
         case languages
@@ -469,6 +481,7 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
         case denied
         case fallbacks
         case fallbacksKnown = "fallbacks_known"
+        case listedIn = "listed_in"
     }
 
     public init(
@@ -477,7 +490,8 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
         source: HubIntentSource = .intentManifest,
         denied: [String] = [],
         fallbacks: [HubFallback] = [],
-        fallbacksKnown: Bool = false
+        fallbacksKnown: Bool = false,
+        listedIn: [String]? = nil
     ) {
         self.languages = languages
         self.skills = skills
@@ -485,6 +499,7 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
         self.denied = denied
         self.fallbacks = fallbacks
         self.fallbacksKnown = fallbacksKnown
+        self.listedIn = listedIn ?? languages
     }
 
     /// Every intent of every skill, in `skills` order.
@@ -887,11 +902,29 @@ extension ThalovantClient {
         var listed: [(lang: String, rows: [IntentRegistration])] = []
         do {
             for lang in asked {
-                let rows = try await listIntentRegistrations(
-                    lang: lang,
-                    options: ListIntentsOptions(timeout: options.timeout, includeDefinitions: options.describe)
-                )
-                listed.append((lang, rows))
+                let listingOptions = ListIntentsOptions(timeout: options.timeout, includeDefinitions: options.describe)
+                var rows = try await listIntentRegistrations(lang: lang, options: listingOptions)
+                var tag = lang
+                if rows.isEmpty, options.nearest {
+                    // Listing and asking do not agree about languages. The hub
+                    // matches an utterance to the closest language it knows, so
+                    // a phone set to en-CA is understood by skills registered
+                    // under en-US; the manifest is keyed by exact tag, so the
+                    // same hub lists nothing for en-CA and a person is shown an
+                    // empty hub by the hub that is answering them.
+                    //
+                    // Once only, and only on an empty listing: a hub that
+                    // answered is never asked twice, and a language whose usual
+                    // form is itself has nothing to retry with.
+                    if let usual = usualForm(lang) {
+                        let retried = try await listIntentRegistrations(lang: usual, options: listingOptions)
+                        if !retried.isEmpty {
+                            rows = retried
+                            tag = usual
+                        }
+                    }
+                }
+                listed.append((tag, rows))
             }
         } catch let denied as ThalovantPolicyDeniedError {
             guard options.fallback, denied.deniedType == ThalovantEvents.intentList else { throw denied }
@@ -964,7 +997,12 @@ extension ThalovantClient {
         let skills = bySkill.keys.sorted().map { skillId in
             HubSkillIntents(skillId: skillId, intents: (bySkill[skillId] ?? []).sorted { $0.name < $1.name })
         }
-        return try await withFallbacks(HubIntentInventory(languages: asked, skills: skills, source: .intentManifest), timeout: options.timeout)
+        return try await withFallbacks(
+            HubIntentInventory(
+                languages: asked, skills: skills, source: .intentManifest,
+                listedIn: listed.map(\.lang)
+            ),
+            timeout: options.timeout)
     }
 }
 
@@ -1023,6 +1061,9 @@ extension ThalovantClient {
     private func withFallbacks(_ inventory: HubIntentInventory, timeout: TimeInterval) async throws -> HubIntentInventory {
         let handlers = try await listFallbacks(timeout: min(timeout, 1.5))
         return HubIntentInventory(languages: inventory.languages, skills: inventory.skills,
-            source: inventory.source, denied: inventory.denied, fallbacks: handlers ?? [], fallbacksKnown: handlers != nil)
+            source: inventory.source, denied: inventory.denied, fallbacks: handlers ?? [], fallbacksKnown: handlers != nil,
+            // Carried through: this rebuilds the value to attach fallbacks,
+            // and dropping it here would lose which tag answered.
+            listedIn: inventory.listedIn)
     }
 }
