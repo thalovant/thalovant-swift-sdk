@@ -83,7 +83,8 @@ public func usualForm(_ tag: String) -> String? {
     if LanguageMatching.field("likely", base) == nil { return nil }
     let likely = LanguageMatching.maximize(LanguageMatching.Tag(language: base, script: "", region: ""))
     let usual = (likely.region.isEmpty ? likely.language : likely.language + "-" + likely.region).lowercased()
-    return sameLanguage(usual, tag) ? nil : usual
+    // Byte comparison, NOT sameLanguage. They are not the same test, and the difference is the whole point: the canonical spelling is en-US, the manifest is keyed en-us, and sameLanguage calls those equal -- so the retry that exists for exactly this case suppressed itself.
+    return usual == tag.trimmingCharacters(in: .whitespaces) ? nil : usual
 }
 
 /// Nearest OVOS-compatible locale at distance ten or less; ties retain input order.
