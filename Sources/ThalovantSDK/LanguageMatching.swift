@@ -2,7 +2,7 @@ import Foundation
 
 // OVOS-compatible CLDR distances, adapted from langcodes 3.5.1 (MIT).
 // Versioned tables and attribution ship in ListingData.
-private enum LanguageMatching {
+internal enum LanguageMatching {
     static let data = try! ListingRules.loadResource("language-matching")
     static func field(_ section: String, _ key: String) -> String? { data[section]?.objectValue?[key]?.stringValue }
     struct Tag { var language: String; var script = ""; var region = "" }
@@ -53,6 +53,37 @@ private enum LanguageMatching {
         }
         return result+td
     }
+}
+
+/// The form a language is usually written in, when that differs from `tag`.
+///
+/// `en-CA` and `en-AT` both to `en-us`, `fr-BE` to `fr-fr`, `pt-AO` to
+/// `pt-br`, from CLDR's likely subtags. `nil` when there is nothing different
+/// to try, so a caller can tell "already the usual form" from "no idea".
+///
+/// Listing and asking do not agree about languages, and this closes the gap.
+/// A hub matches an utterance to the closest language it knows, so a phone
+/// set to `en-CA` is understood by skills registered under `en-US`; its
+/// manifest is keyed by exact tag, so the same hub lists nothing for `en-CA`.
+///
+/// Lower case, because that is how skills register and how the manifest is
+/// keyed: an exact lookup with BCP47's `en-US` finds nothing.
+public func usualForm(_ tag: String) -> String? {
+    if tag.trimmingCharacters(in: .whitespaces).isEmpty { return nil }
+    let base = LanguageMatching.parse(tag).language
+    // "und" is the tag for "no idea", and `parse` produces it for anything it
+    // cannot read. CLDR's guess for an unknown language is English, so
+    // without this a blank tag lists a hub in a language nobody asked for.
+    if base.isEmpty || base == "und" { return nil }
+    // `maximize` does not fail on a language it has never heard of: it walks
+    // its probes down to "und" and takes the root locale's region, so "zzz"
+    // comes back "zzz-us". Round-tripping the tag does not catch that,
+    // because the unknown language is carried through unchanged. A direct
+    // entry in the likely table is what says CLDR has heard of this language.
+    if LanguageMatching.field("likely", base) == nil { return nil }
+    let likely = LanguageMatching.maximize(LanguageMatching.Tag(language: base, script: "", region: ""))
+    let usual = (likely.region.isEmpty ? likely.language : likely.language + "-" + likely.region).lowercased()
+    return sameLanguage(usual, tag) ? nil : usual
 }
 
 /// Nearest OVOS-compatible locale at distance ten or less; ties retain input order.
