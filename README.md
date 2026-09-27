@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.7.2"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.9.0"),
 ]
 ```
 
@@ -581,7 +581,9 @@ let selected = selectDataPlaneEndpoint(
 ## Errors
 
 - `ThalovantApiError` — control API failures, with `statusCode`, raw `body`,
-  and the decoded `errorCode` where the API provides one.
+  the decoded `errorCode`, the API's whole `detail` sentence and the parsed
+  `problem` body where the API provides them (see
+  [Reading An API Error](#reading-an-api-error)).
 - `ThalovantDeviceLoginError` — the browser device sign-in was `.denied` or
   the user code `.expired` before approval.
 - `ThalovantConnectionError` / `ThalovantTimeoutError` /
@@ -607,11 +609,58 @@ a matching `retry_after_seconds` in the body:
 Both apply to token-authenticated control-plane calls. `errorCode` decodes the
 code for you, since the API nests it under `detail` in its Problem+JSON body.
 The SDK does not retry automatically, and `ThalovantApiError` carries the
-status, raw `body`, and `errorCode` — not response headers — so read
-`retry_after_seconds` out of the body rather than reaching for the
-`Retry-After` header. It is authoritative: honor it before resending. Per-plan
-limits are listed in the dashboard and at
+status and the body — not response headers — so read `retry_after_seconds`
+out of `problem`, where it sits beside the code inside `detail`
+(`error.problem?["detail"]?["retry_after_seconds"]?.intValue`), rather than
+reaching for the `Retry-After` header. It is authoritative: honor it before
+resending. Per-plan limits are listed in the dashboard and at
 <https://docs.thalovant.com/developers/sdks/swift/>.
+
+## Reading An API Error
+
+A refused control-plane request throws `ThalovantApiError`. Its `message` is
+one line for display and can be shortened, so read what the API said from the
+error itself:
+
+- `statusCode`: the HTTP status.
+- `errorCode`: the machine-readable code, such as `platform_image_required` or
+  `plan_limit`, or `nil`.
+- `detail`: the API's whole sentence, exactly as sent, or `nil`.
+- `problem`: the whole error body as a `JSONObject` when it is a JSON object,
+  or `nil`. Every structured field the API sends is here, including ones added
+  after this SDK was released. Whole numbers are `.integer`.
+- `body`: the raw response text, as before.
+
+```swift
+do {
+    _ = try await api.releaseRuntimeGroup(
+        groupId, ReleaseOptions(images: ["core": "docker.io/me/ovos-core:dev"]))
+} catch let error as ThalovantApiError {
+    switch error.errorCode {
+    case "platform_image_required":
+        print(error.detail ?? error.message)
+        // Per image key, the images it may be instead.
+        for (key, images) in error.problem?["allowed_images"]?.objectValue ?? [:] {
+            print(key, images.arrayValue?.compactMap(\.stringValue) ?? [])
+        }
+        // Per image key, a repository any tag or digest of which is allowed.
+        print(error.problem?["allowed_repositories"]?.objectValue ?? [:])
+    case "plan_limit":
+        let problem = error.problem ?? [:]
+        print(problem["resource"]?.stringValue ?? "", problem["used"]?.intValue ?? 0,
+              problem["limit"]?.intValue ?? 0)
+    default:
+        throw error
+    }
+}
+```
+
+A value the body echoes back from your request (a validation error repeats
+what it was sent) is only ever in `problem` and `body`, never in `message`,
+`description` or `errorDescription`. An error built with
+`ThalovantApiError(message:statusCode:body:errorCode:)` works as before: given a
+`body`, it reads `problem`, `errorCode` and `detail` out of it, and a value
+passed explicitly wins.
 
 ## Development
 

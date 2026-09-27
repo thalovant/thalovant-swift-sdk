@@ -1,5 +1,21 @@
 {
   "capabilities": {
+    "api-errors": {
+      "implementation": {
+        "Sources/ThalovantSDK/ControlPlane.swift": "7d14c85e1cec926d38d19c80ca149e7d75578d04552ea523990d2bd1c611204f",
+        "Sources/ThalovantSDK/Errors.swift": "7fe81c19b2bb25402c624302e0b86dc8e91dd60834b9bb5b06e765d6d48712b6"
+      },
+      "reason": "ThalovantApiError.httpFailure in Sources/ThalovantSDK/Errors.swift, which every non-2xx answer ThalovantControlPlane.requestData receives goes through, parses the body once into problem, errorCode and the whole detail, and leaves the bounded message as it was. Run against the shared api-error vectors, each served through URLSession by a URLProtocol with its exact status, Content-Type and body and read back from getHub.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/ApiErrorVectorTests.swift": "5f33ec3e5f1171edc658cf5274d91c5c09e0a44145d1475f0b52519e83a8cd94",
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "b066197786d650c6f51701ed9b593329fe7c8a4bd78a6423b8a5c7bf93cb5646",
+        "Tests/ThalovantSDKTests/Fixtures/api-error-vectors.json": "f0d2d8e6e153811f071dac6e0611f00f3c32ed772b751ccccb31904d7dc936ec"
+      },
+      "vectors": {
+        "api-error-vectors.json": "Tests/ThalovantSDKTests/Fixtures/api-error-vectors.json"
+      }
+    },
     "binary": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
@@ -112,7 +128,7 @@
     "refusal": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Errors.swift": "3d3c25ab6d076d7fd2a3219e533974c2ab5cbdbec37522f0bd3e4a4194be31ee",
+        "Sources/ThalovantSDK/Errors.swift": "7fe81c19b2bb25402c624302e0b86dc8e91dd60834b9bb5b06e765d6d48712b6",
         "Sources/ThalovantSDK/Refusal.swift": "7dbd2c77f3cc8286d34fccc272ba8b57d721a66070628373af860aa783082335"
       },
       "reason": "Refusal.belongsToAsk() and Refusal.error(for:) in Sources/ThalovantSDK/Refusal.swift, applied by AskState.process() and ask() in Client.swift, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded once connected and immediately before the publish, and kept when that publish throws. ThalovantPolicyDeniedError carries quota and ThalovantUnansweredError is new; Swift's SDK errors are distinct value types, so a caller that wants every hard failure catches both. Run against the shared refusal vectors.",
@@ -165,7 +181,8 @@
     "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
     "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486",
     "76bc1eb9957da5a6fdf03e89f3905f8d37d3ef2fe7c841ba751718105ca30a45",
-    "34a21f2ad875b220a571613e25b6a6e5f3d8de1a776f4949a7ab63ba93e07b16"
+    "34a21f2ad875b220a571613e25b6a6e5f3d8de1a776f4949a7ab63ba93e07b16",
+    "f79d99e9acd2fe299e3b313102541e47b366751defe5fa0dcfa44053aa7f007d"
   ],
   "schema_version": 1
 }

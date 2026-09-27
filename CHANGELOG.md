@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.9.0
+
+- `ThalovantApiError` carries what the API said, not only the line built from it. `problem` is the whole error body parsed, as a `JSONObject`, when it is a JSON object; `errorCode` is its machine-readable code; `detail` is its sentence whole, exactly as sent. The message was the only readable place for the sentence, and it is cut at 200 characters: a `platform_image_required` refusal names every image each refused key may be instead, which is longer than that, so the list a caller needed was the part cut off -- and `refused_images`, `allowed_images` and `allowed_repositories` could only be dug out of the raw `body` by hand. The same held for every structured refusal, `plan_limit`'s `resource`, `limit` and `used` included. The message itself is unchanged, and still never repeats a value the body echoed back from the request.
+- `errorCode` follows the rule every SDK now shares: the body's `code` when it is a string with something other than whitespace in it, else the `code` inside a `detail` that is itself an object. A blank `code` used to be reported as `""`.
+- `ThalovantApiError.init` takes `detail:` and `problem:` as well, both defaulted. Given a `body` and no `problem`, the error parses one from the body; a value passed explicitly wins. Existing call sites compile unchanged.
+- Declares the parity contract's new `api-errors` capability, run against the Python reference's `api-error-vectors.json`: thirteen responses served through `URLSession` and read back from `getHub`, with the results recorded in `contracts/conformance-results.json`.
+
 ## 0.8.1
 
 - A refusal ends an `ask` at once instead of letting it run to the deadline. The hub sends `hive.policy.denied` the instant it refuses, with no request id, and the collector's correlation gate dropped it: the ask waited out its whole budget while a caller told somebody their hub "did not answer in time" about a question it had refused and explained. A denial with no request id is taken when it names the type this ask sent and this ask is the only utterance the client has out; a second ask, a query, or a fire-and-forget utterance still inside the shared 10-second grace window makes it ambiguous, so neither takes it.
