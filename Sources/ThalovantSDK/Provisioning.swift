@@ -10,12 +10,15 @@ import FoundationNetworking
 /// the API falls back to the workspace release policy. Passing `images`
 /// switches the target to `custom` mode unless `mode` is also set.
 ///
-/// Unless the caller is a platform administrator, `images` may name only
-/// platform images: a catalog, current or recommended image, or any tag or
-/// digest of the platform's own repository for that key
-/// (`ghcr.io/thalovant/ovos-core` for a runtime group's `core`,
-/// `ghcr.io/thalovant/hivemind-listener` for a hub's `listener`). The API
-/// refuses anything else with HTTP 403 `platform_image_required`.
+/// Unless the caller is a platform administrator, each image must be one the
+/// platform releases for its key: a catalog pin of the stable or alpha channel,
+/// the resource's current, recommended or release-policy image, or the
+/// platform's default image. A runtime group's `core` and a hub's `listener`
+/// also accept any tag or digest of the platform's own repository
+/// (`ghcr.io/thalovant/ovos-core`, `ghcr.io/thalovant/hivemind-listener`);
+/// `bus` and `preview_bridge` take only the listed images. The API refuses
+/// anything else with HTTP 403 `platform_image_required`, whose `problem` names
+/// what each refused key may be instead.
 public struct ReleaseOptions: Sendable {
     /// Release channel to track (for example `stable`).
     public var channel: String?
@@ -24,8 +27,8 @@ public struct ReleaseOptions: Sendable {
     public var mode: String?
     /// Pinned release version.
     public var version: String?
-    /// Container images to pin, keyed by component. Platform images only,
-    /// unless the caller is a platform administrator.
+    /// Container images to pin, keyed by component: images the platform releases
+    /// for each key (see above), unless the caller is a platform administrator.
     public var images: [String: String]?
     /// Free-form audit reason recorded with the release.
     public var reason: String?

@@ -1,46 +1,141 @@
 import Foundation
 
 /// The Thalovant control API rejected a request or returned an unusable response.
+///
+/// `statusCode` is the HTTP status when the API answered. Everything else the
+/// API said rides beside the message rather than inside it:
+///
+/// - `problem` is the whole error body, parsed, when it is a JSON object --
+///   the Problem+JSON document every Thalovant API refusal is. A structured
+///   field the API adds is reachable here without a new SDK release:
+///   `refused_images`, `allowed_images` and `allowed_repositories` on a
+///   `platform_image_required` refusal, `resource`, `limit` and `used` on a
+///   `plan_limit` one.
+/// - `errorCode` is the body's machine-readable code, for branching without
+///   reading the prose.
+/// - `detail` is the API's own sentence, whole, exactly as sent.
+///
+/// The message is a single bounded line for display; it can be shortened, so
+/// it is never where to read what the API said. A value the body echoed back
+/// from the request never reaches the message, only `problem` and `body`.
+///
+/// All three are nil for a failure with no response body, such as a missing
+/// token or a transport error.
 public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError {
     public let message: String
     /// HTTP status code, when the server produced a response.
     public let statusCode: Int?
     /// Raw response body, when the server produced a response.
     public let body: String?
-    /// Machine-readable error code decoded from the body, when present
-    /// (top-level `code`, or `detail.code` for FastAPI error envelopes).
+    /// The body's machine-readable code: its `code` when that is a string with
+    /// something other than whitespace in it, else the `code` inside a
+    /// `detail` that is itself an object (FastAPI's own envelope). Exactly as
+    /// sent; nil when there is none.
     public let errorCode: String?
+    /// The API's own sentence: the body's `detail` when that is a string with
+    /// something other than whitespace in it, else the `detail` inside a
+    /// `detail` that is itself an object. The whole string exactly as sent --
+    /// never trimmed, collapsed or shortened, unlike `message`. Nil when there
+    /// is none, including for a validation error, whose `detail` is a list.
+    public let detail: String?
+    /// The whole response body, parsed, when it is a JSON object; nil for an
+    /// empty body, a body that is not JSON, or JSON that is not an object.
+    /// Whole numbers stay `.integer`.
+    public let problem: JSONObject?
 
-    public init(message: String, statusCode: Int? = nil, body: String? = nil, errorCode: String? = nil) {
+    /// Values passed here win over what `body` says. Given `body` and no
+    /// `problem`, `problem` is `body` parsed; `errorCode` and `detail` are then
+    /// read from `problem`.
+    public init(
+        message: String,
+        statusCode: Int? = nil,
+        body: String? = nil,
+        errorCode: String? = nil,
+        detail: String? = nil,
+        problem: JSONObject? = nil
+    ) {
+        self.init(
+            message: message,
+            statusCode: statusCode,
+            body: body,
+            errorCode: errorCode,
+            detail: detail,
+            parsed: problem ?? Self.problem(from: body)
+        )
+    }
+
+    private init(
+        message: String,
+        statusCode: Int?,
+        body: String?,
+        errorCode: String?,
+        detail: String?,
+        parsed problem: JSONObject?
+    ) {
         self.message = message
         self.statusCode = statusCode
         self.body = body
-        self.errorCode = errorCode ?? ThalovantApiError.decodeErrorCode(from: body)
+        self.problem = problem
+        let read = Self.problemFields(problem)
+        self.errorCode = errorCode ?? read.code
+        self.detail = detail ?? read.detail
     }
 
     public var description: String { message }
     public var errorDescription: String? { message }
 
-    static func decodeErrorCode(from body: String?) -> String? {
-        guard let body, let object = try? ThalovantJSON.decodeObject(body) else { return nil }
-        if let code = object["code"]?.stringValue { return code }
-        if let code = object["detail"]?["code"]?.stringValue { return code }
-        return nil
+    /// The body as a JSON object, decoded as UTF-8 whatever the response's
+    /// Content-Type said; nil when it is not one.
+    static func problem(from body: String?) -> JSONObject? {
+        guard let body else { return nil }
+        return try? ThalovantJSON.decodeObject(body)
     }
 
-    /// Builds the error for a non-2xx control API response. The human-facing
-    /// `message` — and therefore `description`/`errorDescription`, which a
-    /// SwiftUI alert renders — carries only the status and a short, single-line
-    /// server detail, never the full raw body. A raw body can echo submitted
-    /// secrets (`POST /v1/clients` is sent apiKey/password/cryptoKey, and
-    /// auth/token and device/token carry credentials). The complete body is
-    /// still retained in `body` for programmatic `errorCode` decoding.
+    /// The `code` and `detail` of an API error body.
+    ///
+    /// Read from the body's own members first. When `detail` is itself an
+    /// object, it is FastAPI's envelope around a structured refusal -- what the
+    /// API sends when its Problem+JSON handler has not lifted that object's
+    /// members to the top -- so the code and the sentence are read from inside
+    /// it. Nothing is trimmed or shortened.
+    static func problemFields(_ problem: JSONObject?) -> (code: String?, detail: String?) {
+        guard let problem else { return (nil, nil) }
+        let nested = problem["detail"]?.objectValue ?? [:]
+        let code = problemText(problem["code"]) ?? problemText(nested["code"])
+        let detail = problemText(problem["detail"]) ?? problemText(nested["detail"])
+        return (code, detail)
+    }
+
+    /// A string with something other than whitespace in it, exactly as sent;
+    /// anything else is absent.
+    private static func problemText(_ value: JSONValue?) -> String? {
+        guard let text = value?.stringValue, text.contains(where: { !$0.isWhitespace }) else { return nil }
+        return text
+    }
+
+    /// Builds the error for a non-2xx control API response, parsing the body
+    /// once. The human-facing `message` — and therefore
+    /// `description`/`errorDescription`, which a SwiftUI alert renders —
+    /// carries only the status and a short, single-line server detail, never
+    /// the full raw body. A raw body can echo submitted secrets
+    /// (`POST /v1/clients` is sent apiKey/password/cryptoKey, and auth/token
+    /// and device/token carry credentials). The complete body is still
+    /// retained in `body`, and parsed in `problem`, with `errorCode` and the
+    /// whole `detail` read from it.
     static func httpFailure(statusCode: Int, body: String) -> ThalovantApiError {
-        let detail = serverErrorDetail(from: body)
-        let message = detail.isEmpty
+        let problem = Self.problem(from: body)
+        let summary = serverErrorDetail(problem)
+        let message = summary.isEmpty
             ? "Thalovant API request failed with HTTP \(statusCode)."
-            : "Thalovant API request failed with HTTP \(statusCode): \(detail)"
-        return ThalovantApiError(message: message, statusCode: statusCode, body: body)
+            : "Thalovant API request failed with HTTP \(statusCode): \(summary)"
+        return ThalovantApiError(
+            message: message,
+            statusCode: statusCode,
+            body: body,
+            errorCode: nil,
+            detail: nil,
+            parsed: problem
+        )
     }
 }
 
@@ -52,12 +147,15 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
 /// a validation error's `input`) can never reach `message`, `description`, or
 /// `errorDescription`. A non-JSON body is retained only on
 /// `ThalovantApiError.body`, never echoed into ordinary exception messages.
-func serverErrorDetail(from body: String) -> String {
-    guard let object = try? ThalovantJSON.decodeObject(body) else {
+func serverErrorDetail(_ object: JSONObject?) -> String {
+    guard let object else {
         return ""
     }
     var parts: [String] = []
-    if let code = ThalovantApiError.decodeErrorCode(from: body) {
+    // The message's own reading of the code, unchanged: any string at the top,
+    // else `detail.code`. `errorCode` is stricter (see `problemFields`); the
+    // display line is kept exactly as it was.
+    if let code = object["code"]?.stringValue ?? object["detail"]?["code"]?.stringValue {
         parts.append(code)
     }
     if let message = allowlistedServerMessage(object) {

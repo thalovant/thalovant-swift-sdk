@@ -1,2 +1,2 @@
 // Release metadata is separate from behavior covered by the SDK contract.
-public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.8.1"
+public let defaultThalovantUserAgent = "ThalovantSwiftSDK/0.9.0"
