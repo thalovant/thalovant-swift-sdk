@@ -178,6 +178,37 @@ expand the echoed `scopes`. A denied request throws
 `ThalovantDeviceLoginError.expired`, and giving up after `timeout` seconds
 (900 by default) throws `ThalovantTimeoutError`.
 
+### One step at a time
+
+A caller that runs its own loop -- a setup screen that shows the code and
+polls on its own schedule -- takes the same flow in steps.
+`beginDeviceLogin(scopes:clientName:)` returns the grant to show;
+`pollDeviceLogin(_:)` asks once. A sign-in nobody has approved yet throws
+`ThalovantApiError` of kind `.deviceLoginPending(interval:)`, whose interval
+is already five seconds longer for every `slow_down` the API sent for that
+code; `.deviceLoginExpired` and `.deviceLoginDenied` end it. On approval the
+token is stored as `accessToken`, and its id as `tokenId`.
+
+```swift
+let grant = try await api.beginDeviceLogin(scopes: homeAssistantScopes, clientName: "Home Assistant")
+show(grant.verificationUriComplete ?? grant.verificationUri, grant.userCode)
+var token: DeviceLoginResult?
+while token == nil {
+    do {
+        token = try await api.pollDeviceLogin(grant)
+    } catch let error as ThalovantApiError {
+        guard case .deviceLoginPending(let interval) = error.kind else { throw error }
+        try await Task.sleep(nanoseconds: UInt64(interval * 1_000_000_000))
+    }
+}
+// Later, when the link is removed: a token may always revoke itself.
+try await api.revokeApiToken()
+```
+
+`homeAssistantScopes` (`hubs:read`, `clients:read`, `clients:write`) is what a
+Home Assistant link needs, and all a Free plan can approve. Neither the device
+code nor the token ever appears in an error's message.
+
 ## Use a Pre-Made API Token
 
 Construct the control plane with an existing API token (for example one issued
@@ -339,6 +370,75 @@ returns an empty `data` list with a pending `source`
 (`ovos-runtime-operator-pending`) rather than failing —
 `getHubRuntimeCapabilities` is the one route here that can answer HTTP 409 in
 that case.
+
+## Link Home Assistant
+
+A home controller links to a hub as a connection of its own kind, and the hub
+then asks it things: a home skill sends `thalovant.home.request` with what was
+said, and the link answers every one with `thalovant.home.response`.
+
+```swift
+// A connection of kind home_assistant; the API must say it made one.
+let result = try await api.createClientIdentity(
+    hubId: hubId,
+    options: CreateClientIdentityOptions(name: "Home Assistant", connectionType: homeAssistantConnectionType)
+)
+// About ninety seconds while the platform carries it to its hub.
+try await api.waitForAdmission(result)
+
+let link = HubSession(identity: result.identity)
+try link.answerHomeRequests { request in
+    // Hand it to your conversation agent.
+    let said = try await assist(request.utterance, language: request.lang)
+    return HomeAnswer(speech: said.speech, responseType: said.isQuestion ? .queryAnswer : .actionDone)
+}
+Task { for await up in link.stateChanges() { print(up ? "linked" : "reconnecting") } }
+try await link.run()  // until link.close()
+```
+
+What each step can refuse, all of them `ThalovantApiError` with the status,
+`errorCode`, `detail` and `problem` the API sent, told apart by `kind`:
+
+- `.unsupportedConnectionType` -- the API does not know the kind (a 422 about
+  `connection_type`), or made an ordinary connection instead, which the SDK
+  deleted before throwing;
+- `.plan` -- a 402, or a 403 `plan_limit`;
+- `.alreadyLinked(clientId:)` -- the hub already has its one Home Assistant
+  link, and `clientId` names it when the API said which;
+- `.auth` -- a 401, a 423 or a 403 `Insufficient scopes`: sign in again.
+
+`waitForAdmission` returns once the operation is `ready`, and at once when
+there is none or the API no longer tracks it; a 5xx is ridden out. It throws
+`ThalovantAdmissionFailedError` with the operation's `errorCode` when the
+platform gave up, and `ThalovantAdmissionTimeoutError` when the wait (180
+seconds by default) runs out first. That one is both a connection error and a
+timeout, since the connection may still be admitted: it matches `catch let
+error as any ThalovantConnectionFailure` and `catch let error as any
+ThalovantTimeoutFailure` alike. An operation link on another origin than the
+API's is never fetched.
+
+`deleteClient(_:etag:)` removes a connection: without an etag it reads one
+first, a 412 reads it again and retries once, and a 404 counts as deleted.
+
+The answer is always sent, within the hub's ten seconds. A handler has nine
+by default (`timeout:`); one that throws is answered `failed_to_handle`, one
+too slow `timeout`, and one outside the contract's codes `unknown` -- each with
+empty speech, so the hub says its own sentence for the code in the device's
+language. `speech` goes out as plain text: markup removed, entities decoded,
+whitespace collapsed (`plainSpeech`). The response is a reply
+(`reply(to:type:data:context:)`, built with `replyContext`): the request's
+context, with `source` and `destination` turned round. `homeResponse(to:answer:)`
+builds the payload for a caller that sends it itself; `ThalovantClient` has
+`answerHomeRequests` too.
+
+`run()` keeps the link by policy: after a failed attempt it waits 10 seconds,
+doubling to 120; it notices a drop as it happens, and looks at a held link
+every 60 seconds. A hub that does not know a connection's key says so only by
+closing right after the handshake, so a link closed within 0.75 seconds
+without a status, or with 1000 or 1008, was refused. A new connection is
+refused until its hub admits it, so refusals are retried for 600 seconds
+before `run()` throws `ThalovantHubRefusedError`. Every attempt goes to
+`debugLog`, when you pass one, and nowhere else.
 
 ## Operations
 
@@ -584,10 +684,22 @@ let selected = selectDataPlaneEndpoint(
   the decoded `errorCode`, the API's whole `detail` sentence and the parsed
   `problem` body where the API provides them (see
   [Reading An API Error](#reading-an-api-error)).
-- `ThalovantDeviceLoginError` — the browser device sign-in was `.denied` or
+  Its `kind` tells refusals apart: `.auth`, `.plan`,
+  `.alreadyLinked(clientId:)`, `.unsupportedConnectionType`, and a device
+  sign-in's `.deviceLoginPending(interval:)`, `.deviceLoginExpired` and
+  `.deviceLoginDenied`; `.other` for the rest. New kinds may be added, so
+  switch with a `default`.
+- `ThalovantDeviceLoginError` — `loginWithBrowser`'s sign-in was `.denied` or
   the user code `.expired` before approval.
 - `ThalovantConnectionError` / `ThalovantTimeoutError` /
   `ThalovantRuntimeError` — data-plane connection, deadline, and hub failures.
+- `ThalovantHubRefusedError` — the hub turned the connection's credentials
+  away (`HubSession.connect()` and `run()`).
+- `ThalovantAdmissionFailedError` / `ThalovantAdmissionTimeoutError` — a new
+  connection was not admitted (`waitForAdmission`).
+- `ThalovantConnectionFailure` / `ThalovantTimeoutFailure` — protocols for
+  matching every connection error, or every timeout, whichever type it is:
+  the SDK's errors are value types, and the admission timeout is both.
 - `ThalovantPolicyDeniedError` — the hub refused a message type this
   connection may not publish (`hive.policy.denied`), with `deniedType`,
   `code`, `reason`, and the `allowed` list; thrown at once by the intent
@@ -802,7 +914,12 @@ when its owner shuts down; close waits for admitted operations and is terminal.
 
 Background connection attempts back off for 10, 20, 40, 80, then 120 seconds.
 Foreground calls can try immediately. Your application owns probe scheduling:
-use the reported probe delay (60 seconds while held, 5 seconds while down).
+use the reported probe delay (60 seconds while held, 5 seconds while down) --
+or call `run()` and let the session keep the link itself, with
+`stateChanges()` saying when it comes up and goes down (see
+[Link Home Assistant](#link-home-assistant)). `reply(to:type:data:context:)`
+answers the hub on the live link at once, even while an `ask` holds the
+session: a skill that asks the device something mid-turn is waiting on it.
 The SDK never replays an admitted Ask or Emit after a lost response, because an
 Ask can trigger an action. A request timeout applies to the underlying operation;
 waiting for session admission and your connection factory are separate budgets.

@@ -5,6 +5,13 @@ import FoundationNetworking
 
 public let defaultControlAPIURL = "https://api.thalovant.com"
 
+/// The scopes a Home Assistant link asks for in a device sign-in, and all a
+/// Free plan can approve.
+public let homeAssistantScopes: [String] = ["hubs:read", "clients:read", "clients:write"]
+
+/// `spec.connection_type` of a Home Assistant link.
+public let homeAssistantConnectionType = "home_assistant"
+
 /// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {
     public var range: String?
@@ -58,6 +65,11 @@ public struct CreateClientIdentityOptions: Sendable {
     public var active: Bool
     public var preferredProtocols: [HubProtocol]?
     public var idempotencyKey: String?
+    /// The kind of connection to create (`voice_satellite`, `web_chat`,
+    /// `developer`, `embedded`, `home_assistant`, ...), sent as
+    /// `spec.connection_type`; the kind decides what the connection may send
+    /// and receive. Nil leaves the choice to the API, as before.
+    public var connectionType: String?
 
     public init(
         name: String,
@@ -66,7 +78,8 @@ public struct CreateClientIdentityOptions: Sendable {
         ownerId: String? = nil,
         active: Bool = true,
         preferredProtocols: [HubProtocol]? = nil,
-        idempotencyKey: String? = nil
+        idempotencyKey: String? = nil,
+        connectionType: String? = nil
     ) {
         self.name = name
         self.siteId = siteId
@@ -75,6 +88,7 @@ public struct CreateClientIdentityOptions: Sendable {
         self.active = active
         self.preferredProtocols = preferredProtocols
         self.idempotencyKey = idempotencyKey
+        self.connectionType = connectionType
     }
 }
 
@@ -87,6 +101,23 @@ public struct BootstrapIdentityResult {
     public let endpoint: SelectedHubEndpoint?
 
     public var selectedProtocol: HubProtocol? { endpoint?.hubProtocol }
+
+    /// The new connection's id.
+    public var clientId: String? { client["id"]?.stringValue }
+
+    /// The connection type the API recorded for the connection.
+    public var connectionType: String? { client["spec"]?["connection_type"]?.stringValue }
+
+    /// The operation that carries the new connection to its hub, when the API
+    /// returned one: a hub admits a connection about ninety seconds after it
+    /// is created. Nil too for an operation in a status this SDK does not
+    /// know yet; `ThalovantControlPlane.waitForAdmission(_:)` follows the
+    /// answer's operation either way.
+    public var operation: OperationResource? {
+        guard let value = client["operation"], value.objectValue != nil,
+              let data = try? JSONEncoder().encode(value) else { return nil }
+        return try? JSONDecoder().decode(OperationResource.self, from: data)
+    }
 
     public func asJSON(includeSecrets: Bool = false) -> JSONObject {
         // The `client` resource (the `POST /v1/clients` response) carries the
@@ -111,9 +142,30 @@ public struct BootstrapIdentityResult {
 public final class ThalovantControlPlane {
     public let apiURL: String
     public var accessToken: String?
+    /// The id of the API token in `accessToken`, when a device sign-in minted
+    /// it: what `revokeApiToken()` revokes by default. Set it beside a stored
+    /// `accessToken` to revoke that token later.
+    public var tokenId: String?
     public let userAgent: String
     let session: URLSession
     private let hasCustomTrustDelegate: Bool
+    /// Each device code's poll interval, lengthened by every `slow_down`.
+    private let deviceIntervalLock = NSLock()
+    private var deviceIntervals: [String: TimeInterval] = [:]
+
+    /// The interval to wait between polls of `deviceCode`.
+    func deviceInterval(_ deviceCode: String) -> TimeInterval? {
+        deviceIntervalLock.locked { deviceIntervals[deviceCode] }
+    }
+
+    /// Records `interval` for `deviceCode`, or forgets it; `onlyIfUnset`
+    /// keeps a lengthened interval a caller's stale copy would shorten.
+    func setDeviceInterval(_ deviceCode: String, _ interval: TimeInterval?, onlyIfUnset: Bool = false) {
+        deviceIntervalLock.locked {
+            if onlyIfUnset, deviceIntervals[deviceCode] != nil { return }
+            deviceIntervals[deviceCode] = interval
+        }
+    }
 
     public init(
         apiURL: String = defaultControlAPIURL,
@@ -276,11 +328,23 @@ public final class ThalovantControlPlane {
     /// Provisions a client identity: `GET /v1/hubs/{id}` followed by
     /// `POST /v1/clients` with an `Idempotency-Key` header, parsing the
     /// returned `initial_identify` credentials.
+    ///
+    /// With `options.connectionType` the connection is created of that kind,
+    /// and the API has to say it is: a 422 about the field, or a created
+    /// connection whose type came back different, throws `ThalovantApiError`
+    /// of kind `.unsupportedConnectionType` -- after deleting that connection,
+    /// which would otherwise be an ordinary satellite nobody asked for. A plan
+    /// that does not allow it is `.plan`; a hub that already holds the one link
+    /// of its kind, `.alreadyLinked(clientId:)`; a token that cannot do it,
+    /// `.auth`. The result's `operation` tracks the hub admitting the
+    /// connection, about ninety seconds; `waitForAdmission(_:)` waits for it.
     public func createClientIdentity(hubId: String, options: CreateClientIdentityOptions) async throws -> BootstrapIdentityResult {
         let hub = try await getHub(hubId)
         return try await createClientIdentity(hub: hub, options: options)
     }
 
+    /// `createClientIdentity(hubId:options:)` for a hub resource already in
+    /// hand: no `GET /v1/hubs/{id}` first.
     public func createClientIdentity(hub: JSONObject, options: CreateClientIdentityOptions) async throws -> BootstrapIdentityResult {
         guard let hubId = hub["id"]?.stringValue, !hubId.isEmpty else {
             throw ThalovantApiError(message: "Hub resource is missing id.")
@@ -291,6 +355,9 @@ public final class ThalovantControlPlane {
         let cryptoKey = newSecret()
         var spec = options.spec ?? [:]
         spec["version"] = .string(optionalString(spec["version"]) ?? "1")
+        if let connectionType = options.connectionType {
+            spec["connection_type"] = .string(connectionType)
+        }
         spec["apiKey"] = .string(apiKey)
         spec["password"] = .string(password)
         spec["cryptoKey"] = .string(cryptoKey)
@@ -305,7 +372,21 @@ public final class ThalovantControlPlane {
             payload["owner_id"] = .string(ownerId)
         }
 
-        let client = try await createClient(payload, idempotencyKey: options.idempotencyKey)
+        let client: JSONObject
+        do {
+            client = try await createClient(payload, idempotencyKey: options.idempotencyKey)
+        } catch let error as ThalovantApiError {
+            if let connectionType = options.connectionType, error.refusesConnectionType {
+                throw error.reclassified(
+                    as: .unsupportedConnectionType,
+                    message: "The Thalovant API cannot create a '\(connectionType)' connection yet."
+                )
+            }
+            throw error
+        }
+        if let connectionType = options.connectionType {
+            try await requireConnectionType(client, connectionType)
+        }
         let protocols = HubProtocolSettings.from(hub)
         let endpoints = HubDataPlaneEndpoints.fromHub(hub)
         let endpoint = selectDataPlaneEndpoint(

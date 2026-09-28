@@ -109,6 +109,49 @@ final class AsyncGate: @unchecked Sendable {
     }
 }
 
+/// The life of one established connection: it ends once, and says how.
+///
+/// A hub that does not know a client's static key says so only by closing
+/// right after the handshake, so a session that just connected waits a moment
+/// on `ended` and asks `refused` to tell a verdict on the credentials from a
+/// dropped network.
+final class LinkLifetime: @unchecked Sendable {
+    /// The close codes a hub turns credentials away with: 1005 -- a close with
+    /// no status, which is what a hub sends for an access key it does not
+    /// know and after a Noise abort -- 1000, and 1008 for a malformed
+    /// authorization. Anything else (1001, 1011, 1013, a socket that dropped
+    /// without a close) is the hub's trouble or the network's.
+    static let refusalCloseCodes: Set<Int> = [1000, 1005, 1008]
+
+    /// Opens when the connection ends.
+    let ended = AsyncGate()
+    private let lock = NSLock()
+    private var finished = false
+    private var code: Int?
+
+    /// The WebSocket close code, when the hub sent one.
+    var closeCode: Int? { lock.locked { code } }
+    /// Whether the hub closed the connection the way it refuses credentials.
+    var refused: Bool { lock.locked { code.map(Self.refusalCloseCodes.contains) ?? false } }
+
+    /// Ends the connection. The first call decides; a close code learnt later
+    /// -- the delegate can report it after the read already failed -- fills in
+    /// one that was not known.
+    func end(closeCode: Int?) {
+        let first = lock.locked { () -> Bool in
+            let known = closeCode.flatMap { $0 == 0 ? nil : $0 }
+            if finished {
+                if code == nil { code = known }
+                return false
+            }
+            finished = true
+            code = known
+            return true
+        }
+        if first { ended.open() }
+    }
+}
+
 /// The slice of a data-plane transport that `ThalovantClient` drives: connect,
 /// emit a bus event, observe bus events. `HiveMindWSSTransport` is the
 /// production implementation; the test suite substitutes an in-memory hub so
@@ -126,9 +169,13 @@ protocol HiveMindBusTransport: AnyObject, Sendable {
     func addBusHandler(_ handler: @escaping (JSONObject) -> Void) -> UUID
     func removeBusHandler(_ id: UUID)
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws
+    /// The most recent established connection, ended or not; nil before the
+    /// first handshake, and for a transport that cannot tell.
+    var lifetime: LinkLifetime? { get }
 }
 
 extension HiveMindBusTransport {
+    var lifetime: LinkLifetime? { nil }
     var connected: Bool { false }
     var handshakeComplete: Bool { connected }
     var connectionInfo: ThalovantConnectionInfo { ThalovantConnectionInfo(phase: connected && handshakeComplete ? "ready" : "idle") }
@@ -168,6 +215,17 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     private var handshakeGate = AsyncGate()
     private var busHandlers: [UUID: (JSONObject) -> Void] = [:]
     private var messageHandlers: [UUID: (HiveMessage) -> Void] = [:]
+    private var currentLifetime: LinkLifetime?
+    private var refusedUpgrade: Int?
+    /// The HTTP status of the last connect's WebSocket upgrade, when the hub
+    /// answered it 401 or 403; nil otherwise.
+    var refusedUpgradeStatus: Int? { lock.locked { refusedUpgrade } }
+    /// The socket that carried the last connection to end, and its lifetime:
+    /// the delegate can report a close code after the read already failed.
+    private weak var retiredSocket: URLSessionWebSocketTask?
+    private var retiredLifetime: LinkLifetime?
+
+    var lifetime: LinkLifetime? { lock.locked { currentLifetime } }
 
     public init(identity: ThalovantIdentity, userAgent: String = defaultThalovantUserAgent,
                 noiseStore: (any ThalovantNoiseStore)? = nil) {
@@ -263,6 +321,7 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             if let socket { return (socket, openGate, handshakeGate, false) }
             negotiator = NoiseNegotiator(identity: identity, store: noiseStore)
             writer = NoiseSocketWriter()
+            refusedUpgrade = nil
             openGate = AsyncGate(); handshakeGate = AsyncGate()
             handshakeCompleteFlag = false; lastErrorMessage = nil
             let delegate = WebSocketOpenDelegate(transport: self)
@@ -292,13 +351,19 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             // Only the task that created the attempt owns its teardown. A
             // joining caller's timeout/cancellation must not abort other users.
             if startsAttempt { handleSocketFailure(error, on: socket) }
+            // An upgrade answered 401 or 403 is a verdict on the credentials,
+            // not a network that may come back. Kept beside the error, whose
+            // type callers already match, for a session to read.
+            if let status = (socket.response as? HTTPURLResponse)?.statusCode, status == 401 || status == 403 {
+                lock.locked { refusedUpgrade = status }
+            }
             throw error
         }
     }
 
     public func disconnect() async {
-        let (socket, session, open, handshake) = lock.locked { () -> (URLSessionWebSocketTask?, URLSession?, AsyncGate, AsyncGate) in
-            let pair = (self.socket, self.session, openGate, handshakeGate)
+        let (socket, session, open, handshake, ending) = lock.locked { () -> (URLSessionWebSocketTask?, URLSession?, AsyncGate, AsyncGate, LinkLifetime?) in
+            let pair = (self.socket, self.session, openGate, handshakeGate, currentLifetime)
             self.socket = nil; self.session = nil
             connectedFlag = false; handshakeCompleteFlag = false
             negotiator?.connection?.close(); negotiator = nil
@@ -306,6 +371,8 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
         }
         let error = noiseError("HiveMind WSS disconnected.")
         open.fail(error); handshake.fail(error)
+        // Closed from this side: an end, never a refusal.
+        ending?.end(closeCode: nil)
         socket?.cancel(with: .normalClosure, reason: nil)
         session?.invalidateAndCancel()
     }
@@ -379,6 +446,7 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                             self.lock.locked {
                                 guard self.socket === socket else { return }
                                 self.handshakeCompleteFlag = true
+                                self.currentLifetime = LinkLifetime()
                                 self.handshakeGate.open()
                             }
                         }
@@ -404,7 +472,9 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                         throw noiseError("Unknown WebSocket frame type.")
                     }
                 } catch {
-                    self.handleSocketFailure(error, on: socket)
+                    // The close code is there when the hub closed the socket;
+                    // a local failure leaves it invalid (0), which is no code.
+                    self.handleSocketFailure(error, on: socket, closeCode: socket.closeCode.rawValue)
                     return
                 }
             }
@@ -415,25 +485,38 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
         lock.locked { if self.socket === socket { openGate.open() } }
     }
 
-    func handleSocketClosed(_ error: ThalovantConnectionError, on socket: URLSessionWebSocketTask) {
-        handleSocketFailure(error, on: socket)
+    func handleSocketClosed(_ error: ThalovantConnectionError, closeCode: Int? = nil, on socket: URLSessionWebSocketTask) {
+        let late = lock.locked { () -> LinkLifetime? in
+            guard self.socket !== socket, retiredSocket === socket else { return nil }
+            return retiredLifetime
+        }
+        if let late {
+            late.end(closeCode: closeCode)
+            return
+        }
+        handleSocketFailure(error, on: socket, closeCode: closeCode)
     }
 
-    private func handleSocketFailure(_ error: Error, on socket: URLSessionWebSocketTask) {
+    private func handleSocketFailure(_ error: Error, on socket: URLSessionWebSocketTask, closeCode: Int? = nil) {
         let detail = safeTransportErrorMessage(error)
         let explanation = detail.contains("WebSockets not supported by libcurl")
             ? "This Linux FoundationNetworking/libcurl build has no WebSocket support. Use a Swift distribution compiled with WebSocket support; Noise negotiation has not started."
             : "HiveMind WSS connection failed: \(detail)"
         let failure = noiseError(explanation)
-        let detached = lock.locked { () -> (URLSession?, AsyncGate, AsyncGate)? in
+        let detached = lock.locked { () -> (URLSession?, AsyncGate, AsyncGate, LinkLifetime?)? in
             guard self.socket === socket else { return nil }
-            let old = (session, openGate, handshakeGate)
+            // Only an established connection has a life to end; a failure
+            // during the handshake leaves the previous one as it was.
+            let ending = handshakeCompleteFlag ? currentLifetime : nil
+            let old = (session, openGate, handshakeGate, ending)
             self.socket = nil; session = nil; connectedFlag = false; handshakeCompleteFlag = false
             lastErrorMessage = failure.message
             negotiator?.connection?.close(); negotiator = nil
+            retiredSocket = socket; retiredLifetime = ending
             return old
         }
-        guard let (session, open, handshake) = detached else { return }
+        guard let (session, open, handshake, ending) = detached else { return }
+        ending?.end(closeCode: closeCode)
         open.fail(failure); handshake.fail(failure)
         socket.cancel(with: .goingAway, reason: nil); session?.invalidateAndCancel()
     }
@@ -577,7 +660,8 @@ private final class WebSocketOpenDelegate: NSObject, URLSessionWebSocketDelegate
     ) {
         let suffix = reason.flatMap { String(data: $0, encoding: .utf8) }.map { ": \($0)" } ?? ""
         transport?.handleSocketClosed(
-            ThalovantConnectionError("HiveMind WSS closed (\(closeCode.rawValue))\(suffix)."), on: webSocketTask
+            ThalovantConnectionError("HiveMind WSS closed (\(closeCode.rawValue))\(suffix)."),
+            closeCode: closeCode.rawValue, on: webSocketTask
         )
     }
 }
