@@ -195,28 +195,25 @@ extension ThalovantControlPlane {
     /// Revoking another token by id is not: a 404 for one the API does not
     /// know throws as usual.
     public func revokeApiToken(tokenId: String? = nil) async throws {
-        guard let target = tokenId.flatMap({ $0.isEmpty ? nil : $0 }) ?? self.tokenId, !target.isEmpty else {
+        // The credentials this revoke is about, read whole. A sign-in that
+        // completes while the DELETE is on its way installs others, which are
+        // not forgotten.
+        let held = credentialSnapshot()
+        guard let target = tokenId.flatMap({ $0.isEmpty ? nil : $0 }) ?? held.tokenId, !target.isEmpty else {
             // Already revoked and forgotten: revoking again changes nothing.
-            if revokedOwnToken && accessToken == nil { return }
+            if held.revokedOwn && held.accessToken == nil { return }
             throw ThalovantApiError(
                 message: "No API token id to revoke: pass tokenId, or sign in with a device login first."
             )
         }
-        let own = target == self.tokenId
-        // The credentials this revoke is about. A sign-in that completes while
-        // the DELETE is on its way installs others, which are not forgotten.
-        let revoking = accessToken
+        let own = target == held.tokenId
         do {
             _ = try await requestData("DELETE", "/v1/auth/api-tokens/\(encodePathComponent(target))")
         } catch let error as ThalovantApiError where own && error.statusCode == 401 {
             // The token in use could not authenticate its own revoke: it is
             // revoked or expired already.
         }
-        if own, self.tokenId == target, accessToken == revoking {
-            accessToken = nil
-            self.tokenId = nil
-            revokedOwnToken = true
-        }
+        if own { forgetRevoked(held) }
     }
 
     /// One `POST /v1/auth/device/token`: the token, or why there is none yet.

@@ -43,8 +43,7 @@ final class AdmissionVectorTests: XCTestCase {
                 ThalovantControlPlane(
                     apiURL: "http://127.0.0.1:\($0.port)", accessToken: "synthetic-token",
                     session: URLSession(configuration: .ephemeral))
-            } ?? ThalovantControlPlane(
-                apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
+            } ?? ScriptedApi.controlPlane(accessToken: "synthetic-token")
             var operation: OperationResource?
             if let resource = call["operation"], resource.objectValue != nil {
                 operation = try JSONDecoder().decode(OperationResource.self, from: JSONEncoder().encode(placed(resource)))
@@ -121,8 +120,7 @@ final class AdmissionVectorTests: XCTestCase {
             ]),
         ]
         ScriptedApi.serve([create] + exchanges)
-        let api = ThalovantControlPlane(
-            apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
+        let api = ScriptedApi.controlPlane(accessToken: "synthetic-token")
         let result = try await api.createClientIdentity(
             hub: ["id": "hub-1", "domain": "hub.example"], options: CreateClientIdentityOptions(name: "Home Assistant"))
         XCTAssertEqual(result.operation?.id, "0b9e7c1a-2f44-4d5e-8a3b-6c1d2e9f7a50")

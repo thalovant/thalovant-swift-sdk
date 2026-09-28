@@ -27,7 +27,7 @@ final class DeviceLoginVectorTests: XCTestCase {
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
             let exchanges = (row["exchanges"]?.arrayValue ?? []).compactMap(\.objectValue)
             ScriptedApi.serve(exchanges)
-            let api = ThalovantControlPlane(apiURL: ScriptedApi.apiURL, session: ScriptedApi.session())
+            let api = ScriptedApi.controlPlane()
             var produced: [JSONValue] = []
             if call["op"]?.stringValue == "begin" {
                 do {
@@ -214,6 +214,30 @@ final class DeviceLoginVectorTests: XCTestCase {
         try await revoke.value
         XCTAssertEqual(api.accessToken, "new-token")
         XCTAssertEqual(api.tokenId, "token-2")
+    }
+
+    /// The same race on two threads: a revoke's check-and-clear against a
+    /// sign-in's write. Whichever lands first, the sign-in's token and id are
+    /// what is left, together -- never one of them, never neither.
+    func testARevokeOnAnotherThreadCannotTearASignIn() throws {
+        let api = ThalovantControlPlane(apiURL: "https://api.example.com", session: StubURLProtocol.makeSession())
+        let signIn: JSONObject = ["access_token": "new-token", "token_id": "token-2"]
+        var torn: [ThalovantControlPlane.Credentials] = []
+        for _ in 0..<20_000 {
+            api.accessToken = "old-token"
+            api.tokenId = "token-1"
+            let revoked = api.credentialSnapshot()
+            DispatchQueue.concurrentPerform(iterations: 2) { lane in
+                if lane == 0 {
+                    _ = try? api.keepSignIn(signIn)
+                } else {
+                    api.forgetRevoked(revoked)
+                }
+            }
+            let left = api.credentialSnapshot()
+            if left != .init(accessToken: "new-token", tokenId: "token-2") { torn.append(left) }
+        }
+        XCTAssertEqual(torn.count, 0, "a revoke tore a sign-in: \(torn.prefix(3))")
     }
 
     func testRevokingTheTokenInUseIsIdempotentButAnotherTokensRefusalIsNot() async throws {

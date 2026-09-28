@@ -23,8 +23,7 @@ final class ConnectionKindsVectorTests: XCTestCase {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
             ScriptedApi.serve((row["exchanges"]?.arrayValue ?? []).compactMap(\.objectValue))
-            let api = ThalovantControlPlane(
-                apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
+            let api = ScriptedApi.controlPlane(accessToken: "synthetic-token")
             var produced: JSONObject
             if call["op"]?.stringValue == "create" {
                 do {

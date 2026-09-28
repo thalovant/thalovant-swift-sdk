@@ -141,16 +141,48 @@ public struct BootstrapIdentityResult {
 /// Client for the Thalovant control API (`https://api.thalovant.com`).
 public final class ThalovantControlPlane {
     public let apiURL: String
-    public var accessToken: String?
+    public var accessToken: String? {
+        get { credentialLock.locked { credentials.accessToken } }
+        set { credentialLock.locked { credentials.accessToken = newValue } }
+    }
     /// The id of the API token in `accessToken`, when a device sign-in minted
     /// it: what `revokeApiToken()` revokes by default. Set it beside a stored
     /// `accessToken` to revoke that token later. Every sign-in sets it from its
     /// own answer -- the id that came with the token, or nil for a session
     /// token -- so it never names a token signed in with before.
-    public var tokenId: String?
-    /// Whether the token signed in with was revoked and forgotten, so that
-    /// revoking it again is the no-op it should be.
-    var revokedOwnToken = false
+    public var tokenId: String? {
+        get { credentialLock.locked { credentials.tokenId } }
+        set { credentialLock.locked { credentials.tokenId = newValue } }
+    }
+
+    /// The token, its id and whether it was revoked and forgotten (so that
+    /// revoking it again is the no-op it should be): one value, read and
+    /// written whole under `credentialLock`. A sign-in installs its token and
+    /// id in one write, and a revoke's check-and-clear runs under the same
+    /// lock, so a revoke finishing on another thread cannot land between them.
+    struct Credentials: Equatable {
+        var accessToken: String?
+        var tokenId: String?
+        var revokedOwn = false
+    }
+    private let credentialLock = NSLock()
+    private var credentials: Credentials
+
+    /// The credentials as they are now, read whole.
+    func credentialSnapshot() -> Credentials {
+        credentialLock.locked { credentials }
+    }
+
+    /// Forgets the token a revoke was about, unless a sign-in replaced it
+    /// meanwhile. The check and the clear are one step under the lock; the
+    /// DELETE before it runs without it.
+    func forgetRevoked(_ revoked: Credentials) {
+        credentialLock.locked {
+            guard credentials.tokenId == revoked.tokenId,
+                  credentials.accessToken == revoked.accessToken else { return }
+            credentials = Credentials(accessToken: nil, tokenId: nil, revokedOwn: true)
+        }
+    }
     public let userAgent: String
     let session: URLSession
     private let hasCustomTrustDelegate: Bool
@@ -179,7 +211,7 @@ public final class ThalovantControlPlane {
         session: URLSession? = nil
     ) {
         self.apiURL = ThalovantControlPlane.normalizeControlAPIURL(apiURL)
-        self.accessToken = accessToken
+        self.credentials = Credentials(accessToken: accessToken)
         self.userAgent = userAgent
         self.hasCustomTrustDelegate = session?.delegate != nil
         self.session = URLSession(configuration: session?.configuration ?? .ephemeral,
@@ -233,9 +265,11 @@ public final class ThalovantControlPlane {
         guard let accessToken = token["access_token"]?.stringValue, !accessToken.isEmpty else {
             throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
         }
-        self.accessToken = accessToken
-        tokenId = token["token_id"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
-        revokedOwnToken = false
+        let tokenId = token["token_id"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+        // The token and its id in one write: never one without the other.
+        credentialLock.locked {
+            credentials = Credentials(accessToken: accessToken, tokenId: tokenId)
+        }
         return accessToken
     }
 

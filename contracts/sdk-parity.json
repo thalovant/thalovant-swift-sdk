@@ -2,7 +2,7 @@
   "capabilities": {
     "api-errors": {
       "implementation": {
-        "Sources/ThalovantSDK/ControlPlane.swift": "e2e060cada3a0863ea14322fb5bd3a8fd554aa2cdb1c9bf7f97a2617ec65585a",
+        "Sources/ThalovantSDK/ControlPlane.swift": "1aa06c83f7a201a4f7ff411079c2359c6fff3d94902a4ce699da7d3b2cff646a",
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc"
       },
       "reason": "ThalovantApiError.httpFailure in Sources/ThalovantSDK/Errors.swift, which every non-2xx answer ThalovantControlPlane.requestData receives goes through, parses the body once into problem, errorCode and the whole detail, and leaves the bounded message as it was. Run against the shared api-error vectors, each served through URLSession by a URLProtocol with its exact status, Content-Type and body and read back from getHub.",
@@ -41,16 +41,16 @@
     "connection-admission": {
       "implementation": {
         "Sources/ThalovantSDK/Connections.swift": "d18d64d9ded610ce7ce96a9c6081f08ae94ef401d7953c3435ec7cd882814025",
-        "Sources/ThalovantSDK/ControlPlane.swift": "e2e060cada3a0863ea14322fb5bd3a8fd554aa2cdb1c9bf7f97a2617ec65585a",
+        "Sources/ThalovantSDK/ControlPlane.swift": "1aa06c83f7a201a4f7ff411079c2359c6fff3d94902a4ce699da7d3b2cff646a",
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc",
         "Sources/ThalovantSDK/Operations.swift": "557598775ec13151c58cf3328ac15270de16f15c4f376226d843ad23447c789e"
       },
       "reason": "waitForAdmission in Sources/ThalovantSDK/Connections.swift: ready, 404 and no operation are admitted; a 5xx is ridden out, and a 429 for ThalovantApiError.retryAfterSeconds (body, then Retry-After, then RateLimit-Reset); every read is bounded by the deadline and every wait measured on the monotonic clock. failed and timed_out throw ThalovantAdmissionFailedError(errorCode:), any other refusal of the wait the same with the API's answer as apiError; 401/403 pass through as the .auth ThalovantApiError and an API out of reach as .unreachable. The deadline throws ThalovantAdmissionTimeoutError, which conforms to both ThalovantConnectionFailure and ThalovantTimeoutFailure -- Swift's errors are value types, so the two protocols are how it is both -- and ends 'it may still admit it later.'. A links.self on another origin (scheme, host, default-spelled port) is refused unfetched. Run against the shared connection-admission vectors over URLSession, with scripted headers and a real closed loopback port.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/AdmissionVectorTests.swift": "77a1cf3c0b031c2b0f71ac8bc8b5ddeca4ad0f72414999636fea4132a5c4a111",
+        "Tests/ThalovantSDKTests/AdmissionVectorTests.swift": "4780d02bd7c3e1b0f76c07455ba149640645207322fdf14ba63dfec5c29e00bc",
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3"
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "b883926adebb2dcc0a5a4969d0dceee860c4f4843aafbf4774fb9f977cee81f7"
       },
       "vectors": {
         "connection-admission-vectors.json": "Tests/ThalovantSDKTests/Fixtures/connection-admission-vectors.json"
@@ -59,15 +59,15 @@
     "connection-kinds": {
       "implementation": {
         "Sources/ThalovantSDK/Connections.swift": "d18d64d9ded610ce7ce96a9c6081f08ae94ef401d7953c3435ec7cd882814025",
-        "Sources/ThalovantSDK/ControlPlane.swift": "e2e060cada3a0863ea14322fb5bd3a8fd554aa2cdb1c9bf7f97a2617ec65585a",
+        "Sources/ThalovantSDK/ControlPlane.swift": "1aa06c83f7a201a4f7ff411079c2359c6fff3d94902a4ce699da7d3b2cff646a",
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc"
       },
       "reason": "CreateClientIdentityOptions(connectionType:) sends spec.connection_type; createClientIdentity in Sources/ThalovantSDK/ControlPlane.swift checks the echo and, through requireConnectionType in Sources/ThalovantSDK/Connections.swift, deletes a connection made of another kind before failing. Refusals are ThalovantApiError told apart by kind (.unsupportedConnectionType -- a 422 naming the field in its detail, code, or a validation error's loc or msg, never the echoed input -- .plan, .alreadyLinked(clientId:), .auth), read in Sources/ThalovantSDK/Errors.swift. deleteClient reads the etag first, retries once on 412 and counts 404 as deleted. Run against the shared connection-kinds vectors over URLSession.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
-        "Tests/ThalovantSDKTests/ConnectionKindsVectorTests.swift": "772f98ab56e1d8790c5cef3731012e6ebf46d8b692adfb3d8b596b796f67c2bf",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3"
+        "Tests/ThalovantSDKTests/ConnectionKindsVectorTests.swift": "734617e5778cfbdf36fbdea391507db066011114524fa1ce511ed00dffc228ac",
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "b883926adebb2dcc0a5a4969d0dceee860c4f4843aafbf4774fb9f977cee81f7"
       },
       "vectors": {
         "connection-kinds-vectors.json": "Tests/ThalovantSDKTests/Fixtures/connection-kinds-vectors.json"
@@ -75,7 +75,7 @@
     },
     "control": {
       "implementation": {
-        "Sources/ThalovantSDK/ControlPlane.swift": "e2e060cada3a0863ea14322fb5bd3a8fd554aa2cdb1c9bf7f97a2617ec65585a",
+        "Sources/ThalovantSDK/ControlPlane.swift": "1aa06c83f7a201a4f7ff411079c2359c6fff3d94902a4ce699da7d3b2cff646a",
         "Sources/ThalovantSDK/HubSkills.swift": "154f016c6cbbc3af232b237279dfbd315b8565fc55c742a08fea898f5df10192",
         "Sources/ThalovantSDK/Hubs.swift": "6c29e442b6ab2021e00f3f3371e1aff6d93d70bd6b12ad72e095911c31acfe4c",
         "Sources/ThalovantSDK/NativeSignIn.swift": "27bce649dd89659004e89ae9d2afec26806588665ab19076fe35eb412ad29c58"
@@ -106,8 +106,8 @@
     },
     "device-login": {
       "implementation": {
-        "Sources/ThalovantSDK/ControlPlane.swift": "e2e060cada3a0863ea14322fb5bd3a8fd554aa2cdb1c9bf7f97a2617ec65585a",
-        "Sources/ThalovantSDK/DeviceLogin.swift": "889c03b188be37149f3f40bdb65c3d7a8155b19d7cfe7c221498aac4235270eb",
+        "Sources/ThalovantSDK/ControlPlane.swift": "1aa06c83f7a201a4f7ff411079c2359c6fff3d94902a4ce699da7d3b2cff646a",
+        "Sources/ThalovantSDK/DeviceLogin.swift": "769526f95324f8a49715f5164b72b20975205c87f3ca00034a7879bd583be906",
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc",
         "Sources/ThalovantSDK/NativeSignIn.swift": "27bce649dd89659004e89ae9d2afec26806588665ab19076fe35eb412ad29c58"
       },
@@ -116,8 +116,8 @@
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
         "Tests/ThalovantSDKTests/DeviceLoginTests.swift": "9b59a782ea1b019bdae670c05c33334ca9f11c5783ffb5027865fad0250d3bb6",
-        "Tests/ThalovantSDKTests/DeviceLoginVectorTests.swift": "d5a64f93e88bab9d4e087aebf36249fd9984fd2110e6ca0673fc6f2e084db8b6",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3"
+        "Tests/ThalovantSDKTests/DeviceLoginVectorTests.swift": "8e409b2809a99b22ff379c0b67d8df1cb5c842d0d44c2289cea56434c1793aeb",
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "b883926adebb2dcc0a5a4969d0dceee860c4f4843aafbf4774fb9f977cee81f7"
       },
       "vectors": {
         "device-login-vectors.json": "Tests/ThalovantSDKTests/Fixtures/device-login-vectors.json"
@@ -136,7 +136,7 @@
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3",
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "b883926adebb2dcc0a5a4969d0dceee860c4f4843aafbf4774fb9f977cee81f7",
         "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "88b4f9a0b84991a7e489fd31a1565cce12a691c8a7317e4e4877a97153d174b4",
         "Tests/ThalovantSDKTests/HubSessionLinkTests.swift": "d2b112db7c4f0ca10336603cee428955b5f049b774a3ddb3818d1b136aae8e88",
         "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "699a88dc7f66b8b71cbfa57dc81502d8e595f326f0b93389a8c495430103495b"

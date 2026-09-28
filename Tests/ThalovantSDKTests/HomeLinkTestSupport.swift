@@ -25,6 +25,7 @@ final class ScriptedApi: URLProtocol {
     private static var index = 0
     private static var sentLines: [String] = []
     private static var mismatchLines: [String] = []
+    private static var generation = 0
 
     static let apiHost = "127.0.0.1"
     static let apiPort = 8765
@@ -37,7 +38,28 @@ final class ScriptedApi: URLProtocol {
             index = 0
             sentLines = []
             mismatchLines = []
+            generation += 1
         }
+    }
+
+    /// A control plane for the case being served. Its requests say which case
+    /// sent them, so one a finished case left in flight -- a read abandoned
+    /// when its wait ran out -- is turned away instead of taking the next
+    /// case's exchange.
+    static func controlPlane(accessToken: String? = nil) -> ThalovantControlPlane {
+        let tag = lock.locked { generation }
+        return ThalovantControlPlane(
+            apiURL: apiURL, accessToken: accessToken,
+            userAgent: "\(defaultThalovantUserAgent) \(casePrefix)\(tag)", session: session())
+    }
+
+    private static let casePrefix = "scripted-case/"
+
+    /// Whether a request came from a case other than the one being served.
+    private static func isStraggler(_ userAgent: String?) -> Bool {
+        guard let userAgent, let range = userAgent.range(of: casePrefix),
+              let tag = Int(userAgent[range.upperBound...]) else { return false }
+        return lock.locked { tag != generation }
     }
 
     /// What the SDK sent, in order: `METHOD path`, with ` If-Match=<etag>` when set.
@@ -57,6 +79,10 @@ final class ScriptedApi: URLProtocol {
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
 
     override func startLoading() {
+        if Self.isStraggler(request.value(forHTTPHeaderField: "User-Agent")) {
+            answer(status: 599, contentType: "application/json", body: "{}", headers: [:])
+            return
+        }
         let method = request.httpMethod ?? ""
         let path = request.url?.path ?? ""
         let ifMatch = request.value(forHTTPHeaderField: "If-Match")
