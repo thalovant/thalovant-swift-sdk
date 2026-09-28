@@ -46,8 +46,11 @@ final class HomeLinkVectorTests: XCTestCase {
                     hubTimeout: hubTimeout,
                     handler: handler(try XCTUnwrap(row["handler"]?.objectValue, name))
                 )
-                // Never past the hub's bound, whatever the handler or the transport did.
-                XCTAssertLessThanOrEqual(ProcessInfo.processInfo.systemUptime - started, hubTimeout + 0.1, name)
+                // Back soon after the hub's bound, whatever the handler or the
+                // transport did. The slack is a busy CI runner's scheduling, not
+                // the SDK's: a macOS runner woke 140 ms late once. That nothing
+                // went out after the bound is checked below, not timed.
+                XCTAssertLessThanOrEqual(ProcessInfo.processInfo.systemUptime - started, hubTimeout + 0.5, name)
                 var outcome: JSONObject = ["replied": .bool(sent != nil)]
                 if let sent {
                     XCTAssertEqual(fake.emitted.map(\.name), [HomeLink.responseMessageType], name)
@@ -127,7 +130,9 @@ final class HomeLinkVectorTests: XCTestCase {
             }
             return HomeAnswer(speech: "too late")
         }
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 0.5)
+        // Far less than the two seconds the handler holds on; the margin is for
+        // a busy runner.
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1.0)
         XCTAssertEqual(payload?["error_code"], .string("timeout"))
         XCTAssertEqual(payload?["speech"], .string(""))
         XCTAssertEqual(fake.emitted.count, 1)
@@ -210,6 +215,21 @@ final class HomeLinkVectorTests: XCTestCase {
         XCTAssertEqual(fake.emitted.count, 0, "a withdrawn reply never goes out")
     }
 
+    func testAWithdrawnReplyDoesNotWaitForASendThatIgnoresCancellation() async throws {
+        let replier = StubbornReplier()
+        let event = ThalovantEvent(name: HomeLink.requestMessageType, data: ["request_id": "w2"])
+        let started = ProcessInfo.processInfo.systemUptime
+        let sent = try await replier.answerHomeRequest(event, timeout: 0.05, hubTimeout: 0.3) { _ in
+            HomeAnswer(speech: "Done.")
+        }
+        let took = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertNil(sent, "not sent within the bound")
+        // The send holds on for two seconds whatever happens; the answer came
+        // back at the bound instead of waiting for it.
+        XCTAssertLessThan(took, 1.0)
+        XCTAssertGreaterThanOrEqual(took, 0.29)
+    }
+
     func testAReplyLaysItsContextOverTheRequestsBeforeTheSwap() async throws {
         let fake = LinkFake()
         let client = try fakeClient(fake)
@@ -235,5 +255,15 @@ final class HomeLinkVectorTests: XCTestCase {
             XCTAssertEqual(ConformanceRecord.pythonRepr(value), python)
         }
         XCTAssertEqual(ConformanceRecord.canonical(["t": .number(0.2), "n": .number(5)], fractions: true), #"{"n":5,"t":0.2}"#)
+    }
+}
+
+/// A transport whose send takes two seconds and ignores being cancelled, as a
+/// frame already being written does.
+private final class StubbornReplier: ThalovantReplying, @unchecked Sendable {
+    func reply(to event: ThalovantEvent, type: String, data: JSONObject, context: JSONObject) async throws {
+        await withCheckedContinuation { (resume: CheckedContinuation<Void, Never>) in
+            DispatchQueue.global().asyncAfter(deadline: .now() + 2) { resume.resume() }
+        }
     }
 }
