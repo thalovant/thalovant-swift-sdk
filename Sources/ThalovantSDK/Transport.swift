@@ -501,10 +501,14 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     }
 
     /// What a failed attempt means: a refusal and a changed hub key keep their
-    /// kind; an upgrade answered 401 or 403 is a refusal; a close during the
-    /// handshake is one when its code is (waiting a moment for a code learnt
-    /// late); anything else is what it was.
-    private func classify(_ error: Error, socket: any HiveSocket, attempt: LinkLifetime) async -> Error {
+    /// kind; an upgrade answered 401 or 403 is a refusal; a close is one when
+    /// its code is, during the handshake or within the settle window after it
+    /// (waiting a moment for a code learnt late); anything else is what it was.
+    ///
+    /// A hub can close the link after the handshake completed and before this
+    /// call returned -- it only has to read this side's HELLO first -- so a
+    /// close is read whichever side of the handshake's end it fell on.
+    func classify(_ error: Error, socket: any HiveSocket, attempt: LinkLifetime) async -> Error {
         if error is CancellationError { return error }
         if let verdict = error as? ThalovantConnectionError, verdict.kind != .other { return verdict }
         if let status = socket.upgradeStatus {
@@ -513,15 +517,18 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             }
             return ThalovantConnectionError("The hub could not accept the WebSocket upgrade (HTTP \(status)).")
         }
-        guard attempt.ended.isOpen, attempt.handshakeTime == nil else { return error }
+        guard attempt.ended.isOpen else { return error }
         await attempt.awaitLateCode()
+        let afterHandshake = attempt.handshakeTime != nil
         if attempt.refused {
             let code = attempt.closeCode.map(String.init) ?? "no status"
             return ThalovantConnectionError(
-                "The hub refused this connection's credentials: it closed the link during the handshake (\(code)).",
+                afterHandshake
+                    ? "The hub closed the link right after the handshake: it does not accept these credentials, or not yet."
+                    : "The hub refused this connection's credentials: it closed the link during the handshake (\(code)).",
                 kind: .refused)
         }
-        return error
+        return afterHandshake ? ThalovantConnectionError("The hub closed the link right after the handshake.") : error
     }
 
     public func disconnect() async {

@@ -3,6 +3,10 @@ import XCTest
 
 @testable import ThalovantSDK
 
+#if canImport(FoundationNetworking)
+import FoundationNetworking
+#endif
+
 /// Keeping a hub link up, against the vectors every SDK shares
 /// (`link-keeping-vectors.json`, vendored and pinned by the parity contract).
 ///
@@ -213,6 +217,59 @@ final class LinkKeepingVectorTests: XCTestCase {
         }
     }
 
+    func testACloseBeforeConnectReturnsIsStillReadByItsCode() async throws {
+        // The hub closes as soon as it has read this side's HELLO, which can be
+        // before connect() has seen its handshake gate open: the transport
+        // reads that close by its code as the session would after connect().
+        for (code, refused) in [(1005, true), (1008, true), (1011, false)] {
+            for _ in 0..<20 {
+                let hub = MemoryHub()
+                hub.closeAfterHandshake = code
+                let transport = try hub.transport(store: MemoryNoiseStore())
+                do {
+                    try await transport.connect(timeout: 10)
+                    // connect() won the race: the link is up, and ends at once.
+                    let lifetime = try XCTUnwrap(transport.lifetime)
+                    try await lifetime.ended.wait(timeout: 2, timeoutError: ThalovantTimeoutError("never ended"))
+                    await lifetime.awaitLateCode()
+                    XCTAssertEqual(lifetime.refused, refused, "\(code)")
+                } catch let error as ThalovantConnectionError {
+                    XCTAssertEqual(error.kind == .refused, refused, "\(code): \(error.message)")
+                    XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+                }
+                await transport.disconnect()
+            }
+        }
+    }
+
+    func testACloseAfterTheHandshakeButBeforeConnectReturnedIsReadByItsCode() async throws {
+        // The window a macOS runner hit: the handshake completed, the hub
+        // closed, and connect() saw the socket gone before it could return.
+        // What connect() then throws is read from the close, as after it.
+        let transport = try MemoryHub().transport(store: MemoryNoiseStore())
+        let lost = noiseError("Connection closed during Noise negotiation.")
+        for (code, lateMs, refused) in [(1005, 0, true), (1008, 0, true), (1000, 50, true), (1011, 0, false), (0, 0, false)] {
+            let attempt = LinkLifetime()
+            attempt.completeHandshake()
+            attempt.end(closeCode: lateMs > 0 ? nil : code)
+            if lateMs > 0 {
+                Task {
+                    try? await Task.sleep(nanoseconds: UInt64(lateMs) * 1_000_000)
+                    attempt.end(closeCode: code)
+                }
+            }
+            let verdict = await transport.classify(lost, socket: QuietSocket(), attempt: attempt)
+            let error = try XCTUnwrap(verdict as? ThalovantConnectionError, "\(code)")
+            XCTAssertEqual(error.kind == .refused, refused, "\(code) learnt \(lateMs) ms late")
+            XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+        }
+        // One that had not ended is what it was.
+        let open = LinkLifetime()
+        open.completeHandshake()
+        let kept = await transport.classify(lost, socket: QuietSocket(), attempt: open)
+        XCTAssertEqual((kept as? ThalovantConnectionError)?.message, lost.message)
+    }
+
     func testTheRetryAfterAFailedKKHappensInsideOneConnect() async throws {
         let hub = MemoryHub()
         let store = MemoryNoiseStore()
@@ -237,4 +294,14 @@ final class LinkKeepingVectorTests: XCTestCase {
         XCTAssertEqual(hub.patterns.suffix(2), ["KKpsk0", "XXpsk2"])
         await stale.disconnect()
     }
+}
+
+/// A socket that has nothing to say: no upgrade status, no close code.
+private final class QuietSocket: HiveSocket {
+    func resume() {}
+    func receive() async throws -> URLSessionWebSocketTask.Message { throw CancellationError() }
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {}
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {}
+    var peerCloseCode: Int? { nil }
+    var upgradeStatus: Int? { nil }
 }

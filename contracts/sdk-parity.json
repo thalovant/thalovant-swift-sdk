@@ -20,7 +20,7 @@
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
         "Sources/ThalovantSDK/HiveBinary.swift": "649c094f04c4b57c99a1cf65482762c3204d5e2bf629df26c68f5af1c26f8818",
-        "Sources/ThalovantSDK/Transport.swift": "9badf5a6554c3b6451e5c3fce70706513c60931e0d5715b7ce5760dda192ddd6",
+        "Sources/ThalovantSDK/Transport.swift": "5b2b7c2baeae2b42b9ecc26df285cb05a3f7b441e748ad91809bf2e071729e8e",
         "Sources/ThalovantSDK/Wire.swift": "b3f7226d394d092413d48a571399da8ad1e0cf587911f0f39f71c04df69a5a30"
       },
       "reason": "HiveWire.decodeBinaryFrame reads WIRE-1: four bits of payload type, then the clip itself, never parsed or inflated. The Noise framing marks each frame JSON or not and a binary one was refused outright, so every such frame was unreachable; onBinary delivers it now. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
@@ -130,7 +130,7 @@
         "Sources/ThalovantSDK/HomeLink.swift": "290b7e4b5d5ddd77f0d6c9671b5d7c3e9c28fe11cbe74a0f2e3db3e29d91be8f",
         "Sources/ThalovantSDK/Noise.swift": "94184b73ad7c64c1fea5ec03ebf6c1e70a0763fac8b6990b329a02dddab94566",
         "Sources/ThalovantSDK/Session.swift": "fd78667d0e14e90a7c8f897b3929ea5945d89b202d160bf626b0979b34afdaa5",
-        "Sources/ThalovantSDK/Transport.swift": "9badf5a6554c3b6451e5c3fce70706513c60931e0d5715b7ce5760dda192ddd6"
+        "Sources/ThalovantSDK/Transport.swift": "5b2b7c2baeae2b42b9ecc26df285cb05a3f7b441e748ad91809bf2e071729e8e"
       },
       "reason": "Sources/ThalovantSDK/HomeLink.swift: replyContext (no destination without a source), ThalovantClient.reply, HomeRequest, HomeAnswer, plainSpeech (stripSsml in Events.swift for real markup only, the portable reference set, Unicode White_Space) and answerHomeRequest(s), bounded by the hub's 10 s from arrival: the handler runs on a task of its own raced against its deadline, the answer goes out then whatever the handler does, and a reply that cannot go out in time is withdrawn. Keeping the link: LinkSupervisor and HubSession.run() in Session.swift; LinkLifetime.closeRefuses and the socket seam in Transport.swift, which reads refusals (1000/1005/1008 during the handshake or within 750 ms, a code up to 250 ms late, a 401/403 upgrade) as ThalovantConnectionError kind .refused and follows a failed KK with one XX attempt inside the same connect; NoiseNegotiator in Noise.swift tells a wrong password (.refused) from a changed hub key (.keyChanged). Run against the shared home-link vectors through the real reply path, and against link-keeping-vectors.json: close and supervise as pure functions, handshake through HiveMindWSSTransport against an in-memory hub that records the Noise patterns.",
       "status": "required",
@@ -139,7 +139,7 @@
         "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9",
         "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "1c9bc76f312245ccbf607f6de5ea82d3748ba1deb54d84a37ffe9fdf9387da7e",
         "Tests/ThalovantSDKTests/HubSessionLinkTests.swift": "7562a1b457c16d53f24b6026bf64e5d7219538a6bbdf737f196248ffd6cd6c78",
-        "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "028000cf69083c1bf680335290ea7e3b1b3c4316f3ad27f64e4c606333d29ac8"
+        "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "699a88dc7f66b8b71cbfa57dc81502d8e595f326f0b93389a8c495430103495b"
       },
       "vectors": {
         "home-link-vectors.json": "Tests/ThalovantSDKTests/Fixtures/home-link-vectors.json",
@@ -223,7 +223,7 @@
       "implementation": {
         "Sources/ThalovantSDK/Events.swift": "8b436d4a2f1132c8e1c53a5220cfd992994ef71f5f50978e355e0b673b6d996a",
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
-        "Sources/ThalovantSDK/Transport.swift": "9badf5a6554c3b6451e5c3fce70706513c60931e0d5715b7ce5760dda192ddd6"
+        "Sources/ThalovantSDK/Transport.swift": "5b2b7c2baeae2b42b9ecc26df285cb05a3f7b441e748ad91809bf2e071729e8e"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "status": "required",
