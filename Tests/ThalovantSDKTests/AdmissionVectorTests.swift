@@ -34,15 +34,17 @@ final class AdmissionVectorTests: XCTestCase {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
             ScriptedApi.serve((row["exchanges"]?.arrayValue ?? []).compactMap(\.objectValue))
-            // An API out of reach is a loopback port nothing listens on, dialled
-            // for real; every other case is served by the script.
-            let unreachable = call["api"]?.stringValue == "unreachable"
-            let api = unreachable
-                ? ThalovantControlPlane(
-                    apiURL: "http://127.0.0.1:\(closedLoopbackPort())", accessToken: "synthetic-token",
+            // An API out of reach is a loopback listener that resets every
+            // connection, dialled for real; every other case is served by the
+            // script.
+            let resetting = call["api"]?.stringValue == "unreachable" ? try ResettingListener() : nil
+            defer { resetting?.stop() }
+            let api = resetting.map {
+                ThalovantControlPlane(
+                    apiURL: "http://127.0.0.1:\($0.port)", accessToken: "synthetic-token",
                     session: URLSession(configuration: .ephemeral))
-                : ThalovantControlPlane(
-                    apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
+            } ?? ThalovantControlPlane(
+                apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
             var operation: OperationResource?
             if let resource = call["operation"], resource.objectValue != nil {
                 operation = try JSONDecoder().decode(OperationResource.self, from: JSONEncoder().encode(placed(resource)))

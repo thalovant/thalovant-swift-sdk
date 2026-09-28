@@ -447,7 +447,8 @@ ignores being cancelled -- and one outside the contract's codes `unknown`, each
 with empty speech, so the hub says its own sentence for the code in the
 device's language. The reply gets what the handler left: it is never started
 after the bound, and one still queued when the bound passes is withdrawn, in
-which case `answerHomeRequest` returns nil.
+which case `answerHomeRequest` returns nil; a withdrawn reply leaves the link
+as it was.
 
 `speech` goes out as plain text (`plainSpeech`), by rules every SDK shares
 rather than a platform HTML library: real markup removed ("5 < 6 and 7 > 3"

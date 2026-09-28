@@ -194,12 +194,83 @@ final class HomeLinkVectorTests: XCTestCase {
         XCTAssertEqual(stripSsml("<speak>Hello</speak>"), "Hello")
     }
 
-    func testAnUnclosedTagFullOfSpacesIsQuick() {
-        let text = "<a" + String(repeating: " ", count: 20_000) + "end"
-        let started = ProcessInfo.processInfo.systemUptime
-        XCTAssertEqual(plainSpeech(text), "<a end")
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+    func testMarkupRemovalIsLinear() {
+        let pathological: [String: String] = [
+            "an unclosed tag and spaces": "<b" + String(repeating: " ", count: 50_000),
+            "an unclosed tag and nested quotes": "<b " + String(repeating: "\"'", count: 25_000),
+            "quoted greater-than signs": String(repeating: "<a \">\"", count: 10_000),
+            "quotes that never close": String(repeating: "<a '", count: 20_000),
+            "comments that never close": String(repeating: "<!--", count: 20_000),
+            "instructions that never close": String(repeating: "<?", count: 30_000),
+            "tags that never close": String(repeating: "<b <i <u ", count: 10_000),
+            "nothing but less-than signs": String(repeating: "<", count: 60_000),
+            "closing tags that never close": String(repeating: "</a", count: 20_000),
+        ]
+        for (name, text) in pathological {
+            let started = ProcessInfo.processInfo.systemUptime
+            _ = stripSsml(text)
+            _ = plainSpeech(text)
+            // A few tens of milliseconds; a backtracking pattern took minutes.
+            XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2, name)
+        }
+    }
+
+    func testMarkupRemovalIsTheDocumentedRule() throws {
+        // The rule as a regular expression: fine as a reference on short text,
+        // where backtracking costs nothing.
+        let rule = try NSRegularExpression(
+            pattern: #"<!--.*?-->|<\?.*?\?>|</?[A-Za-z](?:[^>"']|"[^"]*"|'[^']*')*>"#,
+            options: [.dotMatchesLineSeparators])
+        let alphabet = Array("<>/!?-\"' ab=")
+        var seed: UInt64 = 20_260_928
+        func next(_ bound: Int) -> Int {
+            seed = seed &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            return Int((seed >> 33) % UInt64(bound))
+        }
+        for _ in 0..<20_000 {
+            let text = String((0..<next(15)).map { _ in alphabet[next(alphabet.count)] })
+            let expected = rule.stringByReplacingMatches(
+                in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "")
+            XCTAssertEqual(stripSsml(text), expected, text)
+        }
+        XCTAssertEqual(stripSsml("<a,b>c"), "c", "the rule, which the old pattern did not quite follow")
         XCTAssertEqual(stripSsml("<a  / >x<a/>y<a />z"), "xyz")
+    }
+
+    func testSpeechTrimsWhiteSpaceOnly() {
+        // U+001C..U+001F are separators to some trims, but not White_Space.
+        XCTAssertEqual(plainSpeech("\u{1C} Hi \u{1F}"), "\u{1C} Hi \u{1F}")
+        XCTAssertEqual(plainSpeech(" \u{3000} Hi  "), "Hi")
+    }
+
+    func testAWithdrawnReplyNeitherGoesOutNorTearsTheLinkDown() async throws {
+        let hub = MemoryHub()
+        let transport = try hub.transport(store: MemoryNoiseStore())
+        let client = ThalovantClient(identity: transport.identity, transport: transport)
+        try await client.connect(timeout: 10)
+        let socket = try XCTUnwrap(hub.lastSocket)
+        let release = AsyncGate()
+        socket.holdNextSend(release)
+        // A frame already being written: it is finished.
+        let first = Task { try await client.emit("first.frame") }
+        try await eventually { socket.sendHeld }
+        // A reply queued behind it, withdrawn at the hub's bound.
+        let event = ThalovantEvent(
+            name: HomeLink.requestMessageType, data: ["request_id": "q1"], context: ["source": "skill"])
+        let sent = try await client.answerHomeRequest(event, timeout: 0.05, hubTimeout: 0.2) { _ in
+            HomeAnswer(speech: "Done.")
+        }
+        XCTAssertNil(sent)
+        release.open()
+        try await first.value
+        // The link is as it was: the next frame goes out, the withdrawn one never did.
+        try await client.emit("after.frame")
+        try await eventually { hub.received == ["first.frame", "after.frame"] }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(hub.received, ["first.frame", "after.frame"])
+        XCTAssertTrue(transport.connected && transport.handshakeComplete)
+        XCTAssertNil(transport.lastError)
+        await client.close()
     }
 
     func testReplyingNeedsAType() async throws {

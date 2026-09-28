@@ -48,9 +48,9 @@
       "reason": "waitForAdmission in Sources/ThalovantSDK/Connections.swift: ready, 404 and no operation are admitted; a 5xx is ridden out, and a 429 for ThalovantApiError.retryAfterSeconds (body, then Retry-After, then RateLimit-Reset); every read is bounded by the deadline and every wait measured on the monotonic clock. failed and timed_out throw ThalovantAdmissionFailedError(errorCode:), any other refusal of the wait the same with the API's answer as apiError; 401/403 pass through as the .auth ThalovantApiError and an API out of reach as .unreachable. The deadline throws ThalovantAdmissionTimeoutError, which conforms to both ThalovantConnectionFailure and ThalovantTimeoutFailure -- Swift's errors are value types, so the two protocols are how it is both -- and ends 'it may still admit it later.'. A links.self on another origin (scheme, host, default-spelled port) is refused unfetched. Run against the shared connection-admission vectors over URLSession, with scripted headers and a real closed loopback port.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/AdmissionVectorTests.swift": "6732494557b0db44880e0c69e3c58518dcfcfc0949c7c0b1ea17084925178956",
+        "Tests/ThalovantSDKTests/AdmissionVectorTests.swift": "77a1cf3c0b031c2b0f71ac8bc8b5ddeca4ad0f72414999636fea4132a5c4a111",
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9"
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3"
       },
       "vectors": {
         "connection-admission-vectors.json": "Tests/ThalovantSDKTests/Fixtures/connection-admission-vectors.json"
@@ -67,7 +67,7 @@
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
         "Tests/ThalovantSDKTests/ConnectionKindsVectorTests.swift": "772f98ab56e1d8790c5cef3731012e6ebf46d8b692adfb3d8b596b796f67c2bf",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9"
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3"
       },
       "vectors": {
         "connection-kinds-vectors.json": "Tests/ThalovantSDKTests/Fixtures/connection-kinds-vectors.json"
@@ -92,7 +92,7 @@
     "conversation": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8"
+        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54"
       },
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
@@ -116,8 +116,8 @@
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
         "Tests/ThalovantSDKTests/DeviceLoginTests.swift": "9b59a782ea1b019bdae670c05c33334ca9f11c5783ffb5027865fad0250d3bb6",
-        "Tests/ThalovantSDKTests/DeviceLoginVectorTests.swift": "018a6a6911b50ff9fa06eb9c3444384baff8b57f1494ebd983789a340bc252a3",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9"
+        "Tests/ThalovantSDKTests/DeviceLoginVectorTests.swift": "d5a64f93e88bab9d4e087aebf36249fd9984fd2110e6ca0673fc6f2e084db8b6",
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3"
       },
       "vectors": {
         "device-login-vectors.json": "Tests/ThalovantSDKTests/Fixtures/device-login-vectors.json"
@@ -126,19 +126,19 @@
     "home-link": {
       "implementation": {
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc",
-        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8",
+        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54",
         "Sources/ThalovantSDK/HomeLink.swift": "290b7e4b5d5ddd77f0d6c9671b5d7c3e9c28fe11cbe74a0f2e3db3e29d91be8f",
         "Sources/ThalovantSDK/Noise.swift": "94184b73ad7c64c1fea5ec03ebf6c1e70a0763fac8b6990b329a02dddab94566",
-        "Sources/ThalovantSDK/Session.swift": "fd78667d0e14e90a7c8f897b3929ea5945d89b202d160bf626b0979b34afdaa5",
+        "Sources/ThalovantSDK/Session.swift": "78d0e4560e5913608282c8be450774dad805f82856fd367a5ab1ea82f2af6228",
         "Sources/ThalovantSDK/Transport.swift": "e28f22e493c1e9f814d393ebbb43b573ea777e78ea108f27758a9a2b66f497d3"
       },
       "reason": "Sources/ThalovantSDK/HomeLink.swift: replyContext (no destination without a source), ThalovantClient.reply, HomeRequest, HomeAnswer, plainSpeech (stripSsml in Events.swift for real markup only, the portable reference set, Unicode White_Space) and answerHomeRequest(s), bounded by the hub's 10 s from arrival: the handler runs on a task of its own raced against its deadline, the answer goes out then whatever the handler does, and a reply that cannot go out in time is withdrawn. Keeping the link: LinkSupervisor and HubSession.run() in Session.swift; LinkLifetime.closeRefuses and the socket seam in Transport.swift, which reads refusals (1000/1005/1008 during the handshake or within 750 ms, a code up to 250 ms late, a 401/403 upgrade) as ThalovantConnectionError kind .refused and follows a failed KK with one XX attempt inside the same connect; NoiseNegotiator in Noise.swift tells a wrong password (.refused) from a changed hub key (.keyChanged). Run against the shared home-link vectors through the real reply path, and against link-keeping-vectors.json: close and supervise as pure functions, handshake through HiveMindWSSTransport against an in-memory hub that records the Noise patterns.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
-        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9",
-        "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "5f58de70e02913b76ccf71d3214c822077a391e4409a6561f540cc33b6390e1f",
-        "Tests/ThalovantSDKTests/HubSessionLinkTests.swift": "7562a1b457c16d53f24b6026bf64e5d7219538a6bbdf737f196248ffd6cd6c78",
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "83e3344d8a498d404fffaf649839365ff128a1dbe8e8dd30492042ba7206e7a3",
+        "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "88b4f9a0b84991a7e489fd31a1565cce12a691c8a7317e4e4877a97153d174b4",
+        "Tests/ThalovantSDKTests/HubSessionLinkTests.swift": "d2b112db7c4f0ca10336603cee428955b5f049b774a3ddb3818d1b136aae8e88",
         "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "699a88dc7f66b8b71cbfa57dc81502d8e595f326f0b93389a8c495430103495b"
       },
       "vectors": {
@@ -190,7 +190,7 @@
     "mesh": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8"
+        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54"
       },
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
       "status": "required",
@@ -221,7 +221,7 @@
     },
     "runtime": {
       "implementation": {
-        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8",
+        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54",
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
         "Sources/ThalovantSDK/Transport.swift": "e28f22e493c1e9f814d393ebbb43b573ea777e78ea108f27758a9a2b66f497d3"
       },
@@ -239,7 +239,7 @@
     },
     "session": {
       "implementation": {
-        "Sources/ThalovantSDK/Session.swift": "fd78667d0e14e90a7c8f897b3929ea5945d89b202d160bf626b0979b34afdaa5"
+        "Sources/ThalovantSDK/Session.swift": "78d0e4560e5913608282c8be450774dad805f82856fd367a5ab1ea82f2af6228"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The connected-client factory owns failed connection cleanup; Python performs that dial internally and retains failed retirement before replacement.",
       "status": "required",
@@ -263,7 +263,8 @@
     "b16579bd501d18147e6b74b02d67d98ce6aeb850f369de2138fbdfb598469b7c",
     "f859eae591c57dfb82c8241c44cc7d46ba52ef2dcd0cafaa6bd0187c2d11f459",
     "f1593522f0af94b56d35ea92909d8bd71d1ae5fc7f6596b6212a0cc4c01c0329",
-    "3cdc3e21b6f5505794d2d0988ea92febe3c4acce228429e84e87e93da07c4bab"
+    "3cdc3e21b6f5505794d2d0988ea92febe3c4acce228429e84e87e93da07c4bab",
+    "2460eb90bd56b1b182be3db365ba29bfef712d4ea2748061652ba0f28dcf6f50"
   ],
   "schema_version": 1
 }

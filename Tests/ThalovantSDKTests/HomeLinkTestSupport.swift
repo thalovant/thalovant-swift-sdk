@@ -155,32 +155,64 @@ final class ScriptedApi: URLProtocol {
     }
 }
 
-/// A loopback port nothing listens on: bound, read and let go.
-func closedLoopbackPort() -> Int {
-    #if canImport(Glibc)
-    let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
-    #else
-    let fd = socket(AF_INET, SOCK_STREAM, 0)
-    #endif
-    guard fd >= 0 else { return 9 }
-    defer { close(fd) }
-    var address = sockaddr_in()
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_port = 0
-    address.sin_addr.s_addr = inet_addr("127.0.0.1")
-    #if canImport(Darwin)
-    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-    #endif
-    let bound = withUnsafePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+/// A loopback port that accepts every connection and resets it at once
+/// (`SO_LINGER` 0, then close): what the vectors' "unreachable" means, reached
+/// the same way everywhere. A closed port would do on Linux and macOS, but
+/// Windows retries a SYN to one for about two seconds first.
+final class ResettingListener: @unchecked Sendable {
+    let port: Int
+    private let fd: Int32
+    private let lock = NSLock()
+    private var stopped = false
+    private let done = DispatchSemaphore(value: 0)
+
+    init() throws {
+        #if canImport(Glibc)
+        let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
+        guard descriptor >= 0 else { throw ThalovantConnectionError("socket() failed") }
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_port = 0
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        #if canImport(Darwin)
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let named = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+        }
+        guard bound == 0, named == 0, listen(descriptor, 8) == 0 else {
+            close(descriptor)
+            throw ThalovantConnectionError("Could not listen on loopback.")
+        }
+        fd = descriptor
+        port = Int(UInt16(bigEndian: address.sin_port))
+        let listening = descriptor
+        Thread.detachNewThread { [self] in
+            while !lock.locked({ stopped }) {
+                var ready = pollfd(fd: listening, events: Int16(POLLIN), revents: 0)
+                guard poll(&ready, 1, 50) > 0 else { continue }
+                let connection = accept(listening, nil, nil)
+                guard connection >= 0 else { continue }
+                var reset = linger(l_onoff: 1, l_linger: 0)
+                _ = setsockopt(connection, SOL_SOCKET, SO_LINGER, &reset, socklen_t(MemoryLayout<linger>.size))
+                close(connection)
+            }
+            done.signal()
+        }
     }
-    guard bound == 0 else { return 9 }
-    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let named = withUnsafeMutablePointer(to: &address) {
-        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+
+    func stop() {
+        lock.locked { stopped = true }
+        _ = done.wait(timeout: .now() + 2)
+        close(fd)
     }
-    guard named == 0 else { return 9 }
-    return Int(UInt16(bigEndian: address.sin_port))
 }
 
 /// Reads a vendored vector file by its stem.
@@ -405,6 +437,8 @@ final class MemoryHub: @unchecked Sendable {
         var attempts = 0
         var closeAfterHandshake: Int?
         var closeCodeLateMs = 0
+        var received: [String] = []
+        var lastSocket: MemorySocket?
     }
 
     var staticKey: Data { get { lock.locked { state.staticKey } } set { lock.locked { state.staticKey = newValue } } }
@@ -425,6 +459,10 @@ final class MemoryHub: @unchecked Sendable {
     /// Whether the hub has pinned a client's key: the client's connect can
     /// return before the hub has read its last handshake message.
     var clientPinned: Bool { lock.locked { state.pinnedClient != nil } }
+    /// The bus messages clients sent once connected, by type, in order.
+    var received: [String] { lock.locked { state.received } }
+    /// The socket the last attempt dialled.
+    var lastSocket: MemorySocket? { lock.locked { state.lastSocket } }
 
     var factory: HiveSocketFactory {
         { [self] _, transport in (MemorySocket(hub: self, transport: transport), nil) }
@@ -443,6 +481,7 @@ final class MemoryHub: @unchecked Sendable {
     fileprivate func serve(_ socket: MemorySocket) async {
         let (upgrade, key, offerKK, pinned) = lock.locked { () -> (Int?, Data, Bool, Data?) in
             state.attempts += 1
+            state.lastSocket = socket
             return (state.upgradeStatus, state.staticKey, state.offerKK, state.pinnedClient)
         }
         if let upgrade {
@@ -501,7 +540,12 @@ final class MemoryHub: @unchecked Sendable {
             }
             let (closeCode, late) = lock.locked { (state.closeAfterHandshake, state.closeCodeLateMs) }
             if let closeCode { return await socket.closeFromHub(closeCode, lateMs: late) }
-            while true { _ = try await socket.takeFromClient() }
+            while true {
+                guard case .data(let frame) = try await socket.takeFromClient(),
+                      let (payload, isJSON) = try responder.decrypt(frame), isJSON else { continue }
+                let message = try JSONDecoder().decode(HiveMessage.self, from: payload)
+                if let type = message.payload["type"]?.stringValue { lock.locked { state.received.append(type) } }
+            }
         } catch {
             return
         }
@@ -517,6 +561,8 @@ final class MemorySocket: HiveSocket, @unchecked Sendable {
     private let lock = NSLock()
     private var code: Int?
     private var refusedStatus: Int?
+    private var hold: AsyncGate?
+    private var holding = false
 
     init(hub: MemoryHub, transport: HiveMindWSSTransport) {
         self.hub = hub
@@ -528,7 +574,25 @@ final class MemorySocket: HiveSocket, @unchecked Sendable {
 
     func resume() { Task { await hub.serve(self) } }
     func receive() async throws -> URLSessionWebSocketTask.Message { try await clientBox.take() }
-    func send(_ message: URLSessionWebSocketTask.Message) async throws { await hubBox.put(message) }
+    func send(_ message: URLSessionWebSocketTask.Message) async throws {
+        let gate = lock.locked { () -> AsyncGate? in
+            let gate = hold
+            hold = nil
+            holding = gate != nil
+            return gate
+        }
+        if let gate {
+            // A frame being written: it is finished however long that takes.
+            try await gate.wait(timeout: nil, timeoutError: nil)
+            lock.locked { holding = false }
+        }
+        await hubBox.put(message)
+    }
+
+    /// Holds the next frame written until `gate` opens.
+    func holdNextSend(_ gate: AsyncGate) { lock.locked { hold = gate } }
+    /// Whether a frame is being held mid-write.
+    var sendHeld: Bool { lock.locked { holding } }
     func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         Task {
             await hubBox.close(ThalovantConnectionError("The client closed the socket."))

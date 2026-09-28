@@ -25,6 +25,7 @@ final class HubSessionLinkTests: XCTestCase {
         private var refusal: Int?
         var unreachable = false
         var lateCodes = false
+        var sendMilliseconds = 0
         var attempts: Int { lock.locked { built.count } }
         var latest: LinkFake? { lock.locked { built.last } }
 
@@ -33,6 +34,7 @@ final class HubSessionLinkTests: XCTestCase {
             fake.holdUtterances = true
             fake.closeAfterHandshake = refuseWith
             fake.closeCodeArrivesLate = lateCodes
+            fake.sendMilliseconds = sendMilliseconds
             lock.locked { built.append(fake) }
             if unreachable { throw ThalovantConnectionError("Could not reach the hub.") }
             let client = try fakeClient(fake)
@@ -231,6 +233,26 @@ final class HubSessionLinkTests: XCTestCase {
         turn.cancel()
         _ = try? await turn.value
         answering.close()
+        await session.close()
+    }
+
+    func testAReplyWithdrawnOnTheWayInLeavesTheLinkItOpened() async throws {
+        // No link yet: the reply connects first, then waits on a slow send
+        // and is withdrawn at the hub's bound. The link it opened stays.
+        let hub = Hub()
+        hub.sendMilliseconds = 1_000
+        let session = session(hub)
+        let event = ThalovantEvent(
+            name: HomeLink.requestMessageType, data: ["request_id": "w3"], context: ["source": "skill"])
+        let sent = try await session.answerHomeRequest(event, timeout: 0.05, hubTimeout: 0.2) { _ in
+            HomeAnswer(speech: "Done.")
+        }
+        XCTAssertNil(sent)
+        XCTAssertTrue(session.held, "a withdrawn reply is not a failure of the link")
+        XCTAssertTrue(session.connected)
+        XCTAssertEqual(hub.attempts, 1)
+        try await Task.sleep(nanoseconds: 1_100_000_000)
+        XCTAssertFalse(hub.latest?.emitted.contains { $0.name == HomeLink.responseMessageType } ?? true)
         await session.close()
     }
 

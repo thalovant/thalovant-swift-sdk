@@ -122,6 +122,24 @@ final class DeviceLoginVectorTests: XCTestCase {
         }
     }
 
+    func testA2xxThatIsNotATokenObjectCarriesNoStatus() async throws {
+        // Like a 2xx object with no token: the API did not refuse, the SDK
+        // could not use its answer.
+        for body in ["[]", "not json", "\"token\"", #"{"token_type": "bearer"}"#] {
+            StubURLProtocol.reset()
+            StubURLProtocol.enqueue(.init(status: 200, body: body))
+            let api = ThalovantControlPlane(apiURL: "https://api.example.com", session: StubURLProtocol.makeSession())
+            do {
+                _ = try await api.pollDeviceLogin(DeviceAuthorizationGrant(deviceCode: "device-code-1"))
+                XCTFail("\(body): expected an error")
+            } catch let error as ThalovantApiError {
+                XCTAssertNil(error.statusCode, body)
+                XCTAssertEqual(error.kind, .other, body)
+            }
+            XCTAssertNil(api.accessToken, body)
+        }
+    }
+
     func testTheContractScopesMatchTheSDK() throws {
         let vectors = try loadVectors("device-login-vectors")
         XCTAssertEqual(.array(homeAssistantScopes.map { .string($0) }), vectors["home_assistant_scopes"])

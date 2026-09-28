@@ -487,14 +487,17 @@ public final class HubSession: @unchecked Sendable {
       group.cancelAll()
     }
   }
-  private func call<T>(_ operation: (ThalovantClient) async throws -> T) async throws -> T {
+  private func call<T>(
+    keepOnCancel: Bool = false, _ operation: (ThalovantClient) async throws -> T
+  ) async throws -> T {
     try await acquire()
     defer { release() }
     let old = lock.locked { client }
     if old != nil && !alive(old) { await drop() }
     let connected = try await ensure()
     do { return try await operation(connected) } catch {
-      if !(error is ThalovantRuntimeError) && !(error is ThalovantPolicyDeniedError) {
+      let withdrawn = keepOnCancel && error is CancellationError
+      if !withdrawn && !(error is ThalovantRuntimeError) && !(error is ThalovantPolicyDeniedError) {
         await drop()
       }
       throw error
@@ -521,7 +524,8 @@ public final class HubSession: @unchecked Sendable {
   /// live client at once rather than queueing behind that ask, which would
   /// hold it until the turn ends. Frames stay ordered: the transport seals
   /// and writes them one at a time. With no live client it connects first,
-  /// like any call.
+  /// like any call. A reply withdrawn -- its task cancelled while it waited
+  /// behind another frame -- is never sent and leaves the link as it was.
   public func reply(
     to event: ThalovantEvent, type: String, data: JSONObject = [:], context: JSONObject = [:]
   ) async throws {
@@ -529,7 +533,7 @@ public final class HubSession: @unchecked Sendable {
       try await live.reply(to: event, type: type, data: data, context: context)
       return
     }
-    try await call { try await $0.reply(to: event, type: type, data: data, context: context) }
+    try await call(keepOnCancel: true) { try await $0.reply(to: event, type: type, data: data, context: context) }
   }
   /// Terminal close waits for admitted work even if its caller was cancelled.
   public func close() async {
