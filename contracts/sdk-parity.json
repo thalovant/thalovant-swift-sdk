@@ -19,14 +19,14 @@
     "binary": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/HiveBinary.swift": "1964fd7347b70cd66da819738f9672633e2e28477b35abc01b7615ac20f5b15b",
+        "Sources/ThalovantSDK/HiveBinary.swift": "c6a8f509c02bfb510abe635aea550162e0c50dc042f9eb06107455f25730a29b",
         "Sources/ThalovantSDK/Transport.swift": "2e6a8d2a27e3b650edc92a667ef767c3104a1202fba6e5d1e84e9fce9abec45a",
         "Sources/ThalovantSDK/Wire.swift": "b3f7226d394d092413d48a571399da8ad1e0cf587911f0f39f71c04df69a5a30"
       },
       "reason": "HiveWire.decodeBinaryFrame reads WIRE-1: four bits of payload type, then the clip itself, never parsed or inflated. The Noise framing marks each frame JSON or not and a binary one was refused outright, so every such frame was unreachable; onBinary delivers it now. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself. A compressed metadata or payload part that is truncated, or would inflate past 32 MiB, refuses the frame rather than reading as empty.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "ff4247272243f2ed263ee8ed2a05c1c4de8a69322350a1bc9b106be04c630f4b",
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "a157158a82746a0e37bd46ab401ef9afc4b2755d1f011959c4fbc988e9ca2130",
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa"
       },
       "vectors": {
@@ -199,7 +199,7 @@
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "ff4247272243f2ed263ee8ed2a05c1c4de8a69322350a1bc9b106be04c630f4b",
+        "Tests/ThalovantSDKTests/BinaryFrameTests.swift": "a157158a82746a0e37bd46ab401ef9afc4b2755d1f011959c4fbc988e9ca2130",
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa"
       },
       "vectors": {

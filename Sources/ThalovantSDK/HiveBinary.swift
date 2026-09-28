@@ -169,6 +169,9 @@ extension HiveWire {
 /// frame limit alone is no bound at all.
 let wireInflationLimit = 32 * 1024 * 1024
 
+/// How much one step of inflation writes at most.
+let wireInflationChunk = 64 * 1024
+
 /// Inflates a zlib stream, or says why not: it inflates past the limit, or it
 /// is truncated or not zlib at all.
 ///
@@ -184,21 +187,27 @@ func inflateWireBytesOrThrow(_ data: Data, limit: Int = wireInflationLimit) thro
     defer { inflateEnd(&stream) }
     var input = [UInt8](data)
     var output = Data()
-    var buffer = [UInt8](repeating: 0, count: max(1024, data.count * 4))
+    // A fixed scratch buffer, never sized from the input: a reassembled
+    // message may itself be 32 MiB, and four times that was allocated before
+    // the limit was ever checked.
+    var buffer = [UInt8](repeating: 0, count: wireInflationChunk)
     var status: Int32 = Z_OK
     var overLimit = false
     input.withUnsafeMutableBufferPointer { source in
         stream.next_in = source.baseAddress
         stream.avail_in = uInt(source.count)
         repeat {
+            // One byte past what is left is room enough to see the limit
+            // crossed, and nothing past it is ever kept.
+            let room = min(buffer.count, limit - output.count + 1)
             let produced: Int = buffer.withUnsafeMutableBufferPointer { sink -> Int in
                 stream.next_out = sink.baseAddress
-                stream.avail_out = uInt(sink.count)
+                stream.avail_out = uInt(room)
                 status = inflate(&stream, Z_NO_FLUSH)
-                return sink.count - Int(stream.avail_out)
+                return room - Int(stream.avail_out)
             }
+            if produced > limit - output.count { overLimit = true; break }
             if produced > 0 { output.append(contentsOf: buffer[0..<produced]) }
-            if output.count > limit { overLimit = true; break }
         } while status == Z_OK
     }
     if overLimit {

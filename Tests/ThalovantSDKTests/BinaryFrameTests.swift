@@ -194,6 +194,23 @@ final class BinaryFrameTests: XCTestCase {
         XCTAssertEqual(message.payload["type"], "speak")
     }
 
+    func testAPartLargerThanOneInflationStepIsCappedExactly() throws {
+        // Several steps of the fixed scratch buffer, and several stored blocks.
+        let size = 3 * wireInflationChunk + 17
+        let body = Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let stream = zlibStored(body)
+        XCTAssertEqual(try inflateWireBytesOrThrow(stream, limit: size), body)
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(stream, limit: size - 1)) {
+            XCTAssertTrue("\($0)".contains("size limit"), "\($0)")
+        }
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(stream, limit: wireInflationChunk)) {
+            XCTAssertTrue("\($0)".contains("size limit"), "\($0)")
+        }
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(Data(stream.dropLast(4)), limit: size)) {
+            XCTAssertTrue("\($0)".contains("truncated"), "\($0)")
+        }
+    }
+
     func testATruncatedCompressedPartRefusesTheFrame() throws {
         let body = Data(#"{"type": "speak", "data": {}, "context": {}}"#.utf8)
         let truncated = zlibStored(body).dropLast(4)
