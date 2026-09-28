@@ -227,7 +227,7 @@ final class NoiseTests: XCTestCase {
         let transport = HiveMindWSSTransport(identity: identity)
         let session = URLSession(configuration: .ephemeral)
         defer { session.invalidateAndCancel() }
-        let oldSocket = session.webSocketTask(with: URL(string: "ws://127.0.0.1:1")!)
+        let oldSocket = URLSessionHiveSocket(task: session.webSocketTask(with: URL(string: "ws://127.0.0.1:1")!))
         var delivered = 0
         transport.addBusHandler { _ in delivered += 1 }
         transport.addMessageHandler { _ in delivered += 1 }

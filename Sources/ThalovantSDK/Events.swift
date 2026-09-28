@@ -168,20 +168,104 @@ func compactUUID() -> String {
     UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
 }
 
-/// Removes SSML/XML tags, mirroring the sibling SDKs.
+/// Removes SSML/XML markup, as every SDK does: a tag -- `<` or `</` right
+/// before an ASCII letter, then everything up to the next `>` that is not
+/// inside a quoted attribute value -- a comment (`<!--` to `-->`) and a
+/// processing instruction (`<?` to `?>`). Any other `<` is text, so
+/// "5 < 6 and 7 > 3" survives whole, and so does an unclosed tag. Character
+/// references are left as they are.
+///
+/// Linear in the length of the text, whatever it holds: the text comes off
+/// the network, and a regular expression for the same rule backtracked (an
+/// unclosed tag followed by a few thousand spaces took minutes).
 public func stripSsml(_ text: String) -> String {
-    var result = ""
-    var insideTag = false
-    for character in text {
-        if character == "<" {
-            insideTag = true
-        } else if character == ">" {
-            insideTag = false
-        } else if !insideTag {
-            result.append(character)
+    guard text.contains("<") else { return text }
+    let chars = Array(text.unicodeScalars)
+    let size = chars.count
+    var ends: [Int]?
+    // Once a closer is missing from some point on, it is missing from every
+    // later point: remember that rather than search again.
+    var missingComment = size + 1, missingInstruction = size + 1
+    var out = String.UnicodeScalarView()
+    var index = 0
+    while index < size {
+        guard chars[index] == "<" else {
+            out.append(chars[index])
+            index += 1
+            continue
+        }
+        let comment = startsWith(chars, at: index, "<!--")
+        let instruction = !comment && startsWith(chars, at: index, "<?")
+        if comment || instruction {
+            let closer: [Unicode.Scalar] = comment ? ["-", "-", ">"] : ["?", ">"]
+            let begin = index + (comment ? 4 : 2)
+            if begin < (comment ? missingComment : missingInstruction) {
+                if let found = firstIndex(of: closer, in: chars, from: begin) {
+                    index = found + closer.count
+                    continue
+                }
+                if comment { missingComment = begin } else { missingInstruction = begin }
+            }
+        } else {
+            let name = index + 1 < size && chars[index + 1] == "/" ? index + 2 : index + 1
+            if name < size, isASCIILetter(chars[name]) {
+                if ends == nil { ends = tagEnds(chars) }
+                if let end = ends?[name + 1], end >= 0 {
+                    index = end + 1
+                    continue
+                }
+            }
+        }
+        out.append("<")
+        index += 1
+    }
+    return String(out)
+}
+
+/// For every position, where a tag's `>` is when scanning from there, or -1.
+///
+/// Scanning a tag's inside is: a `>` ends it, a quote skips to its partner (a
+/// quote with none ends the scan with no tag), anything else moves on. The
+/// answer from one position is the answer from the next, or from just past
+/// the partner quote, so one pass from the end computes them all.
+private func tagEnds(_ chars: [Unicode.Scalar]) -> [Int] {
+    var ends = [Int](repeating: -1, count: chars.count + 1)
+    var afterDouble = -1, afterSingle = -1
+    for index in stride(from: chars.count - 1, through: 0, by: -1) {
+        switch chars[index] {
+        case ">":
+            ends[index] = index
+        case "\"":
+            ends[index] = afterDouble < 0 ? -1 : ends[afterDouble + 1]
+            afterDouble = index
+        case "'":
+            ends[index] = afterSingle < 0 ? -1 : ends[afterSingle + 1]
+            afterSingle = index
+        default:
+            ends[index] = ends[index + 1]
         }
     }
-    return result
+    return ends
+}
+
+private func isASCIILetter(_ scalar: Unicode.Scalar) -> Bool {
+    ("a"..."z").contains(scalar) || ("A"..."Z").contains(scalar)
+}
+
+private func startsWith(_ chars: [Unicode.Scalar], at index: Int, _ prefix: String) -> Bool {
+    let wanted = Array(prefix.unicodeScalars)
+    guard index + wanted.count <= chars.count else { return false }
+    return Array(chars[index..<(index + wanted.count)]) == wanted
+}
+
+private func firstIndex(of needle: [Unicode.Scalar], in chars: [Unicode.Scalar], from start: Int) -> Int? {
+    guard needle.count > 0, start + needle.count <= chars.count else { return nil }
+    var index = start
+    while index + needle.count <= chars.count {
+        if chars[index] == needle[0] && Array(chars[index..<(index + needle.count)]) == needle { return index }
+        index += 1
+    }
+    return nil
 }
 
 public func utterancePayload(text: String, lang: String) -> JSONObject {

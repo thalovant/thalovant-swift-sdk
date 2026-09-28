@@ -33,7 +33,10 @@ enum ConformanceRecord {
     /// `JSONSerialization` escapes `/` and offers no control over key order,
     /// and `JSONValue` keeps an integer and a whole double apart -- all of
     /// which are this language's spelling of a value rather than the value.
-    static func canonical(_ value: JSONValue) -> String {
+    ///
+    /// `fractions` is for the digest of a vector file, never for what the SDK
+    /// produced: see `pythonRepr`.
+    static func canonical(_ value: JSONValue, fractions: Bool = false) -> String {
         switch value {
         case .null:
             return "null"
@@ -44,12 +47,14 @@ enum ConformanceRecord {
         case .number(let number):
             // conversation-vectors.json carries activated_at as 1.0, and every
             // other SDK writes that value as 1.
-            //
+            if number.isFinite && number.rounded() != number && fractions {
+                return pythonRepr(number)
+            }
             // Refused rather than passed through when it is not whole. Only a
             // whole number inside 2^53 is written the same way by every
             // language here; 1.5 and 1e-7 have per-language spellings, and
             // recording one would be a digest for a value nobody produced. No
-            // vector contains one, and if one ever does this should stop
+            // case output contains one, and if one ever does this should stop
             // rather than lie.
             precondition(
                 number.rounded() == number && number.isFinite
@@ -62,12 +67,58 @@ enum ConformanceRecord {
         case .string(let text):
             return quote(text)
         case .array(let items):
-            return "[" + items.map(canonical).joined(separator: ",") + "]"
+            return "[" + items.map { canonical($0, fractions: fractions) }.joined(separator: ",") + "]"
         case .object(let fields):
             return "{" + fields.keys.sorted().map { key in
-                quote(key) + ":" + canonical(fields[key]!)
+                quote(key) + ":" + canonical(fields[key]!, fractions: fractions)
             }.joined(separator: ",") + "}"
         }
+    }
+
+    /// A fraction spelled as the reference spells it: Python's `repr`.
+    ///
+    /// Only the digest of a vector file needs this. The file is the input, and
+    /// the reference digests it as Python parsed it, so `timeout_seconds: 0.2`
+    /// has to be spelled the way Python writes 0.2 for the two digests of the
+    /// same file to agree -- refusing it, as case outputs are, aborted the
+    /// writer and left no record at all. Swift's `description` is the shortest
+    /// string that round-trips, which `repr` is too; only the layout differs.
+    /// `repr` is positional for a decimal exponent from -4 to 15, and otherwise
+    /// `d.ddde±XX` with at least two exponent digits.
+    static func pythonRepr(_ number: Double) -> String {
+        var text = number.description
+        let negative = text.hasPrefix("-")
+        if negative { text.removeFirst() }
+        var mantissa = text
+        var exponent = 0
+        if let marker = text.firstIndex(where: { $0 == "e" || $0 == "E" }) {
+            mantissa = String(text[..<marker])
+            exponent = Int(text[text.index(after: marker)...].replacingOccurrences(of: "+", with: "")) ?? 0
+        }
+        let halves = mantissa.split(separator: ".", omittingEmptySubsequences: false)
+        var digits = String(halves[0]) + (halves.count > 1 ? String(halves[1]) : "")
+        var point = halves[0].count + exponent
+        while digits.count > 1 && digits.first == "0" {
+            digits.removeFirst()
+            point -= 1
+        }
+        while digits.count > 1 && digits.last == "0" { digits.removeLast() }
+        let sign = negative ? "-" : ""
+        let scientific = point - 1
+        if scientific < -4 || scientific >= 16 {
+            let lead = String(digits.prefix(1))
+            let rest = String(digits.dropFirst())
+            let magnitude = abs(scientific)
+            return sign + lead + (rest.isEmpty ? "" : "." + rest) + "e" + (scientific < 0 ? "-" : "+")
+                + (magnitude < 10 ? "0" : "") + String(magnitude)
+        }
+        if point <= 0 {
+            return sign + "0." + String(repeating: "0", count: -point) + digits
+        }
+        if point >= digits.count {
+            return sign + digits + String(repeating: "0", count: point - digits.count) + ".0"
+        }
+        return sign + String(digits.prefix(point)) + "." + String(digits.dropFirst(point))
     }
 
     /// The same escaping Python's `json.dumps(ensure_ascii=False)` produces:
@@ -151,7 +202,9 @@ enum ConformanceRecord {
             // The parsed JSON, not the bytes: a vendored copy is allowed to
             // differ in indentation and line endings, and the checker accepts
             // it on the same terms.
-            out[vectorFile] = ["digest": canonicalDigest(parsed), "cases": cases]
+            out[vectorFile] = [
+                "digest": sha256Hex(Array(canonical(parsed, fractions: true).utf8)), "cases": cases,
+            ]
         }
         let document: [String: Any] = ["schema_version": 1, "results": out]
         // Not `try?`. A path that is a directory, or unwritable, or whose

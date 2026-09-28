@@ -324,10 +324,7 @@ extension ThalovantControlPlane {
             "redirect_uri": .string(redirectURI),
         ]
         let response = try await requestObject("POST", "/v1/auth/native/token", body: payload, auth: false)
-        guard let token = response["access_token"]?.stringValue, !token.isEmpty else {
-            throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
-        }
-        accessToken = token
+        _ = try keepSignIn(response)
         return response
     }
 }

@@ -9,6 +9,11 @@ public let defaultDevicePollInterval: TimeInterval = 5.0
 
 /// The browser device sign-in ended in a terminal state before a token was
 /// issued. Timeouts waiting for approval throw `ThalovantTimeoutError` instead.
+///
+/// `loginWithBrowser` throws this. The one-step `pollDeviceLogin` throws
+/// `ThalovantApiError` instead, whose `kind` (`.deviceLoginDenied`,
+/// `.deviceLoginExpired`) says the same thing and which keeps the HTTP status
+/// and body beside it.
 public enum ThalovantDeviceLoginError: Error, Equatable, CustomStringConvertible, LocalizedError {
     /// The sign-in request was denied in the browser (`access_denied`).
     case denied
@@ -29,9 +34,10 @@ public enum ThalovantDeviceLoginError: Error, Equatable, CustomStringConvertible
     public var errorDescription: String? { message }
 }
 
-/// The pending authorization returned by `POST /v1/auth/device/authorize`,
-/// handed to the `DeviceLoginOptions.prompt` closure so callers can present
-/// the code themselves.
+/// The pending authorization returned by `POST /v1/auth/device/authorize`:
+/// what `beginDeviceLogin` returns, and what the `DeviceLoginOptions.prompt`
+/// closure is handed so callers can present the code themselves.
+/// `deviceCode` is the secret half; it never needs showing.
 public struct DeviceAuthorizationGrant: Sendable {
     public let deviceCode: String
     /// Short code the user types at `verificationUri`.
@@ -50,7 +56,8 @@ public struct DeviceAuthorizationGrant: Sendable {
 /// Options for `ThalovantControlPlane.loginWithBrowser`.
 public struct DeviceLoginOptions: Sendable {
     /// Scopes to request for the issued API token (sent as `scopes` only when
-    /// set; the server may normalize and expand the echoed scopes).
+    /// set and not empty; the server may normalize and expand the echoed
+    /// scopes).
     public var scopes: [String]?
     /// Human-readable name recorded on the issued token (sent as
     /// `client_name` only when set).
@@ -108,18 +115,247 @@ extension ThalovantControlPlane {
     /// seconds elapse (`ThalovantTimeoutError`).
     ///
     /// On approval the returned `accessToken` is a durable scoped API token
-    /// and is stored on `accessToken` exactly like `login(email:password:)`.
+    /// and is stored on `accessToken` exactly like `login(email:password:)`,
+    /// with its id on `tokenId`. `beginDeviceLogin` and `pollDeviceLogin` are
+    /// the same flow one step at a time, for a caller that runs its own loop.
     @discardableResult
     public func loginWithBrowser(options: DeviceLoginOptions = DeviceLoginOptions()) async throws -> DeviceLoginResult {
+        let grant = try await beginDeviceLogin(scopes: options.scopes, clientName: options.clientName)
+        defer { setDeviceInterval(grant.deviceCode, nil) }
+
+        options.prompt(grant)
+        if options.openBrowser, let completeUri = grant.verificationUriComplete, !completeUri.isEmpty {
+            openBrowserBestEffort(completeUri)
+        }
+
+        let token = try await pollDeviceToken(deviceCode: grant.deviceCode, interval: grant.interval, timeout: options.timeout)
+        return try acceptDeviceToken(token)
+    }
+
+    /// Starts a device sign-in: a code for a person to approve in a browser.
+    ///
+    /// `POST /v1/auth/device/authorize` with `scopes` and `clientName`, each
+    /// sent only when given; the API defaults the scopes to `hubs:read` and
+    /// `clients:write`. An empty scope list is left out exactly as none is:
+    /// the API requires at least one scope and answers `[]` with a 422. A Free plan can approve only `homeAssistantScopes`
+    /// (`hubs:read`, `clients:read`, `clients:write`). Show the person
+    /// `verificationUri` and `userCode` (or `verificationUriComplete`, which
+    /// carries the code), then call `pollDeviceLogin(_:)` every `interval`
+    /// seconds. A verification URL that is not http(s), has no host, or
+    /// carries credentials throws: it is about to be opened in a browser.
+    public func beginDeviceLogin(scopes: [String]? = nil, clientName: String? = nil) async throws -> DeviceAuthorizationGrant {
         var payload: JSONObject = [:]
-        if let scopes = options.scopes {
+        if let scopes, !scopes.isEmpty {
             payload["scopes"] = .array(scopes.map { .string($0) })
         }
-        if let clientName = options.clientName, !clientName.isEmpty {
+        if let clientName, !clientName.isEmpty {
             payload["client_name"] = .string(clientName)
         }
         let response = try await requestObject("POST", "/v1/auth/device/authorize", body: payload, auth: false)
+        let grant = try DeviceAuthorizationGrant(authorizationResponse: response)
+        setDeviceInterval(grant.deviceCode, grant.interval)
+        return grant
+    }
 
+    /// Asks once whether the device sign-in was approved.
+    ///
+    /// Returns the token and stores it on this control plane (`accessToken`
+    /// and `tokenId`). Otherwise throws `ThalovantApiError` whose `kind` says
+    /// why there is none yet: `.deviceLoginPending(interval:)` -- poll again
+    /// after `interval` seconds, already five seconds longer for every
+    /// `slow_down` the API sent for this code -- `.deviceLoginExpired` or
+    /// `.deviceLoginDenied`. Any other failure is a `ThalovantApiError` with
+    /// what the API said. Neither the device code nor the token ever appears
+    /// in an error's message.
+    @discardableResult
+    public func pollDeviceLogin(_ grant: DeviceAuthorizationGrant) async throws -> DeviceLoginResult {
+        setDeviceInterval(grant.deviceCode, grant.interval, onlyIfUnset: true)
+        return try acceptDeviceToken(try await deviceTokenOnce(grant.deviceCode))
+    }
+
+    /// `pollDeviceLogin(_:)` for a device code alone, such as one kept from a
+    /// sign-in begun in another process. The interval starts from what this
+    /// control plane last saw for the code, else `defaultDevicePollInterval`.
+    @discardableResult
+    public func pollDeviceLogin(deviceCode: String) async throws -> DeviceLoginResult {
+        try acceptDeviceToken(try await deviceTokenOnce(deviceCode))
+    }
+
+    /// Revokes an API token; by default the one this control plane signed in
+    /// with (`tokenId`).
+    ///
+    /// A token may always revoke itself (`DELETE /v1/auth/api-tokens/{id}`),
+    /// whatever its scopes. Revoking the token in use forgets it here too, so
+    /// a later call fails locally rather than with a 401.
+    ///
+    /// Revoking the token in use is idempotent. A token already revoked, or
+    /// expired, cannot authenticate its own revoke, so the API answers 401;
+    /// the token is dead either way, so that counts as revoked and forgets it,
+    /// and revoking again sends nothing and succeeds, until the next sign-in.
+    /// Revoking another token by id is not: a 404 for one the API does not
+    /// know throws as usual.
+    public func revokeApiToken(tokenId: String? = nil) async throws {
+        // The credentials this revoke is about, read whole. A sign-in that
+        // completes while the DELETE is on its way installs others, which are
+        // not forgotten.
+        let held = credentialSnapshot()
+        guard let target = tokenId.flatMap({ $0.isEmpty ? nil : $0 }) ?? held.tokenId, !target.isEmpty else {
+            // Already revoked and forgotten: revoking again changes nothing.
+            if held.revokedOwn && held.accessToken == nil { return }
+            throw ThalovantApiError(
+                message: "No API token id to revoke: pass tokenId, or sign in with a device login first."
+            )
+        }
+        let own = target == held.tokenId
+        do {
+            _ = try await requestData("DELETE", "/v1/auth/api-tokens/\(encodePathComponent(target))")
+        } catch let error as ThalovantApiError where own && error.statusCode == 401 {
+            // The token in use could not authenticate its own revoke: it is
+            // revoked or expired already.
+        }
+        if own { forgetRevoked(held) }
+    }
+
+    /// One `POST /v1/auth/device/token`: the token, or why there is none yet.
+    func deviceTokenOnce(_ deviceCode: String) async throws -> JSONObject {
+        let request = try buildRequest(
+            "POST",
+            "/v1/auth/device/token",
+            body: ["device_code": .string(deviceCode)],
+            auth: false
+        )
+        let (data, response) = try await perform(request)
+        if (200..<300).contains(response.statusCode) {
+            setDeviceInterval(deviceCode, nil)
+            guard let token = try? ThalovantJSON.decodeObject(data) else {
+                throw ThalovantApiError(message: "Thalovant API returned an unexpected response shape.")
+            }
+            return token
+        }
+        let body = String(decoding: data, as: UTF8.self)
+        let errorCode = response.statusCode == 400
+            ? (try? ThalovantJSON.decodeObject(data))?["error"]?.stringValue
+            : nil
+        var interval = deviceInterval(deviceCode) ?? defaultDevicePollInterval
+        switch errorCode {
+        case "slow_down", "authorization_pending":
+            if errorCode == "slow_down" {
+                // RFC 8628 §3.5: every slow_down adds five seconds, for good.
+                interval += 5
+                setDeviceInterval(deviceCode, interval)
+            }
+            throw ThalovantApiError(
+                message: "The device sign-in has not been approved yet.",
+                statusCode: response.statusCode,
+                body: body,
+                kind: .deviceLoginPending(interval: interval)
+            )
+        case "access_denied":
+            setDeviceInterval(deviceCode, nil)
+            throw ThalovantApiError(
+                message: "The device sign-in request was denied in the browser.",
+                statusCode: response.statusCode,
+                body: body,
+                kind: .deviceLoginDenied
+            )
+        case "expired_token":
+            setDeviceInterval(deviceCode, nil)
+            throw ThalovantApiError(
+                message: "The device sign-in code expired before it was approved. "
+                    + "Call beginDeviceLogin() again to request a new code.",
+                statusCode: response.statusCode,
+                body: body,
+                kind: .deviceLoginExpired
+            )
+        default:
+            throw ThalovantApiError.httpFailure(
+                statusCode: response.statusCode, body: body, header: { response.value(forHTTPHeaderField: $0) })
+        }
+    }
+
+    /// Stores an approved token -- `accessToken` and `tokenId` -- and returns it.
+    func acceptDeviceToken(_ token: JSONObject) throws -> DeviceLoginResult {
+        let accessToken = try keepSignIn(token)
+        return DeviceLoginResult(
+            accessToken: accessToken,
+            tokenType: token["token_type"]?.stringValue,
+            scopes: (token["scopes"]?.arrayValue ?? []).compactMap { $0.stringValue },
+            expiresAt: token["expires_at"]?.stringValue,
+            tokenId: self.tokenId,
+            raw: token
+        )
+    }
+
+    /// Polls `POST /v1/auth/device/token` until approval or a terminal state.
+    ///
+    /// `sleep` and `clock` are injectable so tests can drive the loop without
+    /// real waiting: `clock` returns monotonic seconds, and `sleep` suspends
+    /// for the requested seconds. A `slow_down` response grows the wait by 5
+    /// seconds, as the device-flow contract requires. A denied or expired code
+    /// throws `ThalovantDeviceLoginError`, as `loginWithBrowser` always has.
+    func pollDeviceToken(
+        deviceCode: String,
+        interval: TimeInterval,
+        timeout: TimeInterval,
+        sleep: @Sendable (TimeInterval) async throws -> Void = { seconds in
+            if seconds > 0 {
+                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            }
+        },
+        clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
+    ) async throws -> JSONObject {
+        let deadline = clock() + timeout
+        setDeviceInterval(deviceCode, interval)
+        while true {
+            let wait: TimeInterval
+            do {
+                return try await deviceTokenOnce(deviceCode)
+            } catch let error as ThalovantApiError {
+                switch error.kind {
+                case .deviceLoginPending(let interval):
+                    wait = interval
+                case .deviceLoginDenied:
+                    throw ThalovantDeviceLoginError.denied
+                case .deviceLoginExpired:
+                    throw ThalovantDeviceLoginError.expired
+                default:
+                    throw error
+                }
+            }
+            let remaining = deadline - clock()
+            if remaining <= 0 {
+                throw ThalovantTimeoutError("Timed out waiting for the device sign-in to be approved.")
+            }
+            try await sleep(min(wait, remaining))
+        }
+    }
+}
+
+extension DeviceAuthorizationGrant {
+    /// A grant from what a caller kept, to poll a sign-in begun elsewhere:
+    /// only `deviceCode` and `interval` matter to `pollDeviceLogin(_:)`.
+    public init(
+        deviceCode: String,
+        userCode: String = "",
+        verificationUri: String = "",
+        verificationUriComplete: String? = nil,
+        expiresIn: Int? = nil,
+        interval: TimeInterval = defaultDevicePollInterval
+    ) {
+        self.init(
+            deviceCode: deviceCode,
+            userCode: userCode,
+            verificationUri: verificationUri,
+            verificationUriComplete: verificationUriComplete,
+            expiresIn: expiresIn,
+            interval: interval,
+            raw: [:]
+        )
+    }
+
+    /// Parses `POST /v1/auth/device/authorize`, refusing URLs a browser should
+    /// not open.
+    init(authorizationResponse response: JSONObject) throws {
         guard
             let deviceCode = response["device_code"]?.stringValue, !deviceCode.isEmpty,
             let userCode = response["user_code"]?.stringValue, !userCode.isEmpty,
@@ -138,7 +374,7 @@ extension ThalovantControlPlane {
         } else {
             interval = defaultDevicePollInterval
         }
-        let grant = DeviceAuthorizationGrant(
+        self.init(
             deviceCode: deviceCode,
             userCode: userCode,
             verificationUri: verificationUri,
@@ -147,82 +383,6 @@ extension ThalovantControlPlane {
             interval: interval,
             raw: response
         )
-
-        options.prompt(grant)
-        if options.openBrowser, let completeUri = grant.verificationUriComplete, !completeUri.isEmpty {
-            openBrowserBestEffort(completeUri)
-        }
-
-        let token = try await pollDeviceToken(deviceCode: deviceCode, interval: interval, timeout: options.timeout)
-        guard let accessToken = token["access_token"]?.stringValue, !accessToken.isEmpty else {
-            throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
-        }
-        self.accessToken = accessToken
-        return DeviceLoginResult(
-            accessToken: accessToken,
-            tokenType: token["token_type"]?.stringValue,
-            scopes: (token["scopes"]?.arrayValue ?? []).compactMap { $0.stringValue },
-            expiresAt: token["expires_at"]?.stringValue,
-            tokenId: token["token_id"]?.stringValue,
-            raw: token
-        )
-    }
-
-    /// Polls `POST /v1/auth/device/token` until approval or a terminal state.
-    ///
-    /// `sleep` and `clock` are injectable so tests can drive the loop without
-    /// real waiting: `clock` returns monotonic seconds, and `sleep` suspends
-    /// for the requested seconds. A `slow_down` response grows the wait by 5
-    /// seconds, as the device-flow contract requires.
-    func pollDeviceToken(
-        deviceCode: String,
-        interval: TimeInterval,
-        timeout: TimeInterval,
-        sleep: @Sendable (TimeInterval) async throws -> Void = { seconds in
-            if seconds > 0 {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
-            }
-        },
-        clock: @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }
-    ) async throws -> JSONObject {
-        let deadline = clock() + timeout
-        var wait = interval
-        while true {
-            let request = try buildRequest(
-                "POST",
-                "/v1/auth/device/token",
-                body: ["device_code": .string(deviceCode)],
-                auth: false
-            )
-            let (data, response) = try await perform(request)
-            if (200..<300).contains(response.statusCode) {
-                guard let token = try? ThalovantJSON.decodeObject(data) else {
-                    throw ThalovantApiError(message: "Thalovant API returned an unexpected response shape.")
-                }
-                return token
-            }
-            let body = String(decoding: data, as: UTF8.self)
-            let errorCode = response.statusCode == 400
-                ? (try? ThalovantJSON.decodeObject(data))?["error"]?.stringValue
-                : nil
-            switch errorCode {
-            case "authorization_pending":
-                break
-            case "slow_down":
-                wait += 5
-            case "access_denied":
-                throw ThalovantDeviceLoginError.denied
-            case "expired_token":
-                throw ThalovantDeviceLoginError.expired
-            default:
-                throw ThalovantApiError.httpFailure(statusCode: response.statusCode, body: body)
-            }
-            let remaining = deadline - clock()
-            if remaining <= 0 {
-                throw ThalovantTimeoutError("Timed out waiting for the device sign-in to be approved.")
-            }
-            try await sleep(min(wait, remaining))
-        }
     }
 }
 

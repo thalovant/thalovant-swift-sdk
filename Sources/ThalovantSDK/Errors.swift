@@ -21,6 +21,12 @@ import Foundation
 ///
 /// All three are nil for a failure with no response body, such as a missing
 /// token or a transport error.
+///
+/// `kind` says what sort of refusal it is -- sign in again, a plan limit, a hub
+/// already linked, a connection type the API does not know, a device sign-in
+/// still waiting -- so a caller can branch without reading codes. Every kind
+/// is still this one type, so a `catch let error as ThalovantApiError` written
+/// before `kind` existed matches all of them, with every field above on each.
 public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError {
     public let message: String
     /// HTTP status code, when the server produced a response.
@@ -42,17 +48,36 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
     /// empty body, a body that is not JSON, or JSON that is not an object.
     /// Whole numbers stay `.integer`.
     public let problem: JSONObject?
+    /// What kind of refusal this is. Read from the status and the body when
+    /// the API answered: 401, 423 and a 403 `Insufficient scopes` are `.auth`;
+    /// 402 and a 403 `plan_limit` are `.plan`; a 409
+    /// `home_assistant_already_linked` is `.alreadyLinked`. The calls that
+    /// know more say so: a device-login poll, and a create whose connection
+    /// type the API does not know. `.unreachable` when the API never
+    /// answered, `.other` for everything else, including a local failure. New
+    /// kinds may be added, so a `switch` over it needs a `default`.
+    public let kind: Kind
+    /// How long the API asked the caller to wait before trying again, in
+    /// seconds, when it said: a 429's `retry_after_seconds` (at the top of
+    /// the problem or inside its `detail` object), else its `Retry-After` or
+    /// `RateLimit-Reset` header when either is a whole number of seconds.
+    /// Nil otherwise. The API's own rate limiter answers a 429 in plain text
+    /// with only `RateLimit-*` headers, which is why the headers count.
+    public let retryAfterSeconds: TimeInterval?
 
     /// Values passed here win over what `body` says. Given `body` and no
     /// `problem`, `problem` is `body` parsed; `errorCode` and `detail` are then
-    /// read from `problem`.
+    /// read from `problem`. Without `kind`, the kind is read from the status
+    /// and the problem.
     public init(
         message: String,
         statusCode: Int? = nil,
         body: String? = nil,
         errorCode: String? = nil,
         detail: String? = nil,
-        problem: JSONObject? = nil
+        problem: JSONObject? = nil,
+        kind: Kind? = nil,
+        retryAfterSeconds: TimeInterval? = nil
     ) {
         self.init(
             message: message,
@@ -60,7 +85,9 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
             body: body,
             errorCode: errorCode,
             detail: detail,
-            parsed: problem ?? Self.problem(from: body)
+            parsed: problem ?? Self.problem(from: body),
+            kind: kind,
+            retryAfterSeconds: retryAfterSeconds
         )
     }
 
@@ -70,7 +97,9 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
         body: String?,
         errorCode: String?,
         detail: String?,
-        parsed problem: JSONObject?
+        parsed problem: JSONObject?,
+        kind: Kind?,
+        retryAfterSeconds: TimeInterval?
     ) {
         self.message = message
         self.statusCode = statusCode
@@ -79,6 +108,82 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
         let read = Self.problemFields(problem)
         self.errorCode = errorCode ?? read.code
         self.detail = detail ?? read.detail
+        self.kind = kind ?? Self.kind(
+            statusCode: statusCode, errorCode: self.errorCode, detail: self.detail, problem: problem)
+        self.retryAfterSeconds = retryAfterSeconds ?? Self.retryAfter(problem)
+    }
+
+    /// A problem's `retry_after_seconds`, at its top or inside a `detail`
+    /// object: the API's per-token 429 is FastAPI's envelope around a
+    /// structured refusal, so the number sits inside `detail`, as `code` does.
+    static func retryAfter(_ problem: JSONObject?) -> TimeInterval? {
+        guard let problem else { return nil }
+        for source in [problem, problem["detail"]?.objectValue ?? [:]] {
+            switch source["retry_after_seconds"] {
+            case .integer(let seconds)? where seconds >= 0: return TimeInterval(seconds)
+            case .number(let seconds)? where seconds.isFinite && seconds >= 0: return seconds
+            default: continue
+            }
+        }
+        return nil
+    }
+
+    /// `Retry-After` in whole seconds, else `RateLimit-Reset`. An HTTP-date
+    /// `Retry-After` is not read.
+    static func retryAfter(header: (String) -> String?) -> TimeInterval? {
+        for name in ["Retry-After", "RateLimit-Reset"] {
+            let value = header(name)?.trimmingCharacters(in: .whitespaces) ?? ""
+            if !value.isEmpty, value.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }), let seconds = Int(value) {
+                return TimeInterval(seconds)
+            }
+        }
+        return nil
+    }
+
+    /// The same error, told apart as `kind`, with its own message: everything
+    /// the API said -- status, body, code, detail, problem -- is kept.
+    func reclassified(as kind: Kind, message: String? = nil) -> ThalovantApiError {
+        ThalovantApiError(
+            message: message ?? self.message,
+            statusCode: statusCode,
+            body: body,
+            errorCode: errorCode,
+            detail: detail,
+            parsed: problem,
+            kind: kind,
+            retryAfterSeconds: retryAfterSeconds
+        )
+    }
+
+    /// The kind an answer's status and problem make it.
+    static func kind(statusCode: Int?, errorCode: String?, detail: String?, problem: JSONObject?) -> Kind {
+        guard let statusCode else { return .other }
+        if statusCode == 401 || statusCode == 423 || (statusCode == 403 && detail == "Insufficient scopes") {
+            // A token unknown, expired or revoked; an account locked; or a token
+            // without the scope: signing in again is the way out of each.
+            return .auth
+        }
+        if statusCode == 402 || (statusCode == 403 && errorCode == "plan_limit") {
+            return .plan
+        }
+        if statusCode == 409 && errorCode == "home_assistant_already_linked" {
+            return .alreadyLinked(clientId: linkedClientId(problem))
+        }
+        return .other
+    }
+
+    /// The connection that holds a link, when the refusal names it: at the top
+    /// of the body or inside a `detail` object, under any of the spellings
+    /// the API has used.
+    private static func linkedClientId(_ problem: JSONObject?) -> String? {
+        guard let problem else { return nil }
+        let nested = problem["detail"]?.objectValue ?? [:]
+        for source in [problem, nested] {
+            for key in ["client_id", "existing_client_id", "connection_id"] {
+                if let value = source[key]?.stringValue, !value.isEmpty { return value }
+            }
+        }
+        return nil
     }
 
     public var description: String { message }
@@ -122,7 +227,9 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
     /// and device/token carry credentials). The complete body is still
     /// retained in `body`, and parsed in `problem`, with `errorCode` and the
     /// whole `detail` read from it.
-    static func httpFailure(statusCode: Int, body: String) -> ThalovantApiError {
+    static func httpFailure(
+        statusCode: Int, body: String, header: (String) -> String? = { _ in nil }
+    ) -> ThalovantApiError {
         let problem = Self.problem(from: body)
         let summary = serverErrorDetail(problem)
         let message = summary.isEmpty
@@ -134,9 +241,118 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
             body: body,
             errorCode: nil,
             detail: nil,
-            parsed: problem
+            parsed: problem,
+            kind: nil,
+            retryAfterSeconds: Self.retryAfter(problem) ?? Self.retryAfter(header: header)
         )
     }
+}
+
+extension ThalovantApiError {
+    /// The kinds of refusal a caller branches on. See `ThalovantApiError.kind`.
+    public enum Kind: Equatable, Sendable {
+        /// An ordinary API error, or a local failure with no answer behind it.
+        case other
+        /// The token is unknown, expired, revoked or lacks the scope, or the
+        /// account is locked: sign in again.
+        case auth
+        /// The account's plan does not allow it: a 402, or a 403 `plan_limit`
+        /// whose `problem` carries `resource`, `limit` and `used`.
+        case plan
+        /// A hub takes one connection of this kind and already has it (409
+        /// `home_assistant_already_linked`). `clientId` is the connection that
+        /// holds the link, when the API said which.
+        case alreadyLinked(clientId: String?)
+        /// The API does not know the connection type asked for: a 422 about
+        /// `connection_type`, or a created connection that came back of
+        /// another type -- which the SDK deleted before throwing.
+        case unsupportedConnectionType
+        /// A device sign-in nobody has approved yet. Poll again after
+        /// `interval` seconds, already five seconds longer for every
+        /// `slow_down` the API sent for this code.
+        case deviceLoginPending(interval: TimeInterval)
+        /// The device code expired before anybody approved it; begin again.
+        case deviceLoginExpired
+        /// The person declined the sign-in.
+        case deviceLoginDenied
+        /// The API could not be reached at all -- DNS, the connection, TLS,
+        /// a proxy -- so there is no status, code or detail. Trying again
+        /// later can work; nothing was refused.
+        case unreachable
+    }
+}
+
+/// An error that means the hub connection could not be made or kept.
+///
+/// The SDK's errors are distinct value types rather than a class hierarchy,
+/// so an error that is two things at once -- the admission timeout is both a
+/// connection error and a timeout -- conforms to a protocol for each.
+/// `ThalovantConnectionError` conforms, and so do
+/// `ThalovantAdmissionFailedError` and `ThalovantAdmissionTimeoutError`:
+/// `catch let error as any ThalovantConnectionFailure` takes all of them.
+public protocol ThalovantConnectionFailure: Error {
+    var message: String { get }
+}
+
+/// An error that means something did not happen within its deadline.
+///
+/// `ThalovantTimeoutError` conforms, and so does
+/// `ThalovantAdmissionTimeoutError`: `catch let error as any
+/// ThalovantTimeoutFailure` takes both.
+public protocol ThalovantTimeoutFailure: Error {
+    var message: String { get }
+}
+
+extension ThalovantConnectionError: ThalovantConnectionFailure {}
+extension ThalovantTimeoutError: ThalovantTimeoutFailure {}
+
+/// A hub did not admit a new connection within the wait.
+///
+/// Both a connection error and a timeout: the connection exists and may still
+/// be admitted, so waiting longer, or connecting later, can succeed. Match it
+/// by its own type, or as `any ThalovantConnectionFailure` or `any
+/// ThalovantTimeoutFailure`.
+public struct ThalovantAdmissionTimeoutError: ThalovantConnectionFailure, ThalovantTimeoutFailure,
+    CustomStringConvertible, LocalizedError
+{
+    public let message: String
+    /// The seconds waited.
+    public let timeout: TimeInterval
+    public init(_ message: String, timeout: TimeInterval) {
+        self.message = message
+        self.timeout = timeout
+    }
+    public var description: String { message }
+    public var errorDescription: String? { message }
+}
+
+/// A new connection will not be admitted.
+///
+/// Either the operation that admits it failed or the platform gave up on it
+/// -- `errorCode` is the operation's own code, and `apiError` is nil -- or the
+/// API refused the wait itself, and then `apiError` keeps what it answered:
+/// `statusCode`, `errorCode`, `detail` and `problem`, as any refusal does. An
+/// authentication refusal is not this: it comes as the `ThalovantApiError`
+/// it is, of kind `.auth`.
+public struct ThalovantAdmissionFailedError: ThalovantConnectionFailure, CustomStringConvertible, LocalizedError {
+    public let message: String
+    /// The operation's own error code, for a failure on the platform.
+    public let errorCode: String?
+    /// The API's answer, when it refused the wait itself.
+    public let apiError: ThalovantApiError?
+    public init(_ message: String, errorCode: String? = nil, apiError: ThalovantApiError? = nil) {
+        self.message = message
+        self.errorCode = errorCode
+        self.apiError = apiError
+    }
+    /// The HTTP status of the API's refusal; nil for a failure on the platform.
+    public var statusCode: Int? { apiError?.statusCode }
+    /// The API's own sentence, when it refused the wait.
+    public var detail: String? { apiError?.detail }
+    /// The API's whole error body, when it refused the wait.
+    public var problem: JSONObject? { apiError?.problem }
+    public var description: String { message }
+    public var errorDescription: String? { message }
 }
 
 /// A short, non-sensitive server detail for a human-facing error message. For a
@@ -196,11 +412,41 @@ public struct ThalovantIdentityError: Error, CustomStringConvertible, LocalizedE
 }
 
 /// The hub data-plane connection could not be established or was lost.
+///
+/// `kind` tells the two verdicts that retrying will not change apart from a
+/// connection that simply failed: `.refused`, the hub turning these
+/// credentials away, and `.keyChanged`, a hub whose Noise key is not the one
+/// pinned for it. Both are still this type, so a `catch let error as
+/// ThalovantConnectionError` written before `kind` existed matches them.
 public struct ThalovantConnectionError: Error, CustomStringConvertible, LocalizedError {
     public let message: String
-    public init(_ message: String) { self.message = message }
+    public let kind: Kind
+    public init(_ message: String, kind: Kind = .other) {
+        self.message = message
+        self.kind = kind
+    }
     public var description: String { message }
     public var errorDescription: String? { message }
+
+    public enum Kind: Equatable, Sendable {
+        /// The connection could not be made or was lost; trying again can work.
+        case other
+        /// The hub turned these credentials away: it closed the socket during
+        /// the handshake without a status, with 1000 or with 1008, answered the
+        /// WebSocket upgrade 401 or 403, or sent a Noise handshake message that
+        /// does not authenticate under the key the password derives. A
+        /// connection just created is refused until its hub admits it, so a
+        /// refusal can still clear up; `HubSession.run()` retries refusals for
+        /// `HubSessionPolicy.refusalGraceSeconds`, then throws.
+        case refused
+        /// The hub answered with a different Noise key than the one pinned for
+        /// it: the hub was replaced, or somebody is in between, and the SDK
+        /// cannot tell which. It never connects and never replaces the pin by
+        /// itself. Retrying changes nothing, so `HubSession.run()` stops on it
+        /// at once. Remove the pin only once the new key is known to be the
+        /// hub's.
+        case keyChanged
+    }
 }
 
 /// The hub reported a runtime failure while handling a request.
