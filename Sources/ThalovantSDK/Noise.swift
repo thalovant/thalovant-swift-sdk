@@ -16,6 +16,16 @@ public protocol ThalovantNoiseStore: Sendable {
     func pin(_ key: Data, nodeID: String) throws
 }
 
+/// The folder `store`'s client key is in, and the other folder another program
+/// reading the same identity most likely keeps its key in: the default folder
+/// for a store placed elsewhere. Nil for a store that is not files.
+func noiseKeyFolders(_ store: any ThalovantNoiseStore) -> (used: String?, other: String?) {
+    guard let files = store as? ThalovantFileNoiseStore else { return (nil, nil) }
+    let used = files.directoryURL.standardizedFileURL.path
+    let fallback = ThalovantFileNoiseStore.defaultDirectory.standardizedFileURL.path
+    return (used, used == fallback ? nil : fallback)
+}
+
 /// Secure POSIX files (0700 directory, 0600 files, no symlink following), with a
 /// process lock for first-use creation. Keys never enter identity serialization.
 public final class ThalovantFileNoiseStore: ThalovantNoiseStore, @unchecked Sendable {
@@ -23,12 +33,22 @@ public final class ThalovantFileNoiseStore: ThalovantNoiseStore, @unchecked Send
     private let scope: String
     private let lock = NSLock()
 
-    public init(directory: URL? = nil, identityScope: String) {
+    /// The folder a store keeps its keys in when given none: Application
+    /// Support's `Thalovant/noise-swift`, each identity's files named by a
+    /// hash of its access key.
+    public static var defaultDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".thalovant")
-        self.directory = directory ?? base.appendingPathComponent("Thalovant/noise-swift", isDirectory: true)
+        return base.appendingPathComponent("Thalovant/noise-swift", isDirectory: true)
+    }
+
+    public init(directory: URL? = nil, identityScope: String) {
+        self.directory = directory ?? Self.defaultDirectory
         self.scope = noiseHex(noiseHash(Data(identityScope.utf8)))
     }
+
+    /// The folder this store keeps its keys in.
+    public var directoryURL: URL { directory }
 
     public func privateKey() throws -> Data {
         try lockedFile("client-\(scope)") { existing in
@@ -245,6 +265,10 @@ final class NoiseConnection: @unchecked Sendable {
             return frames
         }
     }
+    /// Seals one frame whose first byte is already the framing marker (0 or 1
+    /// whole, 2 or 3 the first chunk, 4 a middle one, 5 the last). `encrypt`
+    /// chooses the markers itself; the test suite's hub sends a lone chunk.
+    func sealFrame(_ markedPayload: Data) throws -> Data { try lock.locked { try operation(markedPayload, 2) } }
     func decrypt(_ frame: Data) throws -> (Data, Bool)? {
         try lock.locked {
             let clear = try operation(frame, 3)

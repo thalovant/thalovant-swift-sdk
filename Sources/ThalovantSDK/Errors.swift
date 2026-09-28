@@ -421,9 +421,51 @@ public struct ThalovantIdentityError: Error, CustomStringConvertible, LocalizedE
 public struct ThalovantConnectionError: Error, CustomStringConvertible, LocalizedError {
     public let message: String
     public let kind: Kind
+    /// Whether this refusal is the hub refusing this client's own Noise key:
+    /// it pinned a different one for the connection when it first connected,
+    /// and closed the link the moment an XX handshake showed it another. Only
+    /// ever true with `kind == .refused`, so code that catches a refusal still
+    /// catches it. No handshake can recover from it (XX shows the same key
+    /// again), so `HubSession.run()` stops on it at once. The fix is to pair
+    /// again -- a new connection pins afresh -- or to share the key folder:
+    /// point every program that reads this identity at the folder holding the
+    /// key the hub trusts.
+    public let clientKeyRejected: Bool
+    /// With `clientKeyRejected`: the folder this client's key is in, when its
+    /// store is a `ThalovantFileNoiseStore`.
+    public let keyFolder: String?
+    /// With `clientKeyRejected`: where another program reading the same
+    /// identity likely keeps its key, when there is such a folder.
+    public let otherKeyFolder: String?
+
     public init(_ message: String, kind: Kind = .other) {
         self.message = message
         self.kind = kind
+        self.clientKeyRejected = false
+        self.keyFolder = nil
+        self.otherKeyFolder = nil
+    }
+
+    private init(clientKeyRejectedMessage message: String, keyFolder: String?, otherKeyFolder: String?) {
+        self.message = message
+        self.kind = .refused
+        self.clientKeyRejected = true
+        self.keyFolder = keyFolder
+        self.otherKeyFolder = otherKeyFolder
+    }
+
+    /// The hub refusing this client's own key, naming the folders.
+    static func clientKeyRejected(keyFolder: String?, otherKeyFolder: String?) -> ThalovantConnectionError {
+        let used = keyFolder.map { "This client's key is in \($0)." } ?? "This client's key is in its Noise store."
+        let elsewhere = otherKeyFolder.map {
+            " Another program that reads the same identity may keep its key in \($0), and the hub may have pinned that one."
+        } ?? ""
+        return ThalovantConnectionError(
+            clientKeyRejectedMessage: "The hub refused this client's Noise key: it pinned a different key for this "
+                + "connection when it first connected. \(used)\(elsewhere) A new handshake cannot fix this. Re-pair, "
+                + "or share the key folder: point every program that uses this identity at the folder holding the "
+                + "key the hub trusts (ThalovantFileNoiseStore(directory:identityScope:)).",
+            keyFolder: keyFolder, otherKeyFolder: otherKeyFolder)
     }
     public var description: String { message }
     public var errorDescription: String? { message }

@@ -55,6 +55,60 @@ final class PythonParityTests: XCTestCase {
         let intent = HubIntent(skillId: "x",name: "x",engine: "padatious",phrases: ["en-us":["{x}","a complete sentence","[please]","(x|y)","x"]])
         XCTAssertEqual(intent.examples(lang: "en-us",limit: 2,speakable: true),["a complete sentence","x"])
     }
+    /// What `speakable` did before it was one pass: take the innermost pair
+    /// out and start again, a full scan per level of nesting.
+    private func speakableByRescanning(_ pattern: String) -> String {
+        func innermost(_ text: String, _ open: Character, _ close: Character, _ resolve: (String) -> String) -> String? {
+            let chars = Array(text)
+            var lastOpen: Int?
+            for (index, char) in chars.enumerated() {
+                if char == open { lastOpen = index }
+                if char == close, let start = lastOpen {
+                    return String(chars[..<start]) + resolve(String(chars[(start + 1)..<index])) + String(chars[(index + 1)...])
+                }
+            }
+            return nil
+        }
+        var text = pattern
+        while let next = innermost(text, "[", "]", { _ in "" }) { text = next }
+        while let next = innermost(text, "(", ")", { inside in
+            let options = inside.split(separator: "|", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            let real = options.filter { !$0.isEmpty }
+            return real.count < options.count && real.count <= 1 ? "" : real.first ?? ""
+        }) { text = next }
+        return speakable(text)
+    }
+
+    func testSpeakableIsLinearAndStillTheSameRule() {
+        // Patterns come from hubs: nested sixteen thousand deep, around sixteen
+        // thousand letters, is one pass -- not one per level, and not the
+        // letters copied again at every level.
+        let depth = 16_000
+        let deep = String(repeating: "(a|", count: depth) + "b" + String(repeating: ")", count: depth)
+        let wide = String(repeating: "(", count: depth) + String(repeating: "x", count: depth)
+            + String(repeating: ")", count: depth)
+        let optional = String(repeating: "[x ", count: depth) + String(repeating: "]", count: depth) + "stay"
+        let started = ProcessInfo.processInfo.systemUptime
+        XCTAssertEqual(speakable(deep), "a")
+        XCTAssertEqual(speakable(wide), String(repeating: "x", count: depth))
+        XCTAssertEqual(speakable(optional), "stay")
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+        XCTAssertEqual(speakable("mute it [for a (second|bit)] now"), "mute it now")
+        XCTAssertEqual(speakable("a ] b [ c ( d"), "a ] b [ c ( d")
+        XCTAssertEqual(speakable("[a [b] c"), "[a c")
+        XCTAssertEqual(speakable("( (a|) b) c"), "b c")
+        XCTAssertEqual(speakable("x (a|(b|c)|) y ( d | e"), "x a y ( d | e")
+        // The same answers as rescanning, on random patterns.
+        var generator = SystemRandomNumberGenerator()
+        let alphabet: [Character] = ["(", ")", "[", "]", "|", " ", "\t", "a", "b", ",", "{", "}", "x", "_"]
+        for _ in 0..<50_000 {
+            let pattern = String((0..<Int.random(in: 0...24, using: &generator)).map { _ in
+                alphabet.randomElement(using: &generator)!
+            })
+            XCTAssertEqual(speakable(pattern), speakableByRescanning(pattern), pattern)
+        }
+    }
     func testEmbeddedAudioIsStrictBoundedAndCollected() throws {
         XCTAssertEqual(try ThalovantEvent(name: ThalovantEvents.audioQueue,data: ["binary_data":.string(" \t")]).audioBytes(),Data())
         XCTAssertThrowsError(try ThalovantEvent(name: ThalovantEvents.audioQueue,data: ["binary_data":.string("00 ")]).audioBytes(maxBytes:1))

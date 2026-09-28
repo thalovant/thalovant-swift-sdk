@@ -97,7 +97,7 @@ final class ApiErrorVectorTests: XCTestCase {
 
     func testAnApiErrorCarriesWhatItsVectorNames() async throws {
         let cases = try cases()
-        XCTAssertEqual(cases.count, 13)
+        XCTAssertEqual(cases.count, 15)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let error = try await refusal(try XCTUnwrap(row["response"]?.objectValue, name), name)

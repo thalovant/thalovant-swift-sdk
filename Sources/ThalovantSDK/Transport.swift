@@ -134,8 +134,14 @@ final class LinkLifetime: @unchecked Sendable {
     /// one. `closedAfterHandshakeMs` is when the close happened, counted from
     /// the end of the handshake, or nil for a close during it: its own time
     /// decides, not when the code was learnt. `codeLateMs` is how long after
-    /// the close the code became known.
-    static func closeRefuses(code: Int?, closedAfterHandshakeMs: Int?, codeLateMs: Int = 0) -> Bool {
+    /// the close the code became known. `afterAuthenticatedFrame` is whether
+    /// the hub had sent a frame that decrypted under the session's keys before
+    /// it closed: a hub refuses a key before it sends anything, so after one
+    /// it had accepted the credentials, and the close is a drop.
+    static func closeRefuses(
+        code: Int?, closedAfterHandshakeMs: Int?, codeLateMs: Int = 0, afterAuthenticatedFrame: Bool = false
+    ) -> Bool {
+        if afterAuthenticatedFrame { return false }
         guard let code, refusalCloseCodes.contains(code), codeLateMs <= closeCodeGraceMs else { return false }
         return closedAfterHandshakeMs.map { $0 <= refusalSettleMs } ?? true
     }
@@ -150,6 +156,17 @@ final class LinkLifetime: @unchecked Sendable {
     private var code: Int?
     private var codeAt: TimeInterval?
     private var chosen: String?
+    private var heardFromHub = false
+    private var noiseDone = false
+    /// The folder this attempt's client key is in, and the other likely one
+    /// for the same identity, for the error when the hub refuses that key.
+    let keyFolder: String?
+    let otherKeyFolder: String?
+
+    init(keyFolder: String? = nil, otherKeyFolder: String? = nil) {
+        self.keyFolder = keyFolder
+        self.otherKeyFolder = otherKeyFolder
+    }
 
     /// When the handshake completed, on the monotonic clock; nil until then.
     var handshakeTime: TimeInterval? { lock.locked { handshakeAt } }
@@ -162,14 +179,50 @@ final class LinkLifetime: @unchecked Sendable {
     var closeCode: Int? { lock.locked { code } }
     /// Whether the connection ended the way a hub refuses credentials: a
     /// refusal code, during the handshake or within the settle window after
-    /// it, and learnt within the grace.
-    var refused: Bool {
-        lock.locked {
-            guard let endedAt else { return false }
-            let after = handshakeAt.map { Int(((endedAt - $0) * 1000).rounded(.down)) }
-            let late = codeAt.map { Int((($0 - endedAt) * 1000).rounded(.down)) } ?? 0
-            return Self.closeRefuses(code: code, closedAfterHandshakeMs: after, codeLateMs: late)
+    /// it, before the hub sent anything that decrypted, and learnt within the
+    /// grace.
+    var refused: Bool { lock.locked { refusedLocked } }
+
+    private var refusedLocked: Bool {
+        guard let endedAt else { return false }
+        let after = handshakeAt.map { Int(((endedAt - $0) * 1000).rounded(.down)) }
+        let late = codeAt.map { Int((($0 - endedAt) * 1000).rounded(.down)) } ?? 0
+        return Self.closeRefuses(
+            code: code, closedAfterHandshakeMs: after, codeLateMs: late, afterAuthenticatedFrame: heardFromHub)
+    }
+
+    /// Whether the hub refused this client's own key: a refusal as an XX
+    /// handshake ended, with nothing from the hub in between. A hub pins the
+    /// first static key a connection presents and aborts on any other, and XX
+    /// is where it sees the key. After KK -- which the hub could only complete
+    /// with the key it pinned -- the same close is a plain refusal.
+    var clientKeyRejected: Bool {
+        lock.locked { refusedLocked && (handshakeAt != nil || noiseDone) && chosen?.hasPrefix("XX") == true }
+    }
+
+    /// Notes that this side's Noise handshake completed: from here the hub has
+    /// seen this client's key, even before the HELLO that follows goes out.
+    func completeNoise() { lock.locked { noiseDone = true } }
+
+    /// Whether this side's Noise handshake completed.
+    var noiseCompleted: Bool { lock.locked { noiseDone } }
+
+    /// Notes that a frame from the hub decrypted under this session's keys:
+    /// the hub accepted the credentials, and no later close is a refusal.
+    func heardAuthenticatedFrame() {
+        lock.locked { if handshakeAt != nil { heardFromHub = true } }
+    }
+
+    /// The error for a link the hub closed right after its handshake, as a
+    /// refusal: the hub refusing this client's key after XX, a plain refusal
+    /// otherwise.
+    func refusalAfterHandshake() -> ThalovantConnectionError {
+        guard clientKeyRejected else {
+            return ThalovantConnectionError(
+                "The hub closed the link right after the handshake: it does not accept these credentials, or not yet.",
+                kind: .refused)
         }
+        return .clientKeyRejected(keyFolder: keyFolder, otherKeyFolder: otherKeyFolder)
     }
 
     func completeHandshake(at now: TimeInterval = ProcessInfo.processInfo.systemUptime) {
@@ -468,7 +521,8 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             writer = NoiseSocketWriter()
             openGate = AsyncGate(); handshakeGate = AsyncGate()
             handshakeCompleteFlag = false; lastErrorMessage = nil
-            let attempt = LinkLifetime()
+            let folders = noiseKeyFolders(noiseStore)
+            let attempt = LinkLifetime(keyFolder: folders.used, otherKeyFolder: folders.other)
             let (socket, session) = makeSocket(url, self)
             self.session = session; self.socket = socket; currentLifetime = attempt
             return (socket, openGate, handshakeGate, attempt, true)
@@ -495,7 +549,11 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
             // joining caller's timeout/cancellation must not abort other users.
             if startsAttempt { handleSocketFailure(error, on: socket) }
             let verdict = await classify(error, socket: socket, attempt: attempt)
-            if let refusal = verdict as? ThalovantConnectionError, refusal.kind == .refused, attempt.pattern == "KKpsk0" {
+            // Only a KK handshake the hub refused is followed by XX. A close
+            // after KK completed is a plain refusal: the hub could complete KK
+            // only with the key it pinned, and XX would show it that key again.
+            if let refusal = verdict as? ThalovantConnectionError, refusal.kind == .refused,
+               attempt.pattern == "KKpsk0", !attempt.noiseCompleted {
                 throw KKAttemptRefused(refusal: refusal)
             }
             throw verdict
@@ -523,11 +581,12 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
         await attempt.awaitLateCode()
         let afterHandshake = attempt.handshakeTime != nil
         if attempt.refused {
+            // Refused while this side's last handshake frames were going out
+            // counts as right after it: the hub had read them.
+            if afterHandshake || attempt.noiseCompleted { return attempt.refusalAfterHandshake() }
             let code = attempt.closeCode.map(String.init) ?? "no status"
             return ThalovantConnectionError(
-                afterHandshake
-                    ? "The hub closed the link right after the handshake: it does not accept these credentials, or not yet."
-                    : "The hub refused this connection's credentials: it closed the link during the handshake (\(code)).",
+                "The hub refused this connection's credentials: it closed the link during the handshake (\(code)).",
                 kind: .refused)
         }
         return afterHandshake ? ThalovantConnectionError("The hub closed the link right after the handshake.") : error
@@ -609,6 +668,7 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                             // Noted as soon as it is chosen: a failed KK attempt
                             // is followed by an XX one.
                             if let pattern = negotiator.connection?.pattern { self.currentLifetime?.pattern = pattern }
+                            if negotiator.connection?.ready == true { self.currentLifetime?.completeNoise() }
                             return (replies, negotiator.connection, self.writer)
                         }
                         for reply in replies {
@@ -630,7 +690,12 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
                             guard self.socket === socket, self.handshakeCompleteFlag, let connection = self.negotiator?.connection else {
                                 throw noiseError("Binary frame arrived before Noise negotiation completed.")
                             }
-                            return try connection.decrypt(data)
+                            let decoded = try connection.decrypt(data)
+                            // Any frame that decrypts -- JSON, WIRE-1 binary,
+                            // one chunk of a larger message, the hub's own
+                            // HELLO -- shows the hub accepted the credentials.
+                            self.currentLifetime?.heardAuthenticatedFrame()
+                            return decoded
                         }
                         if let (payload, isJSON) = decoded {
                             // The Noise framing marks each frame JSON or not.
