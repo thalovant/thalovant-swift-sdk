@@ -21,7 +21,7 @@ final class DeviceLoginVectorTests: XCTestCase {
         let excludes = (vectors["message_excludes"]?.arrayValue ?? []).compactMap(\.stringValue)
         XCTAssertEqual(excludes.count, 2)
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 11)
+        XCTAssertEqual(cases.count, 12)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
@@ -61,6 +61,8 @@ final class DeviceLoginVectorTests: XCTestCase {
                     XCTAssertNil(api.accessToken, name)
                     XCTAssertNil(api.tokenId, name)
                     produced = [.object(["outcome": "revoked"])]
+                    // Idempotent: revoking again sends nothing and succeeds.
+                    try await api.revokeApiToken()
                 }
             }
             let value = JSONValue.array(produced)
@@ -163,15 +165,48 @@ final class DeviceLoginVectorTests: XCTestCase {
         XCTAssertNil(api.tokenId)
     }
 
-    func testAPasswordSignInForgetsADeviceTokensId() async throws {
+    func testEverySignInSetsTheTokenIdFromItsOwnAnswer() async throws {
         StubURLProtocol.reset()
         StubURLProtocol.enqueue(.init(body: #"{"access_token": "session-token", "token_type": "bearer"}"#))
+        StubURLProtocol.enqueue(.init(body: #"{"access_token": "api-token", "token_id": "token-2"}"#))
         let api = ThalovantControlPlane(apiURL: "https://api.example.com", session: StubURLProtocol.makeSession())
         api.accessToken = "device-token"
         api.tokenId = "token-1"
         try await api.login(email: "dev@example.com", password: "secret")
         XCTAssertEqual(api.accessToken, "session-token")
         XCTAssertNil(api.tokenId, "revokeApiToken() must not revoke the device token by the session's name")
+        try await api.login(email: "dev@example.com", password: "secret")
+        XCTAssertEqual(api.tokenId, "token-2")
+    }
+
+    func testRevokingTheTokenInUseIsIdempotentButAnotherTokensRefusalIsNot() async throws {
+        StubURLProtocol.reset()
+        // The token in use was revoked elsewhere: it cannot authenticate its own revoke.
+        StubURLProtocol.enqueue(.init(status: 401, body: #"{"detail": "Could not validate credentials"}"#))
+        let api = ThalovantControlPlane(
+            apiURL: "https://api.example.com", accessToken: "dead-token", session: StubURLProtocol.makeSession())
+        api.tokenId = "token-1"
+        try await api.revokeApiToken()
+        XCTAssertNil(api.accessToken)
+        XCTAssertNil(api.tokenId)
+        try await api.revokeApiToken()
+        XCTAssertEqual(StubURLProtocol.requests.count, 1, "revoking again sends nothing")
+
+        // Another token's 404 or 401 is the API's answer, and is thrown.
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(status: 404, body: #"{"detail": "API token not found"}"#))
+        StubURLProtocol.enqueue(.init(status: 401, body: #"{"detail": "Could not validate credentials"}"#))
+        let other = ThalovantControlPlane(
+            apiURL: "https://api.example.com", accessToken: "live-token", session: StubURLProtocol.makeSession())
+        other.tokenId = "token-1"
+        for _ in 0..<2 {
+            do {
+                try await other.revokeApiToken(tokenId: "token-9")
+                XCTFail("expected the API's refusal")
+            } catch is ThalovantApiError {}
+        }
+        XCTAssertEqual(other.accessToken, "live-token")
+        XCTAssertEqual(other.tokenId, "token-1")
     }
 
     func testRevokingAnotherTokenKeepsTheOneInUse() async throws {

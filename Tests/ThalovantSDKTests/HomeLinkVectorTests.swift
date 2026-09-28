@@ -33,7 +33,7 @@ final class HomeLinkVectorTests: XCTestCase {
                 )
                 let payload = try await client.answerHomeRequest(
                     event,
-                    timeout: row["timeout_seconds"]?.doubleValue ?? HomeLink.handlerTimeout,
+                    timeout: row["timeout_ms"]?.doubleValue.map { $0 / 1000 } ?? HomeLink.handlerTimeout,
                     handler: handler(try XCTUnwrap(row["handler"]?.objectValue, name))
                 )
                 produced = .object(payload)
@@ -54,8 +54,8 @@ final class HomeLinkVectorTests: XCTestCase {
             if spec["raises"]?.boolValue == true {
                 throw ThalovantRuntimeError("the conversation agent is gone")
             }
-            if let seconds = spec["sleep_seconds"]?.doubleValue {
-                try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+            if let milliseconds = spec["sleep_ms"]?.intValue {
+                try await Task.sleep(nanoseconds: UInt64(milliseconds) * 1_000_000)
             }
             return HomeAnswer(
                 speech: spec["speech"]?.stringValue ?? "",
@@ -72,7 +72,7 @@ final class HomeLinkVectorTests: XCTestCase {
         XCTAssertEqual(.array(HomeErrorCode.all.map { .string($0.rawValue) }), vectors["error_codes"])
         XCTAssertEqual(.string(HomeLink.requestMessageType), vectors["request_type"])
         XCTAssertEqual(.string(HomeLink.responseMessageType), vectors["response_type"])
-        XCTAssertEqual(vectors["reply_timeout_seconds"]?.doubleValue, HomeLink.hubTimeout)
+        XCTAssertEqual(vectors["reply_timeout_ms"]?.intValue, Int(HomeLink.hubTimeout * 1000))
         XCTAssertEqual(HomeLink.handlerTimeout, HomeLink.hubTimeout - 1)
     }
 

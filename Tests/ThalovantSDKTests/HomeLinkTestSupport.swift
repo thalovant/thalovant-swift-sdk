@@ -209,12 +209,14 @@ final class LinkFake: HiveMindBusTransport, @unchecked Sendable {
             return (life, closeAfterHandshake, closeCodeArrivesLate)
         }
         if let life, let code {
-            // The hub's verdict arrives a moment after the handshake.
-            Task {
-                try? await Task.sleep(nanoseconds: 20_000_000)
-                self.end(life, closeCode: late ? nil : code)
-                if late {
-                    try? await Task.sleep(nanoseconds: 40_000_000)
+            // The hub's verdict follows the handshake at once. Ended here,
+            // before the session starts its settle wait, so the outcome never
+            // depends on how fast a busy runner schedules a task.
+            end(life, closeCode: late ? nil : code)
+            if late {
+                // The delegate reports the code a moment after the read failed.
+                Task {
+                    try? await Task.sleep(nanoseconds: 10_000_000)
                     life.end(closeCode: code)
                 }
             }

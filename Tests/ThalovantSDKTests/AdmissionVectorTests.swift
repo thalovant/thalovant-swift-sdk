@@ -16,7 +16,7 @@ final class AdmissionVectorTests: XCTestCase {
     func testConnectionAdmissionVectors() async throws {
         let vectors = try loadVectors("connection-admission-vectors")
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 8)
+        XCTAssertEqual(cases.count, 10)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
@@ -27,12 +27,14 @@ final class AdmissionVectorTests: XCTestCase {
             if let resource = call["operation"], resource.objectValue != nil {
                 operation = try JSONDecoder().decode(OperationResource.self, from: JSONEncoder().encode(resource))
             }
-            let produced: JSONObject
+            let expect = try XCTUnwrap(row["expect"]?.objectValue, name)
+            var produced: JSONObject
+            let started = ProcessInfo.processInfo.systemUptime
             do {
                 try await api.waitForAdmission(
                     operation,
-                    timeout: try XCTUnwrap(call["timeout_seconds"]?.doubleValue, name),
-                    pollInterval: try XCTUnwrap(call["poll_interval_seconds"]?.doubleValue, name)
+                    timeout: try XCTUnwrap(call["timeout_ms"]?.doubleValue, name) / 1000,
+                    pollInterval: try XCTUnwrap(call["poll_interval_ms"]?.doubleValue, name) / 1000
                 )
                 produced = ["outcome": "admitted", "polls": .integer(ScriptedApi.sent.count)]
             } catch let error as ThalovantAdmissionTimeoutError {
@@ -41,6 +43,7 @@ final class AdmissionVectorTests: XCTestCase {
                 XCTAssertTrue(erased is any ThalovantConnectionFailure, name)
                 XCTAssertTrue(erased is any ThalovantTimeoutFailure, name)
                 produced = ["outcome": "timeout"]
+                if expect["polls"] != nil { produced["polls"] = .integer(ScriptedApi.sent.count) }
             } catch let error as ThalovantAdmissionFailedError {
                 produced = [
                     "outcome": "failed",
@@ -49,6 +52,11 @@ final class AdmissionVectorTests: XCTestCase {
                 ]
             } catch is ThalovantApiError {
                 produced = ["outcome": "error", "polls": .integer(ScriptedApi.sent.count)]
+            }
+            if let bound = expect["waited_at_least_ms"]?.intValue {
+                // Recorded as the bound it met, so every SDK records the same value.
+                let waited = Int((ProcessInfo.processInfo.systemUptime - started) * 1000)
+                produced["waited_at_least_ms"] = .integer(waited >= bound ? bound : waited)
             }
             let value = JSONValue.object(produced)
             ConformanceRecord.record("connection-admission-vectors.json", name, value)
@@ -118,6 +126,22 @@ final class AdmissionVectorTests: XCTestCase {
         } catch let error as ThalovantApiError {
             XCTAssertEqual(error.kind, .auth)
         }
+    }
+
+    func testA429WithoutARetryAfterIsRiddenOutAtThePollInterval() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(status: 429, body: #"{"detail": {"code": "token_rate_limited"}}"#))
+        StubURLProtocol.enqueue(.init(body: #"{"id": "op-1", "status": "ready"}"#))
+        let api = ThalovantControlPlane(
+            apiURL: "https://api.example.com", accessToken: "token", session: StubURLProtocol.makeSession())
+        let operation = try JSONDecoder().decode(OperationResource.self, from: Data(Fixtures.operationPending.utf8))
+        try await api.waitForAdmission(operation, timeout: 5, pollInterval: 0.01)
+        XCTAssertEqual(StubURLProtocol.requests.count, 2)
+        XCTAssertEqual(
+            ThalovantApiError.httpFailure(statusCode: 429, body: #"{"retry_after_seconds": 3}"#).retryAfterSeconds, 3)
+        XCTAssertNil(
+            ThalovantApiError.httpFailure(statusCode: 429, body: #"{"detail": {"retry_after_seconds": true}}"#)
+                .retryAfterSeconds)
     }
 
     func testAWaitThatCannotEverEndIsRefused() async throws {

@@ -185,16 +185,32 @@ extension ThalovantControlPlane {
     /// A token may always revoke itself (`DELETE /v1/auth/api-tokens/{id}`),
     /// whatever its scopes. Revoking the token in use forgets it here too, so
     /// a later call fails locally rather than with a 401.
+    ///
+    /// Revoking the token in use is idempotent. A token already revoked, or
+    /// expired, cannot authenticate its own revoke, so the API answers 401;
+    /// the token is dead either way, so that counts as revoked and forgets it,
+    /// and revoking again sends nothing and succeeds, until the next sign-in.
+    /// Revoking another token by id is not: a 404 for one the API does not
+    /// know throws as usual.
     public func revokeApiToken(tokenId: String? = nil) async throws {
         guard let target = tokenId.flatMap({ $0.isEmpty ? nil : $0 }) ?? self.tokenId, !target.isEmpty else {
+            // Already revoked and forgotten: revoking again changes nothing.
+            if revokedOwnToken && accessToken == nil { return }
             throw ThalovantApiError(
                 message: "No API token id to revoke: pass tokenId, or sign in with a device login first."
             )
         }
-        _ = try await requestData("DELETE", "/v1/auth/api-tokens/\(encodePathComponent(target))")
-        if target == self.tokenId {
+        let own = target == self.tokenId
+        do {
+            _ = try await requestData("DELETE", "/v1/auth/api-tokens/\(encodePathComponent(target))")
+        } catch let error as ThalovantApiError where own && error.statusCode == 401 {
+            // The token in use could not authenticate its own revoke: it is
+            // revoked or expired already.
+        }
+        if own {
             accessToken = nil
             self.tokenId = nil
+            revokedOwnToken = true
         }
     }
 
@@ -256,18 +272,13 @@ extension ThalovantControlPlane {
 
     /// Stores an approved token -- `accessToken` and `tokenId` -- and returns it.
     func acceptDeviceToken(_ token: JSONObject) throws -> DeviceLoginResult {
-        guard let accessToken = token["access_token"]?.stringValue, !accessToken.isEmpty else {
-            throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
-        }
-        let tokenId = token["token_id"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
-        self.accessToken = accessToken
-        self.tokenId = tokenId
+        let accessToken = try keepSignIn(token)
         return DeviceLoginResult(
             accessToken: accessToken,
             tokenType: token["token_type"]?.stringValue,
             scopes: (token["scopes"]?.arrayValue ?? []).compactMap { $0.stringValue },
             expiresAt: token["expires_at"]?.stringValue,
-            tokenId: tokenId,
+            tokenId: self.tokenId,
             raw: token
         )
     }

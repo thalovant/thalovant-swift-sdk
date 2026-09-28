@@ -144,9 +144,13 @@ public final class ThalovantControlPlane {
     public var accessToken: String?
     /// The id of the API token in `accessToken`, when a device sign-in minted
     /// it: what `revokeApiToken()` revokes by default. Set it beside a stored
-    /// `accessToken` to revoke that token later. A password or native sign-in
-    /// clears it: the token it stores has no id to revoke by.
+    /// `accessToken` to revoke that token later. Every sign-in sets it from its
+    /// own answer -- the id that came with the token, or nil for a session
+    /// token -- so it never names a token signed in with before.
     public var tokenId: String?
+    /// Whether the token signed in with was revoked and forgotten, so that
+    /// revoking it again is the no-op it should be.
+    var revokedOwnToken = false
     public let userAgent: String
     let session: URLSession
     private let hasCustomTrustDelegate: Bool
@@ -216,14 +220,23 @@ public final class ThalovantControlPlane {
         if let otpCode { body["otp_code"] = .string(otpCode) }
         if let recoveryCode { body["recovery_code"] = .string(recoveryCode) }
         let token = try await requestObject("POST", "/v1/auth/token", body: body, auth: false)
+        // A password sign-in answers with a session token, which has no
+        // token_id: the id of an API token signed in with earlier must not
+        // outlive it, or a later revokeApiToken() revokes that one.
+        _ = try keepSignIn(token)
+        return token
+    }
+
+    /// Keeps a sign-in's token and the id it came with, or none, and returns
+    /// the token. Every sign-in goes through here.
+    func keepSignIn(_ token: JSONObject) throws -> String {
         guard let accessToken = token["access_token"]?.stringValue, !accessToken.isEmpty else {
             throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
         }
         self.accessToken = accessToken
-        // A session token has no id to revoke: a device token's id kept from
-        // before would have revokeApiToken() revoke that one instead.
-        tokenId = nil
-        return token
+        tokenId = token["token_id"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 }
+        revokedOwnToken = false
+        return accessToken
     }
 
     // MARK: Hubs

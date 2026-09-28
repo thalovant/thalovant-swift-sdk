@@ -13,10 +13,52 @@ public let defaultOperationPollInterval: TimeInterval = 2
 extension ThalovantApiError {
     /// A 422 whose problem is about `connection_type`: the API does not know
     /// the kind of connection it was asked for.
+    ///
+    /// Read from the problem's `detail` and `code`, and from each validation
+    /// error's `loc` and `msg` -- never from the rest of the body. A
+    /// validation error echoes what was sent as `input`, and the request
+    /// always carries `spec.connection_type`, so a 422 about any other field
+    /// would otherwise read as "this kind is not supported".
     var refusesConnectionType: Bool {
         guard statusCode == 422 else { return false }
-        let text = problem.flatMap { try? ThalovantJSON.encodeToString($0) } ?? body ?? message
-        return text.contains("connection_type") || text.contains("connectionType")
+        var said = [detail, errorCode].compactMap { $0 }
+        for key in ["errors", "detail"] {
+            for entry in problem?[key]?.arrayValue ?? [] {
+                guard let entry = entry.objectValue else { continue }
+                switch entry["loc"] {
+                case .array(let parts)?:
+                    said.append(parts.map(Self.locationPart).joined(separator: "."))
+                case .string(let location)?:
+                    said.append(location)
+                default:
+                    break
+                }
+                if let message = entry["msg"]?.stringValue { said.append(message) }
+            }
+        }
+        return said.contains { $0.contains("connection_type") || $0.contains("connectionType") }
+    }
+
+    private static func locationPart(_ part: JSONValue) -> String {
+        switch part {
+        case .string(let text): return text
+        case .integer(let number): return String(number)
+        case .number(let number): return String(number)
+        default: return ""
+        }
+    }
+
+    /// The `retry_after_seconds` of a 429: at the top of the problem, or in a
+    /// `detail` object -- where the API sends it, FastAPI's envelope around a
+    /// structured refusal, as `errorCode` is read.
+    var retryAfterSeconds: TimeInterval? {
+        guard let problem else { return nil }
+        for source in [problem, problem["detail"]?.objectValue ?? [:]] {
+            if let seconds = source["retry_after_seconds"]?.doubleValue, seconds.isFinite, seconds >= 0 {
+                return seconds
+            }
+        }
+        return nil
     }
 }
 
@@ -93,7 +135,10 @@ extension ThalovantControlPlane {
     /// Follows the result's `operation`, polling `GET /v1/operations/{id}`
     /// every `pollInterval` seconds. Returns once it is `ready`, and at once
     /// when there is nothing to wait on: no operation, or one the API no
-    /// longer tracks (HTTP 404). A 5xx while polling is ridden out.
+    /// longer tracks (HTTP 404). A 5xx while polling is ridden out, and so is
+    /// a 429 -- a Free plan allows 60 requests a minute, and a wait must not
+    /// end over one of them -- after the `retry_after_seconds` the API names,
+    /// never past `timeout`.
     ///
     /// Throws `ThalovantAdmissionFailedError`, with the operation's
     /// `errorCode`, when the operation failed or the platform gave up on it;
@@ -146,8 +191,15 @@ extension ThalovantControlPlane {
         }
         let path = "/v1/operations/\(encodePathComponent(operationId))"
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
+        func timedOut(_ why: String = "") -> ThalovantAdmissionTimeoutError {
+            ThalovantAdmissionTimeoutError(
+                "The hub did not admit the connection within \(wholeSeconds(timeout))s\(why); it may still.",
+                timeout: timeout
+            )
+        }
         while true {
             try Task.checkCancellation()
+            var wait = pollInterval
             do {
                 // Read as JSON rather than decoded: a status this SDK does not
                 // know yet keeps the wait going instead of failing it.
@@ -168,16 +220,20 @@ extension ThalovantControlPlane {
                 }
             } catch let error as ThalovantApiError {
                 if error.statusCode == 404 { return }
-                guard let status = error.statusCode, status >= 500 else { throw error }
+                if error.statusCode == 429 {
+                    wait = max(pollInterval, error.retryAfterSeconds ?? 0)
+                    // The API asks for longer than is left: waiting it out
+                    // would only end in the same timeout, later.
+                    if wait > deadline - ProcessInfo.processInfo.systemUptime {
+                        throw timedOut(" (the API asked to slow down)")
+                    }
+                } else {
+                    guard let status = error.statusCode, status >= 500 else { throw error }
+                }
             }
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            if remaining <= 0 {
-                throw ThalovantAdmissionTimeoutError(
-                    "The hub did not admit the connection within \(wholeSeconds(timeout))s; it may still.",
-                    timeout: timeout
-                )
-            }
-            try await Task.sleep(nanoseconds: UInt64(min(pollInterval, remaining) * 1_000_000_000))
+            if remaining <= 0 { throw timedOut() }
+            try await Task.sleep(nanoseconds: UInt64(min(wait, remaining) * 1_000_000_000))
         }
     }
 

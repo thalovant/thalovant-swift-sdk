@@ -207,7 +207,11 @@ try await api.revokeApiToken()
 
 `homeAssistantScopes` (`hubs:read`, `clients:read`, `clients:write`) is what a
 Home Assistant link needs, and all a Free plan can approve. Neither the device
-code nor the token ever appears in an error's message.
+code nor the token ever appears in an error's message. Every sign-in sets
+`tokenId` from its own answer (a password sign-in's session token has none),
+and revoking the token in use is idempotent: a token already revoked cannot
+authenticate its own revoke, so that 401 counts as revoked, and revoking again
+sends nothing.
 
 ## Use a Pre-Made API Token
 
@@ -399,16 +403,19 @@ try await link.run()  // until link.close()
 What each step can refuse, all of them `ThalovantApiError` with the status,
 `errorCode`, `detail` and `problem` the API sent, told apart by `kind`:
 
-- `.unsupportedConnectionType` -- the API does not know the kind (a 422 about
-  `connection_type`), or made an ordinary connection instead, which the SDK
-  deleted before throwing;
+- `.unsupportedConnectionType` -- the API does not know the kind (a 422 whose
+  `detail`, `code`, or a validation error's `loc` or `msg` names
+  `connection_type`; never the `input` it echoes back), or made an ordinary
+  connection instead, which the SDK deleted before throwing;
 - `.plan` -- a 402, or a 403 `plan_limit`;
 - `.alreadyLinked(clientId:)` -- the hub already has its one Home Assistant
   link, and `clientId` names it when the API said which;
 - `.auth` -- a 401, a 423 or a 403 `Insufficient scopes`: sign in again.
 
 `waitForAdmission` returns once the operation is `ready`, and at once when
-there is none or the API no longer tracks it; a 5xx is ridden out. It throws
+there is none or the API no longer tracks it; a 5xx is ridden out, and so is a
+429, after the `retry_after_seconds` it names (a 429 asking for longer than is
+left is a timeout at once). It throws
 `ThalovantAdmissionFailedError` with the operation's `errorCode` when the
 platform gave up, and `ThalovantAdmissionTimeoutError` when the wait (180
 seconds by default) runs out first. That one is both a connection error and a
@@ -720,7 +727,8 @@ a matching `retry_after_seconds` in the body:
 
 Both apply to token-authenticated control-plane calls. `errorCode` decodes the
 code for you, since the API nests it under `detail` in its Problem+JSON body.
-The SDK does not retry automatically, and `ThalovantApiError` carries the
+The SDK does not retry automatically -- except `waitForAdmission`, which waits out
+a 429 it meets while polling -- and `ThalovantApiError` carries the
 status and the body — not response headers — so read `retry_after_seconds`
 out of `problem`, where it sits beside the code inside `detail`
 (`error.problem?["detail"]?["retry_after_seconds"]?.intValue`), rather than
