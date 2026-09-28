@@ -20,7 +20,7 @@
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
         "Sources/ThalovantSDK/HiveBinary.swift": "649c094f04c4b57c99a1cf65482762c3204d5e2bf629df26c68f5af1c26f8818",
-        "Sources/ThalovantSDK/Transport.swift": "5b2b7c2baeae2b42b9ecc26df285cb05a3f7b441e748ad91809bf2e071729e8e",
+        "Sources/ThalovantSDK/Transport.swift": "e28f22e493c1e9f814d393ebbb43b573ea777e78ea108f27758a9a2b66f497d3",
         "Sources/ThalovantSDK/Wire.swift": "b3f7226d394d092413d48a571399da8ad1e0cf587911f0f39f71c04df69a5a30"
       },
       "reason": "HiveWire.decodeBinaryFrame reads WIRE-1: four bits of payload type, then the clip itself, never parsed or inflated. The Noise framing marks each frame JSON or not and a binary one was refused outright, so every such frame was unreachable; onBinary delivers it now. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
@@ -92,7 +92,7 @@
     "conversation": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Events.swift": "8b436d4a2f1132c8e1c53a5220cfd992994ef71f5f50978e355e0b673b6d996a"
+        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8"
       },
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
@@ -107,7 +107,7 @@
     "device-login": {
       "implementation": {
         "Sources/ThalovantSDK/ControlPlane.swift": "e2e060cada3a0863ea14322fb5bd3a8fd554aa2cdb1c9bf7f97a2617ec65585a",
-        "Sources/ThalovantSDK/DeviceLogin.swift": "defca5c2793946bd608ce1c79be3aaf2239ba8c7159e20e725145c99c1c3bc10",
+        "Sources/ThalovantSDK/DeviceLogin.swift": "889c03b188be37149f3f40bdb65c3d7a8155b19d7cfe7c221498aac4235270eb",
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc",
         "Sources/ThalovantSDK/NativeSignIn.swift": "27bce649dd89659004e89ae9d2afec26806588665ab19076fe35eb412ad29c58"
       },
@@ -116,7 +116,7 @@
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
         "Tests/ThalovantSDKTests/DeviceLoginTests.swift": "9b59a782ea1b019bdae670c05c33334ca9f11c5783ffb5027865fad0250d3bb6",
-        "Tests/ThalovantSDKTests/DeviceLoginVectorTests.swift": "24254a0c0b95a858b90359ec8f2cd5f12ff039f5b7e3a41429737c8a9814b1c2",
+        "Tests/ThalovantSDKTests/DeviceLoginVectorTests.swift": "018a6a6911b50ff9fa06eb9c3444384baff8b57f1494ebd983789a340bc252a3",
         "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9"
       },
       "vectors": {
@@ -126,18 +126,18 @@
     "home-link": {
       "implementation": {
         "Sources/ThalovantSDK/Errors.swift": "e72ef4beb9feaac4639dbcc5bb18e459c7be17c683f9dedf9d337f37e5d945cc",
-        "Sources/ThalovantSDK/Events.swift": "8b436d4a2f1132c8e1c53a5220cfd992994ef71f5f50978e355e0b673b6d996a",
+        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8",
         "Sources/ThalovantSDK/HomeLink.swift": "290b7e4b5d5ddd77f0d6c9671b5d7c3e9c28fe11cbe74a0f2e3db3e29d91be8f",
         "Sources/ThalovantSDK/Noise.swift": "94184b73ad7c64c1fea5ec03ebf6c1e70a0763fac8b6990b329a02dddab94566",
         "Sources/ThalovantSDK/Session.swift": "fd78667d0e14e90a7c8f897b3929ea5945d89b202d160bf626b0979b34afdaa5",
-        "Sources/ThalovantSDK/Transport.swift": "5b2b7c2baeae2b42b9ecc26df285cb05a3f7b441e748ad91809bf2e071729e8e"
+        "Sources/ThalovantSDK/Transport.swift": "e28f22e493c1e9f814d393ebbb43b573ea777e78ea108f27758a9a2b66f497d3"
       },
       "reason": "Sources/ThalovantSDK/HomeLink.swift: replyContext (no destination without a source), ThalovantClient.reply, HomeRequest, HomeAnswer, plainSpeech (stripSsml in Events.swift for real markup only, the portable reference set, Unicode White_Space) and answerHomeRequest(s), bounded by the hub's 10 s from arrival: the handler runs on a task of its own raced against its deadline, the answer goes out then whatever the handler does, and a reply that cannot go out in time is withdrawn. Keeping the link: LinkSupervisor and HubSession.run() in Session.swift; LinkLifetime.closeRefuses and the socket seam in Transport.swift, which reads refusals (1000/1005/1008 during the handshake or within 750 ms, a code up to 250 ms late, a 401/403 upgrade) as ThalovantConnectionError kind .refused and follows a failed KK with one XX attempt inside the same connect; NoiseNegotiator in Noise.swift tells a wrong password (.refused) from a changed hub key (.keyChanged). Run against the shared home-link vectors through the real reply path, and against link-keeping-vectors.json: close and supervise as pure functions, handshake through HiveMindWSSTransport against an in-memory hub that records the Noise patterns.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
         "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0e48941229df23649563d8f1354e5daa6f6dd7f13b2214693c13aef3ec26bee9",
-        "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "1c9bc76f312245ccbf607f6de5ea82d3748ba1deb54d84a37ffe9fdf9387da7e",
+        "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "5f58de70e02913b76ccf71d3214c822077a391e4409a6561f540cc33b6390e1f",
         "Tests/ThalovantSDKTests/HubSessionLinkTests.swift": "7562a1b457c16d53f24b6026bf64e5d7219538a6bbdf737f196248ffd6cd6c78",
         "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "699a88dc7f66b8b71cbfa57dc81502d8e595f326f0b93389a8c495430103495b"
       },
@@ -190,7 +190,7 @@
     "mesh": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Events.swift": "8b436d4a2f1132c8e1c53a5220cfd992994ef71f5f50978e355e0b673b6d996a"
+        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8"
       },
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
       "status": "required",
@@ -221,9 +221,9 @@
     },
     "runtime": {
       "implementation": {
-        "Sources/ThalovantSDK/Events.swift": "8b436d4a2f1132c8e1c53a5220cfd992994ef71f5f50978e355e0b673b6d996a",
+        "Sources/ThalovantSDK/Events.swift": "ccaa983db29bc3e8e51105a8be93d960bf940469dce77002198aba6d221667a8",
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
-        "Sources/ThalovantSDK/Transport.swift": "5b2b7c2baeae2b42b9ecc26df285cb05a3f7b441e748ad91809bf2e071729e8e"
+        "Sources/ThalovantSDK/Transport.swift": "e28f22e493c1e9f814d393ebbb43b573ea777e78ea108f27758a9a2b66f497d3"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "status": "required",

@@ -182,9 +182,15 @@ public func stripSsml(_ text: String) -> String {
 
 /// The markup `stripSsml` removes. White space inside a tag is what Python's
 /// `\s` matches, spelled out so that it is the same on every platform.
+///
+/// The tag branch opens its attributes with one white-space character rather
+/// than a run, and has no trailing run: an attribute character already takes
+/// white space, and overlapping runs make a failed match backtrack cubically
+/// -- an unclosed `<a` and a few thousand spaces, text off the network, took
+/// minutes. The two spellings match exactly the same text.
 private let markupPattern: NSRegularExpression = {
     let space = "[\\t\\n\\u000B\\f\\r\\u001C-\\u001F \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
-    let pattern = "<!--.*?-->|<\\?.*?\\?>|</?[A-Za-z][A-Za-z0-9._:-]*(?:\(space)+(?:[^<>\"']|\"[^\"]*\"|'[^']*')*)?\(space)*/?>"
+    let pattern = "<!--.*?-->|<\\?.*?\\?>|</?[A-Za-z][A-Za-z0-9._:-]*(?:\(space)(?:[^<>\"']|\"[^\"]*\"|'[^']*')*)?/?>"
     return try! NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators])
 }()
 

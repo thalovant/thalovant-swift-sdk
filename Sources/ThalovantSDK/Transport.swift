@@ -331,7 +331,9 @@ public final class HiveMindWSSTransport: NSObject, HiveMindBusTransport, @unchec
     private var currentLifetime: LinkLifetime?
     /// The socket that carried the last connection to end, and its lifetime:
     /// the delegate can report a close code after the read already failed.
-    private weak var retiredSocket: (any HiveSocket)?
+    /// Held strongly: the delegate knows the socket only weakly, and a socket
+    /// nobody held would be gone before its late code arrived.
+    private var retiredSocket: (any HiveSocket)?
     private var retiredLifetime: LinkLifetime?
 
     var lifetime: LinkLifetime? { lock.locked { currentLifetime } }

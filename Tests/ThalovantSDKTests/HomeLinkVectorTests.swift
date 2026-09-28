@@ -194,6 +194,14 @@ final class HomeLinkVectorTests: XCTestCase {
         XCTAssertEqual(stripSsml("<speak>Hello</speak>"), "Hello")
     }
 
+    func testAnUnclosedTagFullOfSpacesIsQuick() {
+        let text = "<a" + String(repeating: " ", count: 20_000) + "end"
+        let started = ProcessInfo.processInfo.systemUptime
+        XCTAssertEqual(plainSpeech(text), "<a end")
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+        XCTAssertEqual(stripSsml("<a  / >x<a/>y<a />z"), "xyz")
+    }
+
     func testReplyingNeedsAType() async throws {
         let client = try fakeClient(LinkFake())
         do {

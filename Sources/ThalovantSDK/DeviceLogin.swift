@@ -203,13 +203,16 @@ extension ThalovantControlPlane {
             )
         }
         let own = target == self.tokenId
+        // The credentials this revoke is about. A sign-in that completes while
+        // the DELETE is on its way installs others, which are not forgotten.
+        let revoking = accessToken
         do {
             _ = try await requestData("DELETE", "/v1/auth/api-tokens/\(encodePathComponent(target))")
         } catch let error as ThalovantApiError where own && error.statusCode == 401 {
             // The token in use could not authenticate its own revoke: it is
             // revoked or expired already.
         }
-        if own {
+        if own, self.tokenId == target, accessToken == revoking {
             accessToken = nil
             self.tokenId = nil
             revokedOwnToken = true

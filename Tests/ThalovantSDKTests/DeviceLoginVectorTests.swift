@@ -179,6 +179,25 @@ final class DeviceLoginVectorTests: XCTestCase {
         XCTAssertEqual(api.tokenId, "token-2")
     }
 
+    func testARevokeDoesNotForgetASignInThatCompletedDuringIt() async throws {
+        HeldAPI.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HeldAPI.self]
+        let api = ThalovantControlPlane(
+            apiURL: "https://api.example.com", accessToken: "old-token", session: URLSession(configuration: configuration))
+        api.tokenId = "token-1"
+        let revoke = Task { try await api.revokeApiToken() }
+        // The revoke's DELETE is on its way; a new sign-in lands meanwhile.
+        try await eventually { HeldAPI.started }
+        XCTAssertEqual(HeldAPI.path, "/v1/auth/api-tokens/token-1")
+        api.accessToken = "new-token"
+        api.tokenId = "token-2"
+        HeldAPI.release()
+        try await revoke.value
+        XCTAssertEqual(api.accessToken, "new-token")
+        XCTAssertEqual(api.tokenId, "token-2")
+    }
+
     func testRevokingTheTokenInUseIsIdempotentButAnotherTokensRefusalIsNot() async throws {
         StubURLProtocol.reset()
         // The token in use was revoked elsewhere: it cannot authenticate its own revoke.
@@ -227,5 +246,45 @@ final class DeviceLoginVectorTests: XCTestCase {
         } catch let error as ThalovantApiError {
             XCTAssertNil(error.statusCode)
         }
+    }
+}
+
+/// Holds each request until released, then answers 204.
+private final class HeldAPI: URLProtocol {
+    private static let lock = NSLock()
+    private static var didStart = false
+    private static var seenPath: String?
+    private static var gate = DispatchSemaphore(value: 0)
+    static var started: Bool { lock.locked { didStart } }
+    static var path: String? { lock.locked { seenPath } }
+    static func reset() { lock.locked { didStart = false; seenPath = nil; gate = DispatchSemaphore(value: 0) } }
+    static func release() { lock.locked { gate }.signal() }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        let gate = Self.lock.locked { () -> DispatchSemaphore in
+            Self.didStart = true
+            Self.seenPath = request.url?.path
+            return Self.gate
+        }
+        let answer = HeldAnswer(self)
+        DispatchQueue.global().async {
+            gate.wait()
+            answer.send()
+        }
+    }
+    override func stopLoading() {}
+}
+
+/// A held request's 204, sent from another queue once released.
+private final class HeldAnswer: @unchecked Sendable {
+    private let loading: URLProtocol
+    init(_ loading: URLProtocol) { self.loading = loading }
+    func send() {
+        let response = HTTPURLResponse(
+            url: loading.request.url ?? URL(string: "https://api.example.com")!, statusCode: 204,
+            httpVersion: "HTTP/1.1", headerFields: ["Content-Length": "0"])!
+        loading.client?.urlProtocol(loading, didReceive: response, cacheStoragePolicy: .notAllowed)
+        loading.client?.urlProtocolDidFinishLoading(loading)
     }
 }
