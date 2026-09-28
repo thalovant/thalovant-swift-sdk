@@ -274,11 +274,18 @@ public final class HubSession: @unchecked Sendable {
       throw error
     }
   }
+  /// How long a link that ended inside the settle window may take to say
+  /// with which close code: the delegate can report it after the read failed,
+  /// and without it a refusal would read as a drop that never ends the grace.
+  static let lateCloseCodeSeconds: TimeInterval = 0.25
   /// Waits `settleSeconds` for a new link to end, and says why when it does.
   private func settle(_ connected: ThalovantClient) async throws {
     guard policy.settleSeconds > 0, let lifetime = connected.transport.lifetime else { return }
     try await lifetime.ended.wait(timeout: policy.settleSeconds, timeoutError: nil)
     guard lifetime.ended.isOpen else { return }
+    if lifetime.closeCode == nil {
+      try await lifetime.coded.wait(timeout: Self.lateCloseCodeSeconds, timeoutError: nil)
+    }
     if lifetime.refused {
       throw ThalovantHubRefusedError(
         "The hub closed the link right after the handshake: it does not accept these credentials, or not yet."

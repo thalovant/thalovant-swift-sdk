@@ -24,6 +24,7 @@ final class HubSessionLinkTests: XCTestCase {
         }
         private var refusal: Int?
         var unreachable = false
+        var lateCodes = false
         var attempts: Int { lock.locked { built.count } }
         var latest: LinkFake? { lock.locked { built.last } }
 
@@ -31,6 +32,7 @@ final class HubSessionLinkTests: XCTestCase {
             let fake = LinkFake()
             fake.holdUtterances = true
             fake.closeAfterHandshake = refuseWith
+            fake.closeCodeArrivesLate = lateCodes
             lock.locked { built.append(fake) }
             if unreachable { throw ThalovantConnectionError("Could not reach the hub.") }
             let client = try fakeClient(fake)
@@ -123,6 +125,18 @@ final class HubSessionLinkTests: XCTestCase {
             XCTAssertTrue(session.connected, "\(code)")
             await session.close()
         }
+    }
+
+    func testARefusalWhoseCloseCodeArrivesLateIsStillARefusal() async throws {
+        let hub = Hub()
+        hub.refuseWith = 1005
+        hub.lateCodes = true
+        let session = session(hub)
+        do {
+            try await session.connect()
+            XCTFail("expected a refusal")
+        } catch is ThalovantHubRefusedError {}
+        await session.close()
     }
 
     func testAnyOtherEarlyCloseIsADropNotARefusal() async throws {
@@ -281,8 +295,10 @@ final class HubSessionLinkTests: XCTestCase {
         dropped.end(closeCode: 0)
         XCTAssertTrue(dropped.ended.isOpen)
         XCTAssertNil(dropped.closeCode, "0 is no code")
+        XCTAssertFalse(dropped.coded.isOpen)
         dropped.end(closeCode: 1005)
         XCTAssertEqual(dropped.closeCode, 1005, "the delegate reported it after the read failed")
+        XCTAssertTrue(dropped.coded.isOpen)
         let refused = LinkLifetime()
         refused.end(closeCode: 1008)
         refused.end(closeCode: 1011)

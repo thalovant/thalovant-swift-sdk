@@ -328,6 +328,7 @@ extension ThalovantControlPlane {
             throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
         }
         accessToken = token
+        tokenId = nil
         return response
     }
 }

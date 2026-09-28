@@ -144,7 +144,8 @@ public final class ThalovantControlPlane {
     public var accessToken: String?
     /// The id of the API token in `accessToken`, when a device sign-in minted
     /// it: what `revokeApiToken()` revokes by default. Set it beside a stored
-    /// `accessToken` to revoke that token later.
+    /// `accessToken` to revoke that token later. A password or native sign-in
+    /// clears it: the token it stores has no id to revoke by.
     public var tokenId: String?
     public let userAgent: String
     let session: URLSession
@@ -219,6 +220,9 @@ public final class ThalovantControlPlane {
             throw ThalovantApiError(message: "Thalovant API token response did not include access_token.")
         }
         self.accessToken = accessToken
+        // A session token has no id to revoke: a device token's id kept from
+        // before would have revokeApiToken() revoke that one instead.
+        tokenId = nil
         return token
     }
 

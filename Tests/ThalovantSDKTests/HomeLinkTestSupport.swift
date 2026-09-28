@@ -183,6 +183,9 @@ final class LinkFake: HiveMindBusTransport, @unchecked Sendable {
     private var emissions: [ThalovantEvent] = []
     /// A close code the hub sends right after every handshake; nil admits.
     var closeAfterHandshake: Int?
+    /// Reports that close code only after the connection has already ended,
+    /// as a WebSocket delegate can.
+    var closeCodeArrivesLate = false
     /// Holds every `recognizer_loop:utterance` until the ask is abandoned: a
     /// turn the hub is still working on.
     var holdUtterances = false
@@ -197,19 +200,23 @@ final class LinkFake: HiveMindBusTransport, @unchecked Sendable {
     var busCount: Int { lock.locked { buses.count } }
 
     func connect(timeout: TimeInterval) async throws {
-        let (life, code) = lock.locked { () -> (LinkLifetime?, Int?) in
-            if online { return (nil, nil) }
+        let (life, code, late) = lock.locked { () -> (LinkLifetime?, Int?, Bool) in
+            if online { return (nil, nil, false) }
             online = true
             errored = false
             let life = LinkLifetime()
             current = life
-            return (life, closeAfterHandshake)
+            return (life, closeAfterHandshake, closeCodeArrivesLate)
         }
         if let life, let code {
             // The hub's verdict arrives a moment after the handshake.
             Task {
                 try? await Task.sleep(nanoseconds: 20_000_000)
-                self.end(life, closeCode: code)
+                self.end(life, closeCode: late ? nil : code)
+                if late {
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    life.end(closeCode: code)
+                }
             }
         }
     }

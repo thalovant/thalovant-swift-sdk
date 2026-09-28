@@ -125,6 +125,9 @@ final class LinkLifetime: @unchecked Sendable {
 
     /// Opens when the connection ends.
     let ended = AsyncGate()
+    /// Opens once a close code is known, which can be a moment after `ended`:
+    /// the delegate may report the code after the read already failed.
+    let coded = AsyncGate()
     private let lock = NSLock()
     private var finished = false
     private var code: Int?
@@ -138,17 +141,19 @@ final class LinkLifetime: @unchecked Sendable {
     /// -- the delegate can report it after the read already failed -- fills in
     /// one that was not known.
     func end(closeCode: Int?) {
-        let first = lock.locked { () -> Bool in
+        let (first, learnt) = lock.locked { () -> (Bool, Bool) in
             let known = closeCode.flatMap { $0 == 0 ? nil : $0 }
             if finished {
-                if code == nil { code = known }
-                return false
+                guard code == nil, known != nil else { return (false, false) }
+                code = known
+                return (false, true)
             }
             finished = true
             code = known
-            return true
+            return (true, known != nil)
         }
         if first { ended.open() }
+        if learnt { coded.open() }
     }
 }
 

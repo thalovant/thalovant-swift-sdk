@@ -163,6 +163,17 @@ final class DeviceLoginVectorTests: XCTestCase {
         XCTAssertNil(api.tokenId)
     }
 
+    func testAPasswordSignInForgetsADeviceTokensId() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(body: #"{"access_token": "session-token", "token_type": "bearer"}"#))
+        let api = ThalovantControlPlane(apiURL: "https://api.example.com", session: StubURLProtocol.makeSession())
+        api.accessToken = "device-token"
+        api.tokenId = "token-1"
+        try await api.login(email: "dev@example.com", password: "secret")
+        XCTAssertEqual(api.accessToken, "session-token")
+        XCTAssertNil(api.tokenId, "revokeApiToken() must not revoke the device token by the session's name")
+    }
+
     func testRevokingAnotherTokenKeepsTheOneInUse() async throws {
         StubURLProtocol.reset()
         StubURLProtocol.enqueue(.init(status: 204, body: ""))
