@@ -6,12 +6,19 @@ import XCTest
 #if canImport(FoundationNetworking)
 import FoundationNetworking
 #endif
+#if canImport(Glibc)
+import Glibc
+#elseif canImport(Darwin)
+import Darwin
+#endif
 
 /// Serves one vector case's exchanges in order through URLSession, and checks
 /// every request against the one the case names: method, path, body or body
-/// subset, `If-Match` and `Authorization`. The same job as the reference's
+/// subset, `If-Match` and `Authorization`; it answers with the case's status,
+/// content type, body and headers. The same job as the reference's
 /// `ScriptedApi` in `tests/test_home_link_vectors.py`, over the SDK's real
-/// HTTP path rather than beside it.
+/// HTTP path rather than beside it. It answers for a loopback address, so an
+/// operation link can name the API's own origin (`{api_host}:{api_port}`).
 final class ScriptedApi: URLProtocol {
     private static let lock = NSLock()
     private static var exchanges: [JSONObject] = []
@@ -19,7 +26,9 @@ final class ScriptedApi: URLProtocol {
     private static var sentLines: [String] = []
     private static var mismatchLines: [String] = []
 
-    static let apiURL = "https://api.example.com"
+    static let apiHost = "127.0.0.1"
+    static let apiPort = 8765
+    static let apiURL = "http://\(apiHost):\(apiPort)"
 
     /// Starts a case: these exchanges, nothing sent yet.
     static func serve(_ next: [JSONObject]) {
@@ -60,7 +69,7 @@ final class ScriptedApi: URLProtocol {
               let expected = exchange["request"]?.objectValue,
               let response = exchange["response"]?.objectValue
         else {
-            answer(status: 599, contentType: "application/json", body: "{}")
+            answer(status: 599, contentType: "application/json", body: "{}", headers: [:])
             return
         }
         var differences: [String] = []
@@ -85,7 +94,8 @@ final class ScriptedApi: URLProtocol {
         answer(
             status: response["status"]?.intValue ?? 599,
             contentType: response["content_type"]?.stringValue ?? "application/json",
-            body: response["body"]?.stringValue ?? ""
+            body: response["body"]?.stringValue ?? "",
+            headers: (response["headers"]?.objectValue ?? [:]).compactMapValues(\.stringValue)
         )
     }
 
@@ -106,9 +116,10 @@ final class ScriptedApi: URLProtocol {
         }
     }
 
-    private func answer(status: Int, contentType: String, body: String) {
+    private func answer(status: Int, contentType: String, body: String, headers extra: [String: String]) {
         let bytes = Data(body.utf8)
-        var headers = ["Content-Length": String(bytes.count)]
+        var headers = extra
+        headers["Content-Length"] = String(bytes.count)
         if !bytes.isEmpty { headers["Content-Type"] = contentType }
         let response = HTTPURLResponse(
             url: request.url ?? URL(string: Self.apiURL)!, statusCode: status,
@@ -142,6 +153,34 @@ final class ScriptedApi: URLProtocol {
         }
         return data
     }
+}
+
+/// A loopback port nothing listens on: bound, read and let go.
+func closedLoopbackPort() -> Int {
+    #if canImport(Glibc)
+    let fd = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+    #else
+    let fd = socket(AF_INET, SOCK_STREAM, 0)
+    #endif
+    guard fd >= 0 else { return 9 }
+    defer { close(fd) }
+    var address = sockaddr_in()
+    address.sin_family = sa_family_t(AF_INET)
+    address.sin_port = 0
+    address.sin_addr.s_addr = inet_addr("127.0.0.1")
+    #if canImport(Darwin)
+    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+    #endif
+    let bound = withUnsafePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+    }
+    guard bound == 0 else { return 9 }
+    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+    let named = withUnsafeMutablePointer(to: &address) {
+        $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(fd, $0, &length) }
+    }
+    guard named == 0 else { return 9 }
+    return Int(UInt16(bigEndian: address.sin_port))
 }
 
 /// Reads a vendored vector file by its stem.
@@ -189,6 +228,9 @@ final class LinkFake: HiveMindBusTransport, @unchecked Sendable {
     /// Holds every `recognizer_loop:utterance` until the ask is abandoned: a
     /// turn the hub is still working on.
     var holdUtterances = false
+    /// How long putting a frame on the wire takes; a cancelled send is never
+    /// put on it.
+    var sendMilliseconds = 0
 
     var connected: Bool { lock.locked { online } }
     var handshakeComplete: Bool { connected }
@@ -205,6 +247,7 @@ final class LinkFake: HiveMindBusTransport, @unchecked Sendable {
             online = true
             errored = false
             let life = LinkLifetime()
+            life.completeHandshake()
             current = life
             return (life, closeAfterHandshake, closeCodeArrivesLate)
         }
@@ -256,6 +299,7 @@ final class LinkFake: HiveMindBusTransport, @unchecked Sendable {
 
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws {
         guard connected else { throw ThalovantConnectionError("The fake link is down.") }
+        if sendMilliseconds > 0 { try await Task.sleep(nanoseconds: UInt64(sendMilliseconds) * 1_000_000) }
         lock.locked { emissions.append(ThalovantEvent(name: type, data: data, context: context)) }
         if type == ThalovantEvents.recognizerLoopUtterance && holdUtterances {
             try await AsyncGate().wait(timeout: nil, timeoutError: nil)
@@ -290,5 +334,239 @@ func eventually(
             throw ThalovantTimeoutError("condition never became true")
         }
         try await Task.sleep(nanoseconds: 5_000_000)
+    }
+}
+
+// MARK: - An in-memory hub
+
+/// A cheap stand-in for the Argon2id PSK: a different password still derives a
+/// different key, which is all a handshake case needs, and a suite that runs
+/// dozens of them does not spend 64 MiB and a tenth of a second on each.
+func cheapPSK(_ password: String, _ nodeID: String) throws -> Data {
+    noiseHash(Data((password + "\u{0}" + nodeID).utf8))
+}
+
+/// A client key store that lives in memory.
+final class MemoryNoiseStore: ThalovantNoiseStore, @unchecked Sendable {
+    private let lock = NSLock()
+    private let key = noiseRandomKey()
+    private var pins: [String: Data] = [:]
+    func privateKey() throws -> Data { key }
+    func pinnedKey(nodeID: String) throws -> Data? { lock.locked { pins[nodeID] } }
+    func pin(_ key: Data, nodeID: String) throws {
+        try lock.locked {
+            guard pins[nodeID] == nil || pins[nodeID] == key else { throw noiseError("pin conflict") }
+            pins[nodeID] = key
+        }
+    }
+}
+
+/// Messages one end of a socket has not read yet.
+actor Mailbox {
+    private var items: [URLSessionWebSocketTask.Message] = []
+    private var waiters: [CheckedContinuation<URLSessionWebSocketTask.Message, Error>] = []
+    private var failure: Error?
+
+    func put(_ message: URLSessionWebSocketTask.Message) {
+        guard failure == nil else { return }
+        if waiters.isEmpty { items.append(message) } else { waiters.removeFirst().resume(returning: message) }
+    }
+
+    func take() async throws -> URLSessionWebSocketTask.Message {
+        if !items.isEmpty { return items.removeFirst() }
+        if let failure { throw failure }
+        return try await withCheckedThrowingContinuation { waiters.append($0) }
+    }
+
+    func close(_ error: Error) {
+        guard failure == nil else { return }
+        failure = error
+        for waiter in waiters { waiter.resume(throwing: error) }
+        waiters = []
+    }
+}
+
+/// A HiveMind v3 hub in memory, speaking the hub's side of the Noise
+/// negotiation with the SDK's own Noise code, so `HiveMindWSSTransport` runs
+/// its real connect -- the negotiation, the KK-then-XX retry, the reading of a
+/// failure -- against it. It records the pattern each attempt chose, as the
+/// reference's `FakeHub.patterns_chosen` does.
+final class MemoryHub: @unchecked Sendable {
+    let nodeID = "fake-hub-node"
+    private let lock = NSLock()
+    private var state = State()
+    private struct State {
+        var staticKey = noiseRandomKey()
+        var offerKK = true
+        var upgradeStatus: Int?
+        var password = "the-right-password"
+        var pinnedClient: Data?
+        var patterns: [String] = []
+        var attempts = 0
+        var closeAfterHandshake: Int?
+        var closeCodeLateMs = 0
+    }
+
+    var staticKey: Data { get { lock.locked { state.staticKey } } set { lock.locked { state.staticKey = newValue } } }
+    var offerKK: Bool { get { lock.locked { state.offerKK } } set { lock.locked { state.offerKK = newValue } } }
+    /// Answer the WebSocket upgrade with this HTTP status instead.
+    var upgradeStatus: Int? { get { lock.locked { state.upgradeStatus } } set { lock.locked { state.upgradeStatus = newValue } } }
+    var password: String { get { lock.locked { state.password } } set { lock.locked { state.password = newValue } } }
+    /// Close right after the handshake with this code; 0 ends the socket with
+    /// no close frame.
+    var closeAfterHandshake: Int? {
+        get { lock.locked { state.closeAfterHandshake } }
+        set { lock.locked { state.closeAfterHandshake = newValue } }
+    }
+    /// Report a close's code this long after the close, as URLSession can.
+    var closeCodeLateMs: Int { get { lock.locked { state.closeCodeLateMs } } set { lock.locked { state.closeCodeLateMs = newValue } } }
+    var patterns: [String] { lock.locked { state.patterns } }
+    var attempts: Int { lock.locked { state.attempts } }
+    /// Whether the hub has pinned a client's key: the client's connect can
+    /// return before the hub has read its last handshake message.
+    var clientPinned: Bool { lock.locked { state.pinnedClient != nil } }
+
+    var factory: HiveSocketFactory {
+        { [self] _, transport in (MemorySocket(hub: self, transport: transport), nil) }
+    }
+
+    /// A transport that dials this hub.
+    func transport(password: String? = nil, store: MemoryNoiseStore) throws -> HiveMindWSSTransport {
+        let identity = try ThalovantIdentity(json: [
+            "access_key": "hub-access", "password": .string(password ?? self.password),
+            "default_master": "wss://hub.example", "site_id": "site",
+        ])
+        return HiveMindWSSTransport(identity: identity, noiseStore: store, socketFactory: factory, derivePSK: cheapPSK)
+    }
+
+    /// The hub's side of one socket.
+    fileprivate func serve(_ socket: MemorySocket) async {
+        let (upgrade, key, offerKK, pinned) = lock.locked { () -> (Int?, Data, Bool, Data?) in
+            state.attempts += 1
+            return (state.upgradeStatus, state.staticKey, state.offerKK, state.pinnedClient)
+        }
+        if let upgrade {
+            socket.refuseUpgrade(upgrade)
+            return
+        }
+        socket.open()
+        let hello: JSONObject = ["pubkey": "hub-public-key", "peer": "site::hub-ac", "node_id": .string(nodeID)]
+        let offer: JSONObject = [
+            "handshake": true, "min_protocol_version": 2, "max_protocol_version": 3, "binarize": false,
+            "preshared_key": false, "password": true, "crypto_required": true,
+            "encodings": ["JSON-B64", "JSON-HEX"], "ciphers": ["AES-GCM"],
+            "noise": .object([
+                "patterns": .array((pinned != nil && offerKK ? ["KKpsk0", "XXpsk2"] : ["XXpsk2"]).map { .string($0) }),
+                "suites": .array([.string(NoiseConnection.suite)]),
+            ]),
+        ]
+        do {
+            await socket.toClient(HiveMessage(msgType: "hello", payload: hello))
+            await socket.toClient(HiveMessage(msgType: "shake", payload: offer))
+            guard let first = try await socket.fromClient()?["noise"]?.objectValue,
+                  let pattern = first["pattern"]?.stringValue, let suite = first["suite"]?.stringValue,
+                  let msg = first["msg"]?.stringValue else { return await socket.closeFromHub(1005, lateMs: 0) }
+            lock.locked { state.patterns.append(pattern) }
+            let prologue = Data((try noiseCanonical(.object(hello)) + noiseCanonical(.object(offer))
+                + "Noise_\(pattern)_\(suite)").utf8)
+            let responder = try NoiseConnection(
+                pattern: pattern, psk: cheapPSK(password, nodeID), prologue: prologue, privateKey: key,
+                pin: pattern == "KKpsk0" ? pinned : nil, initiator: false)
+            let answer: Data
+            do {
+                _ = try responder.read(noiseUnhex(msg))
+                answer = try responder.write(Data(#"{"encoding":"JSON-HEX"}"#.utf8))
+            } catch {
+                // What a hub does when it cannot read a first message: close
+                // without a status.
+                return await socket.closeFromHub(1005, lateMs: 0)
+            }
+            await socket.toClient(HiveMessage(msgType: "shake", payload: ["noise": .object(["msg": .string(noiseHex(answer))])]))
+            if !responder.ready {
+                guard let final = try await socket.fromClient()?["noise"]?["msg"]?.stringValue else {
+                    return await socket.closeFromHub(1005, lateMs: 0)
+                }
+                do { _ = try responder.read(noiseUnhex(final)) } catch { return await socket.closeFromHub(1005, lateMs: 0) }
+            }
+            let client = responder.remoteKey
+            let known = lock.locked { () -> Bool in
+                if let pinnedClient = state.pinnedClient, pinnedClient != client { return false }
+                state.pinnedClient = client
+                return true
+            }
+            guard known else { return await socket.closeFromHub(1005, lateMs: 0) }
+            // The client's encrypted HELLO.
+            guard case .data(let frame) = try await socket.takeFromClient(), try responder.decrypt(frame) != nil else {
+                return await socket.closeFromHub(1005, lateMs: 0)
+            }
+            let (closeCode, late) = lock.locked { (state.closeAfterHandshake, state.closeCodeLateMs) }
+            if let closeCode { return await socket.closeFromHub(closeCode, lateMs: late) }
+            while true { _ = try await socket.takeFromClient() }
+        } catch {
+            return
+        }
+    }
+}
+
+/// The client's end of a socket to a `MemoryHub`.
+final class MemorySocket: HiveSocket, @unchecked Sendable {
+    private let hub: MemoryHub
+    private weak var transport: HiveMindWSSTransport?
+    private let clientBox = Mailbox()
+    private let hubBox = Mailbox()
+    private let lock = NSLock()
+    private var code: Int?
+    private var refusedStatus: Int?
+
+    init(hub: MemoryHub, transport: HiveMindWSSTransport) {
+        self.hub = hub
+        self.transport = transport
+    }
+
+    var peerCloseCode: Int? { lock.locked { code } }
+    var upgradeStatus: Int? { lock.locked { refusedStatus } }
+
+    func resume() { Task { await hub.serve(self) } }
+    func receive() async throws -> URLSessionWebSocketTask.Message { try await clientBox.take() }
+    func send(_ message: URLSessionWebSocketTask.Message) async throws { await hubBox.put(message) }
+    func cancel(with closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
+        Task {
+            await hubBox.close(ThalovantConnectionError("The client closed the socket."))
+            await clientBox.close(ThalovantConnectionError("The socket is closed."))
+        }
+    }
+
+    fileprivate func open() {
+        transport?.handleSocketOpen(on: self)
+    }
+
+    fileprivate func refuseUpgrade(_ status: Int) {
+        lock.locked { refusedStatus = status }
+        Task { await clientBox.close(ThalovantConnectionError("The server refused the WebSocket upgrade.")) }
+    }
+
+    fileprivate func toClient(_ message: HiveMessage) async {
+        guard let text = try? HiveWire.encode(message, cryptoKey: nil, encrypt: false) else { return }
+        await clientBox.put(.string(text))
+    }
+
+    fileprivate func takeFromClient() async throws -> URLSessionWebSocketTask.Message { try await hubBox.take() }
+
+    /// The next handshake message the client sent, as its payload.
+    fileprivate func fromClient() async throws -> JSONObject? {
+        guard case .string(let text) = try await hubBox.take() else { return nil }
+        return try HiveWire.decode(text: text, cryptoKey: nil).payload
+    }
+
+    /// The hub closes the socket with `code` (0: no close frame at all),
+    /// reporting the code `lateMs` after the close when that is not zero.
+    fileprivate func closeFromHub(_ closeCode: Int, lateMs: Int) async {
+        if lateMs == 0 { lock.locked { code = closeCode == 0 ? nil : closeCode } }
+        await hubBox.close(ThalovantConnectionError("The hub closed the socket."))
+        await clientBox.close(ThalovantConnectionError("The hub closed the socket."))
+        guard lateMs > 0, closeCode != 0 else { return }
+        try? await Task.sleep(nanoseconds: UInt64(lateMs) * 1_000_000)
+        lock.locked { code = closeCode }
+        transport?.handleSocketClosed(ThalovantConnectionError("The hub closed the socket."), closeCode: closeCode, on: self)
     }
 }

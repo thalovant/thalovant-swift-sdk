@@ -21,7 +21,7 @@ final class DeviceLoginVectorTests: XCTestCase {
         let excludes = (vectors["message_excludes"]?.arrayValue ?? []).compactMap(\.stringValue)
         XCTAssertEqual(excludes.count, 2)
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 12)
+        XCTAssertEqual(cases.count, 13)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)

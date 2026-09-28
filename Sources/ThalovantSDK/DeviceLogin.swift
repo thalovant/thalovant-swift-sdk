@@ -56,7 +56,8 @@ public struct DeviceAuthorizationGrant: Sendable {
 /// Options for `ThalovantControlPlane.loginWithBrowser`.
 public struct DeviceLoginOptions: Sendable {
     /// Scopes to request for the issued API token (sent as `scopes` only when
-    /// set; the server may normalize and expand the echoed scopes).
+    /// set and not empty; the server may normalize and expand the echoed
+    /// scopes).
     public var scopes: [String]?
     /// Human-readable name recorded on the issued token (sent as
     /// `client_name` only when set).
@@ -135,7 +136,8 @@ extension ThalovantControlPlane {
     ///
     /// `POST /v1/auth/device/authorize` with `scopes` and `clientName`, each
     /// sent only when given; the API defaults the scopes to `hubs:read` and
-    /// `clients:write`. A Free plan can approve only `homeAssistantScopes`
+    /// `clients:write`. An empty scope list is left out exactly as none is:
+    /// the API requires at least one scope and answers `[]` with a 422. A Free plan can approve only `homeAssistantScopes`
     /// (`hubs:read`, `clients:read`, `clients:write`). Show the person
     /// `verificationUri` and `userCode` (or `verificationUriComplete`, which
     /// carries the code), then call `pollDeviceLogin(_:)` every `interval`
@@ -143,7 +145,7 @@ extension ThalovantControlPlane {
     /// carries credentials throws: it is about to be opened in a browser.
     public func beginDeviceLogin(scopes: [String]? = nil, clientName: String? = nil) async throws -> DeviceAuthorizationGrant {
         var payload: JSONObject = [:]
-        if let scopes {
+        if let scopes, !scopes.isEmpty {
             payload["scopes"] = .array(scopes.map { .string($0) })
         }
         if let clientName, !clientName.isEmpty {
@@ -266,7 +268,8 @@ extension ThalovantControlPlane {
                 kind: .deviceLoginExpired
             )
         default:
-            throw ThalovantApiError.httpFailure(statusCode: response.statusCode, body: body)
+            throw ThalovantApiError.httpFailure(
+                statusCode: response.statusCode, body: body, header: { response.value(forHTTPHeaderField: $0) })
         }
     }
 

@@ -272,19 +272,28 @@ final class NoiseConnection: @unchecked Sendable {
 /// Cleartext binding shared by production WSS and network-free wire fixtures.
 /// The authenticated transport HELLO is emitted only after the final handshake
 /// frame has been sent; the socket owner controls that completion boundary.
+///
+/// KK is chosen only with a pin in hand, and never with `preferXX`, which a
+/// transport sets for the one XX attempt that follows a failed KK one. XX
+/// carries no pin into the handshake: the hub's key is compared with the pin
+/// once its answer has been read, before this side sends anything more, so a
+/// hub whose key changed (`.keyChanged`) is told apart from an answer that does
+/// not authenticate under the key the password derives (`.refused`).
 final class NoiseNegotiator {
     let identity: ThalovantIdentity
     let store: any ThalovantNoiseStore
     private let derive: (String, String) throws -> Data
     private let ephemeral: () -> Data
+    private let preferXX: Bool
     private var hello: JSONObject?
     private var nodeID: String?
     private(set) var connection: NoiseConnection?
 
     init(identity: ThalovantIdentity, store: any ThalovantNoiseStore,
          derive: @escaping (String, String) throws -> Data = noisePSK,
-         ephemeral: @escaping () -> Data = noiseRandomKey) {
+         ephemeral: @escaping () -> Data = noiseRandomKey, preferXX: Bool = false) {
         self.identity = identity; self.store = store; self.derive = derive; self.ephemeral = ephemeral
+        self.preferXX = preferXX
     }
     func receive(_ message: HiveMessage) throws -> [HiveMessage] {
         if message.msgType == "hello" {
@@ -299,11 +308,33 @@ final class NoiseNegotiator {
         }
         if let msg = params["msg"]?.stringValue {
             guard let connection, !connection.ready, let nodeID else { throw noiseError("Unexpected Noise handshake continuation.") }
-            _ = try connection.read(noiseUnhex(msg))
+            let answer = try noiseUnhex(msg)
+            do {
+                _ = try connection.read(answer)
+            } catch {
+                // The hub's answer did not authenticate under the key this
+                // password derives: the hub turned the credentials away (or the
+                // negotiation was tampered with, which retrying will not fix
+                // either). The pin is never dropped for it.
+                throw ThalovantConnectionError(
+                    "Noise handshake authentication failed: a wrong password, or a tampered negotiation.",
+                    kind: .refused)
+            }
+            let remote = connection.remoteKey
+            if let pinned = try store.pinnedKey(nodeID: nodeID) {
+                guard pinned == remote else {
+                    connection.close()
+                    throw ThalovantConnectionError(
+                        "The hub's Noise key is not the one pinned for it; refusing the connection. "
+                            + "Remove the pin only once the new key is known to be the hub's.",
+                        kind: .keyChanged)
+                }
+            } else {
+                try store.pin(remote, nodeID: nodeID)
+            }
             var replies: [HiveMessage] = []
             if !connection.ready { replies.append(HiveMessage(msgType: "shake", payload: ["noise": .object(["msg": .string(noiseHex(try connection.write()))])])) }
             guard connection.ready else { throw noiseError("Noise handshake did not complete.") }
-            try store.pin(connection.remoteKey, nodeID: nodeID)
             return replies
         }
         guard connection == nil, let hello, let nodeID,
@@ -315,13 +346,14 @@ final class NoiseNegotiator {
         }
         let pin = try store.pinnedKey(nodeID: nodeID)
         let pattern: String
-        if pin != nil && patterns.contains(.string("KKpsk0")) { pattern = "KKpsk0" }
+        if !preferXX && pin != nil && patterns.contains(.string("KKpsk0")) { pattern = "KKpsk0" }
         else if patterns.contains(.string("XXpsk2")) { pattern = "XXpsk2" }
         else { throw noiseError("The hub does not offer a mutually supported Noise pattern.") }
         let protocolName = "Noise_\(pattern)_\(NoiseConnection.suite)"
         let prologue = Data((try noiseCanonical(.object(hello)) + noiseCanonical(.object(message.payload)) + protocolName).utf8)
         let state = try NoiseConnection(pattern: pattern, psk: derive(identity.password, nodeID), prologue: prologue,
-                                        privateKey: store.privateKey(), pin: pin, ephemeral: ephemeral())
+                                        privateKey: store.privateKey(), pin: pattern == "KKpsk0" ? pin : nil,
+                                        ephemeral: ephemeral())
         let bytes = try state.write(Data("{\"binarize\":false,\"encodings\":[]}".utf8))
         connection = state
         return [HiveMessage(msgType: "shake", payload: ["noise": .object([

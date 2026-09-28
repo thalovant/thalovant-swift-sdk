@@ -13,19 +13,39 @@ import FoundationNetworking
 /// counts the GETs the SDK sent.
 final class AdmissionVectorTests: XCTestCase {
 
+    /// The case's operation with `{api_host}` and `{api_port}` filled in.
+    private func placed(_ value: JSONValue) -> JSONValue {
+        switch value {
+        case .string(let text):
+            return .string(text.replacingOccurrences(of: "{api_host}", with: ScriptedApi.apiHost)
+                .replacingOccurrences(of: "{api_port}", with: String(ScriptedApi.apiPort)))
+        case .object(let fields):
+            return .object(fields.mapValues(placed))
+        default:
+            return value
+        }
+    }
+
     func testConnectionAdmissionVectors() async throws {
         let vectors = try loadVectors("connection-admission-vectors")
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 10)
+        XCTAssertEqual(cases.count, 18)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
             ScriptedApi.serve((row["exchanges"]?.arrayValue ?? []).compactMap(\.objectValue))
-            let api = ThalovantControlPlane(
-                apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
+            // An API out of reach is a loopback port nothing listens on, dialled
+            // for real; every other case is served by the script.
+            let unreachable = call["api"]?.stringValue == "unreachable"
+            let api = unreachable
+                ? ThalovantControlPlane(
+                    apiURL: "http://127.0.0.1:\(closedLoopbackPort())", accessToken: "synthetic-token",
+                    session: URLSession(configuration: .ephemeral))
+                : ThalovantControlPlane(
+                    apiURL: ScriptedApi.apiURL, accessToken: "synthetic-token", session: ScriptedApi.session())
             var operation: OperationResource?
             if let resource = call["operation"], resource.objectValue != nil {
-                operation = try JSONDecoder().decode(OperationResource.self, from: JSONEncoder().encode(resource))
+                operation = try JSONDecoder().decode(OperationResource.self, from: JSONEncoder().encode(placed(resource)))
             }
             let expect = try XCTUnwrap(row["expect"]?.objectValue, name)
             var produced: JSONObject
@@ -42,12 +62,25 @@ final class AdmissionVectorTests: XCTestCase {
                 let erased: any Error = error
                 XCTAssertTrue(erased is any ThalovantConnectionFailure, name)
                 XCTAssertTrue(erased is any ThalovantTimeoutFailure, name)
+                XCTAssertTrue(error.message.hasSuffix("it may still admit it later."), error.message)
                 produced = ["outcome": "timeout"]
                 if expect["polls"] != nil { produced["polls"] = .integer(ScriptedApi.sent.count) }
             } catch let error as ThalovantAdmissionFailedError {
                 produced = [
                     "outcome": "failed",
                     "error_code": error.errorCode.map { .string($0) } ?? .null,
+                    "status": error.statusCode.map { .integer($0) } ?? .null,
+                ]
+                if let refusal = error.apiError, refusal.statusCode != nil {
+                    produced["code"] = refusal.errorCode.map { .string($0) } ?? .null
+                    produced["detail"] = refusal.detail.map { .string($0) } ?? .null
+                }
+                produced["polls"] = .integer(ScriptedApi.sent.count)
+            } catch let error as ThalovantApiError where error.kind == .unreachable {
+                produced = ["outcome": "unreachable", "polls": .integer(ScriptedApi.sent.count)]
+            } catch let error as ThalovantApiError where error.kind == .auth {
+                produced = [
+                    "outcome": "auth", "status": error.statusCode.map { .integer($0) } ?? .null,
                     "polls": .integer(ScriptedApi.sent.count),
                 ]
             } catch is ThalovantApiError {
@@ -128,6 +161,44 @@ final class AdmissionVectorTests: XCTestCase {
         }
     }
 
+    func testAReadTheApiIsSlowToAnswerNeverCarriesTheWaitPastItsDeadline() async throws {
+        HangingAPI.reset()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [HangingAPI.self]
+        let api = ThalovantControlPlane(
+            apiURL: "https://api.example.com", accessToken: "token", session: URLSession(configuration: configuration))
+        let operation = try JSONDecoder().decode(OperationResource.self, from: Data(Fixtures.operationPending.utf8))
+        let started = ProcessInfo.processInfo.systemUptime
+        do {
+            try await api.waitForAdmission(operation, timeout: 0.3, pollInterval: 0.01)
+            XCTFail("expected the wait to time out")
+        } catch is ThalovantAdmissionTimeoutError {}
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 2)
+        XCTAssertTrue(HangingAPI.started)
+    }
+
+    func testTheWaitIsReadFromTheBodyThenRetryAfterThenRateLimitReset() {
+        func wait(_ body: String, _ headers: [String: String]) -> TimeInterval? {
+            ThalovantApiError.httpFailure(statusCode: 429, body: body, header: { name in
+                headers.first { $0.key.lowercased() == name.lowercased() }?.value
+            }).retryAfterSeconds
+        }
+        XCTAssertEqual(wait(#"{"detail": {"retry_after_seconds": 7}}"#, ["Retry-After": "3"]), 7)
+        XCTAssertEqual(wait("Too Many Requests", ["Retry-After": "3", "RateLimit-Reset": "5"]), 3)
+        XCTAssertEqual(wait("Too Many Requests", ["ratelimit-reset": " 5 "]), 5)
+        XCTAssertNil(wait("Too Many Requests", ["Retry-After": "Wed, 21 Oct 2026 07:28:00 GMT"]))
+        XCTAssertNil(wait("Too Many Requests", ["Retry-After": "-1"]))
+        XCTAssertNil(wait("Too Many Requests", [:]))
+    }
+
+    func testOriginsSpellTheDefaultPortOut() {
+        XCTAssertEqual(originOf("https://h"), originOf("https://h:443/v1/operations/x"))
+        XCTAssertEqual(originOf("http://H:80"), originOf("http://h/"))
+        XCTAssertNotEqual(originOf("http://h"), originOf("https://h"))
+        XCTAssertNotEqual(originOf("https://h"), originOf("https://h:8443"))
+        XCTAssertNil(originOf("/v1/operations/x"))
+    }
+
     func testA429WithoutARetryAfterIsRiddenOutAtThePollInterval() async throws {
         StubURLProtocol.reset()
         StubURLProtocol.enqueue(.init(status: 429, body: #"{"detail": {"code": "token_rate_limited"}}"#))
@@ -153,4 +224,16 @@ final class AdmissionVectorTests: XCTestCase {
             } catch is ThalovantApiError {}
         }
     }
+}
+
+/// Starts every request and never answers it.
+private final class HangingAPI: URLProtocol {
+    private static let lock = NSLock()
+    private static var didStart = false
+    static var started: Bool { lock.locked { didStart } }
+    static func reset() { lock.locked { didStart = false } }
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() { Self.lock.locked { Self.didStart = true } }
+    override func stopLoading() {}
 }

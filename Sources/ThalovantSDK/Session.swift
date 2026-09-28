@@ -18,13 +18,14 @@ public struct HubSessionPolicy: Sendable {
   /// How often the probe comes round while no session is held.
   public let probeDownSeconds: TimeInterval
   /// How long `HubSession.run()` keeps trying through refusals before it
-  /// throws `ThalovantHubRefusedError`. A connection just created is refused
-  /// until its hub has admitted it -- about ninety seconds -- so a refusal is
-  /// only final once it has lasted this long.
+  /// throws the refusal. A connection just created is refused until its hub
+  /// has admitted it -- about ninety seconds -- so a refusal is only final
+  /// once it has lasted this long.
   public let refusalGraceSeconds: TimeInterval
   /// How long a new link must stay up before `HubSession.connect()` and
   /// `run()` count it. A hub that does not know a client's static key says so
-  /// only by closing right after the handshake. Zero does not wait.
+  /// only by closing right after the handshake: a close within 750 ms of it
+  /// without a status, or with 1000 or 1008, is a refusal. Zero does not wait.
   public let settleSeconds: TimeInterval
   public init(
     retrySeconds: TimeInterval = 10, retryCeilingSeconds: TimeInterval = 120,
@@ -47,6 +48,76 @@ public struct HubSessionPolicy: Sendable {
     min(current * 2, retryCeilingSeconds)
   }
 }
+/// What happened to a kept link, as `LinkSupervisor` reads it.
+public enum LinkOutcome: String, Equatable, Sendable {
+  /// The link came up.
+  case up
+  /// An established link went down.
+  case dropped
+  /// The hub or the network could not be reached.
+  case failed
+  /// The hub turned the credentials away.
+  case refused
+  /// The hub's Noise key is not the one pinned for it.
+  case keyChanged = "key_changed"
+}
+
+/// What a supervisor decides after an outcome.
+public enum LinkDecision: Equatable, Sendable {
+  /// Keep the link that is up.
+  case hold
+  /// Try again after this many seconds; zero is at once.
+  case retry(after: TimeInterval)
+  /// Stop: retrying cannot help. The outcome says why.
+  case giveUp(LinkOutcome)
+}
+
+/// How a long-lived link is kept up, as a pure function of what happened and
+/// when. `HubSession.run()` asks it after every attempt, and every SDK follows
+/// the same rules (`link-keeping-vectors.json`):
+///
+/// - `.up`: hold, and start the ladder and the refusal clock afresh;
+/// - `.dropped`: dial again at once;
+/// - `.failed`: wait the ladder's step -- `retrySeconds`, doubling to
+///   `retryCeilingSeconds` -- and stop counting refusals;
+/// - `.refused`: wait the ladder's step as for a failure, until refusals have
+///   lasted `refusalGraceSeconds` since the first of them; then give up;
+/// - `.keyChanged`: give up at once.
+public struct LinkSupervisor: Sendable {
+  public let policy: HubSessionPolicy
+  private var wait: TimeInterval
+  private var refusedSince: TimeInterval?
+
+  public init(policy: HubSessionPolicy? = nil) {
+    self.policy = policy ?? (try! HubSessionPolicy())
+    self.wait = self.policy.retrySeconds
+  }
+
+  /// The decision after `outcome`, observed at `now` (seconds on any
+  /// monotonic clock).
+  public mutating func after(_ outcome: LinkOutcome, at now: TimeInterval) -> LinkDecision {
+    switch outcome {
+    case .up:
+      wait = policy.retrySeconds
+      refusedSince = nil
+      return .hold
+    case .dropped:
+      return .retry(after: 0)
+    case .keyChanged:
+      return .giveUp(.keyChanged)
+    case .refused:
+      let since = refusedSince ?? now
+      refusedSince = since
+      if now - since >= policy.refusalGraceSeconds { return .giveUp(.refused) }
+    case .failed:
+      refusedSince = nil
+    }
+    let step = wait
+    wait = policy.nextWait(wait)
+    return .retry(after: step)
+  }
+}
+
 public func alive(_ client: ThalovantClient?) -> Bool {
   guard let client else { return false }
   return !["closed", "error"].contains(client.connectionInfo().phase)
@@ -55,13 +126,15 @@ public func alive(_ client: ThalovantClient?) -> Bool {
 /// keep the link; admitted calls are never replayed because a lost response
 /// does not prove an action was rejected.
 ///
-/// `run()` stays connected until `close()`: after a failed attempt it waits
-/// `retrySeconds`, doubling up to `retryCeilingSeconds`, and notices a dropped
-/// link as it drops. A new link must stay up `settleSeconds`; one the hub
-/// closes inside that window without a status, or with 1000 or 1008, was
-/// refused. Refusals are retried like any failure -- a new connection is
-/// refused until its hub admits it -- until they have lasted
-/// `refusalGraceSeconds`, and then `run()` throws `ThalovantHubRefusedError`.
+/// `run()` stays connected until `close()`, as `LinkSupervisor` decides: after
+/// a failed attempt it waits `retrySeconds`, doubling up to
+/// `retryCeilingSeconds`, and a link that drops is dialled again at once. A
+/// new link must stay up `settleSeconds`; one the hub closes inside that
+/// window without a status, or with 1000 or 1008, was refused. Refusals are
+/// retried like any failure -- a new connection is refused until its hub
+/// admits it -- until they have lasted `refusalGraceSeconds`, and then `run()`
+/// throws the refusal (`ThalovantConnectionError` of kind `.refused`). A hub
+/// whose Noise key is not the pinned one (kind `.keyChanged`) stops it at once.
 /// Subscriptions made with `on` follow every client the session builds.
 public final class HubSession: @unchecked Sendable {
   public let policy: HubSessionPolicy
@@ -125,11 +198,7 @@ public final class HubSession: @unchecked Sendable {
         do {
           try await client.connect(timeout: connectTimeout)
         } catch {
-          let refused = (client.transport as? HiveMindWSSTransport)?.refusedUpgradeStatus
           await client.close()
-          if let refused, !(error is CancellationError) {
-            throw ThalovantHubRefusedError("The hub refused this connection's credentials (HTTP \(refused)).")
-          }
           throw error
         }
         return client
@@ -274,25 +343,24 @@ public final class HubSession: @unchecked Sendable {
       throw error
     }
   }
-  /// How long a link that ended inside the settle window may take to say
-  /// with which close code: the delegate can report it after the read failed,
-  /// and without it a refusal would read as a drop that never ends the grace.
-  static let lateCloseCodeSeconds: TimeInterval = 0.25
-  /// Waits `settleSeconds` for a new link to end, and says why when it does.
+  /// Waits out the settle window after a new link's handshake, and says why
+  /// the link ended when it ended inside it: a close with a refusal code --
+  /// learnt up to 250 ms late -- is a refusal, anything else a drop.
   private func settle(_ connected: ThalovantClient) async throws {
     guard policy.settleSeconds > 0, let lifetime = connected.transport.lifetime else { return }
-    try await lifetime.ended.wait(timeout: policy.settleSeconds, timeoutError: nil)
+    let since = lifetime.handshakeTime ?? clockNow()
+    let window = max(0, policy.settleSeconds - (clockNow() - since))
+    try await lifetime.ended.wait(timeout: window, timeoutError: nil)
     guard lifetime.ended.isOpen else { return }
-    if lifetime.closeCode == nil {
-      try await lifetime.coded.wait(timeout: Self.lateCloseCodeSeconds, timeoutError: nil)
-    }
+    await lifetime.awaitLateCode()
     if lifetime.refused {
-      throw ThalovantHubRefusedError(
-        "The hub closed the link right after the handshake: it does not accept these credentials, or not yet."
-      )
+      throw ThalovantConnectionError(
+        "The hub closed the link right after the handshake: it does not accept these credentials, or not yet.",
+        kind: .refused)
     }
     throw ThalovantConnectionError("The hub closed the link right after the handshake.")
   }
+  private func clockNow() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
   @discardableResult public func warm() -> Task<Void, Never>? {
     lock.locked {
       if closed || clock() < nextRetry { return nil }
@@ -323,10 +391,10 @@ public final class HubSession: @unchecked Sendable {
     if !held { _ = warm() }
   }
   /// Makes one attempt now: returns with a live link, or throws why there is
-  /// none. A link already up is kept. A new one must stay up `settleSeconds`:
-  /// `ThalovantHubRefusedError` when the hub closed it the way it turns
-  /// credentials away, `ThalovantConnectionError` (or `ThalovantTimeoutError`)
-  /// for everything else.
+  /// none. A link already up is kept. A new one must stay up `settleSeconds`.
+  /// A refusal throws `ThalovantConnectionError` of kind `.refused` and a hub
+  /// whose key changed of kind `.keyChanged`; anything else is a
+  /// `ThalovantConnectionError` of kind `.other` or a `ThalovantTimeoutError`.
   public func connect() async throws {
     try await acquire()
     defer { release() }
@@ -342,53 +410,67 @@ public final class HubSession: @unchecked Sendable {
     _ = try await ensure(settle: true)
     debugLog?("hub link: up")
   }
-  /// Stays connected until `close()`, by policy; see the type's description.
+  /// Stays connected until `close()`, as `LinkSupervisor` decides; see the
+  /// type's description.
   ///
-  /// Returns when the session closes; throws `ThalovantHubRefusedError` once
-  /// refusals have lasted `refusalGraceSeconds`, `CancellationError` when its
-  /// task is cancelled, and anything a connect throws that is neither a
-  /// connection failure nor a timeout -- an identity that cannot work will not
-  /// start working by being retried. A link `connect()` already opened is the
-  /// one `run()` keeps; it does not dial again.
+  /// Returns when the session closes. Throws the refusal once refusals have
+  /// lasted `refusalGraceSeconds`, a changed hub key at once,
+  /// `CancellationError` when its task is cancelled, and anything a connect
+  /// throws that is neither a connection failure nor a timeout -- an identity
+  /// that cannot work will not start working by being retried. A link
+  /// `connect()` already opened is the one `run()` keeps; it does not dial
+  /// again.
   public func run() async throws {
+    var supervisor = LinkSupervisor(policy: policy)
     while true {
       try Task.checkCancellation()
       guard !isClosed else { return }
+      let decision: LinkDecision
+      var failure: Error?
       if let live = lock.locked({ client }), alive(live) {
         await waitWhileUp(live)
         guard !isClosed else { return }
         try Task.checkCancellation()
-        if !alive(live) {
-          debugLog?("hub link: dropped")
-          try await acquire()
-          if lock.locked({ client === live }) { await drop() }
-          release()
+        if alive(live) { continue }
+        debugLog?("hub link: dropped")
+        try await acquire()
+        if lock.locked({ client === live }) { await drop() }
+        release()
+        decision = supervisor.after(.dropped, at: clock())
+      } else {
+        do {
+          try await connect()
+          _ = supervisor.after(.up, at: clock())
+          continue
+        } catch is CancellationError {
+          throw CancellationError()
+        } catch let error as ThalovantConnectionError where error.kind == .keyChanged {
+          debugLog?("hub link: the hub's key changed (\(error.message))")
+          failure = error
+          decision = supervisor.after(.keyChanged, at: clock())
+        } catch let error as ThalovantConnectionError where error.kind == .refused {
+          debugLog?("hub link: refused (\(error.message))")
+          failure = error
+          decision = supervisor.after(.refused, at: clock())
+        } catch let error
+          where error is any ThalovantConnectionFailure || error is any ThalovantTimeoutFailure
+        {
+          debugLog?("hub link: attempt failed (\(error.localizedDescription))")
+          failure = error
+          decision = supervisor.after(.failed, at: clock())
         }
-        continue
-      }
-      do {
-        try await connect()
-        continue
-      } catch is CancellationError {
-        throw CancellationError()
-      } catch let refusal as ThalovantHubRefusedError {
-        let now = clock()
-        let since = lock.locked { () -> TimeInterval in
-          if refusedSince == nil { refusedSince = now }
-          return refusedSince ?? now
-        }
-        debugLog?("hub link: refused (\(refusal.message))")
-        if now - since >= policy.refusalGraceSeconds { throw refusal }
-      } catch let failure
-        where failure is any ThalovantConnectionFailure || failure is any ThalovantTimeoutFailure
-      {
-        lock.locked { refusedSince = nil }
-        debugLog?("hub link: attempt failed (\(failure.localizedDescription))")
       }
       guard !isClosed else { return }
-      let pause = max(0, retryAt - clock())
-      debugLog?("hub link: next attempt in \(wholeSeconds(pause.rounded()))s")
-      try? await closedGate.wait(timeout: pause, timeoutError: nil)
+      switch decision {
+      case .hold:
+        continue
+      case .giveUp:
+        throw failure ?? ThalovantConnectionError("Hub link given up.")
+      case .retry(let pause):
+        guard pause > 0 else { continue }
+        debugLog?("hub link: next attempt in \(wholeSeconds(pause))s")
+        try? await closedGate.wait(timeout: pause, timeoutError: nil)
+      }
     }
   }
   /// Until the link ends, the probe interval passes, or the session closes.

@@ -206,8 +206,10 @@ try await api.revokeApiToken()
 ```
 
 `homeAssistantScopes` (`hubs:read`, `clients:read`, `clients:write`) is what a
-Home Assistant link needs, and all a Free plan can approve. Neither the device
-code nor the token ever appears in an error's message. Every sign-in sets
+Home Assistant link needs, and all a Free plan can approve. An empty scope list
+is left out of the request, as none is: the API asks for at least one and
+answers `[]` with a 422. Neither the device code nor the token ever appears in
+an error's message. Every sign-in sets
 `tokenId` from its own answer (a password sign-in's session token has none),
 and revoking the token in use is idempotent: a token already revoked cannot
 authenticate its own revoke, so that 401 counts as revoked, and revoking again
@@ -410,42 +412,68 @@ What each step can refuse, all of them `ThalovantApiError` with the status,
 - `.plan` -- a 402, or a 403 `plan_limit`;
 - `.alreadyLinked(clientId:)` -- the hub already has its one Home Assistant
   link, and `clientId` names it when the API said which;
-- `.auth` -- a 401, a 423 or a 403 `Insufficient scopes`: sign in again.
+- `.auth` -- a 401, a 423 or a 403 `Insufficient scopes`: sign in again;
+- `.unreachable` -- the API never answered at all.
 
 `waitForAdmission` returns once the operation is `ready`, and at once when
-there is none or the API no longer tracks it; a 5xx is ridden out, and so is a
-429, after the `retry_after_seconds` it names (a 429 asking for longer than is
-left is a timeout at once). It throws
-`ThalovantAdmissionFailedError` with the operation's `errorCode` when the
-platform gave up, and `ThalovantAdmissionTimeoutError` when the wait (180
-seconds by default) runs out first. That one is both a connection error and a
-timeout, since the connection may still be admitted: it matches `catch let
-error as any ThalovantConnectionFailure` and `catch let error as any
-ThalovantTimeoutFailure` alike. An operation link on another origin than the
-API's is never fetched.
+there is none or the API no longer tracks it. A 5xx is ridden out, and so is a
+429, for the wait the API names (`retryAfterSeconds`: `retry_after_seconds` in
+the body, else the `Retry-After` or `RateLimit-Reset` header); a 429 asking for
+longer than is left is a timeout at once, and no read runs past the deadline.
+It throws:
+
+- `ThalovantAdmissionFailedError` when the platform gave up (`errorCode`, the
+  operation's own) or the API refused the wait itself (`apiError`, with its
+  status, code and detail);
+- `ThalovantAdmissionTimeoutError` when the wait (180 seconds by default) runs
+  out first -- both a connection error and a timeout, since the connection may
+  still be admitted later: it matches `catch let error as any
+  ThalovantConnectionFailure` and `catch let error as any
+  ThalovantTimeoutFailure` alike;
+- the `ThalovantApiError` itself for a 401 or 403 (`.auth`) and for an API out
+  of reach (`.unreachable`), which say nothing about the connection.
+
+An operation link on another origin than the API's -- scheme, host and port,
+the default port spelled out -- is never fetched.
 
 `deleteClient(_:etag:)` removes a connection: without an etag it reads one
 first, a 412 reads it again and retries once, and a 404 counts as deleted.
 
-The answer is always sent, within the hub's ten seconds. A handler has nine
-by default (`timeout:`); one that throws is answered `failed_to_handle`, one
-too slow `timeout`, and one outside the contract's codes `unknown` -- each with
-empty speech, so the hub says its own sentence for the code in the device's
-language. `speech` goes out as plain text: markup removed, entities decoded,
-whitespace collapsed (`plainSpeech`). The response is a reply
+Every request gets at most one answer, and never after the hub's ten seconds,
+counted from its arrival. A handler has nine by default (`timeout:`), or what
+is left of the ten if that is less; one that throws is answered
+`failed_to_handle`, one too slow `timeout` -- sent at the deadline even if it
+ignores being cancelled -- and one outside the contract's codes `unknown`, each
+with empty speech, so the hub says its own sentence for the code in the
+device's language. The reply gets what the handler left: it is never started
+after the bound, and one still queued when the bound passes is withdrawn, in
+which case `answerHomeRequest` returns nil.
+
+`speech` goes out as plain text (`plainSpeech`), by rules every SDK shares
+rather than a platform HTML library: real markup removed ("5 < 6 and 7 > 3"
+stays whole), then numeric references, the five XML entities and `&nbsp;`
+decoded and nothing else (`&eacute;` stays as written), then every run of
+Unicode white space collapsed to one space. The response is a reply
 (`reply(to:type:data:context:)`, built with `replyContext`): the request's
-context, with `source` and `destination` turned round. `homeResponse(to:answer:)`
+context with `source` and `destination` turned round, and no destination at
+all when the request named none to come from. `homeResponse(to:answer:)`
 builds the payload for a caller that sends it itself; `ThalovantClient` has
 `answerHomeRequests` too.
 
-`run()` keeps the link by policy: after a failed attempt it waits 10 seconds,
-doubling to 120; it notices a drop as it happens, and looks at a held link
-every 60 seconds. A hub that does not know a connection's key says so only by
-closing right after the handshake, so a link closed within 0.75 seconds
-without a status, or with 1000 or 1008, was refused. A new connection is
-refused until its hub admits it, so refusals are retried for 600 seconds
-before `run()` throws `ThalovantHubRefusedError`. Every attempt goes to
-`debugLog`, when you pass one, and nowhere else.
+`run()` keeps the link as `LinkSupervisor` decides, a pure function you can
+also drive yourself: after a failed attempt it waits 10 seconds, doubling to
+120; a link that drops is dialled again at once, and a held link is looked at
+every 60 seconds. A hub refuses credentials by closing the socket without a
+status, with 1000 or with 1008 -- during the handshake or within 750 ms after
+it, a code learnt up to 250 ms late counting -- by answering the WebSocket
+upgrade 401 or 403, or by a Noise answer that does not authenticate under the
+key the password derives. Each is a `ThalovantConnectionError` of kind
+`.refused`. A new connection is refused until its hub admits it, so refusals
+are retried for 600 seconds before `run()` throws. A connect whose KK
+handshake fails tries XX at once, inside the same connect: only XX tells a
+changed password (`.refused`) from a hub whose key is no longer the pinned one
+(`.keyChanged`), which stops `run()` at once and never replaces the pin. Every
+attempt goes to `debugLog`, when you pass one, and nowhere else.
 
 ## Operations
 
@@ -692,16 +720,18 @@ let selected = selectDataPlaneEndpoint(
   `problem` body where the API provides them (see
   [Reading An API Error](#reading-an-api-error)).
   Its `kind` tells refusals apart: `.auth`, `.plan`,
-  `.alreadyLinked(clientId:)`, `.unsupportedConnectionType`, and a device
+  `.alreadyLinked(clientId:)`, `.unsupportedConnectionType`, a device
   sign-in's `.deviceLoginPending(interval:)`, `.deviceLoginExpired` and
-  `.deviceLoginDenied`; `.other` for the rest. New kinds may be added, so
-  switch with a `default`.
+  `.deviceLoginDenied`, and `.unreachable` for an API that never answered;
+  `.other` for the rest. New kinds may be added, so switch with a `default`.
+  `retryAfterSeconds` is the wait a 429 asked for.
 - `ThalovantDeviceLoginError` — `loginWithBrowser`'s sign-in was `.denied` or
   the user code `.expired` before approval.
 - `ThalovantConnectionError` / `ThalovantTimeoutError` /
   `ThalovantRuntimeError` — data-plane connection, deadline, and hub failures.
-- `ThalovantHubRefusedError` — the hub turned the connection's credentials
-  away (`HubSession.connect()` and `run()`).
+  A connection error's `kind` is `.refused` when the hub turned the
+  credentials away and `.keyChanged` when its Noise key is not the pinned one;
+  `.other` otherwise.
 - `ThalovantAdmissionFailedError` / `ThalovantAdmissionTimeoutError` — a new
   connection was not admitted (`waitForAdmission`).
 - `ThalovantConnectionFailure` / `ThalovantTimeoutFailure` — protocols for

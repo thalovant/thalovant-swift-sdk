@@ -514,7 +514,8 @@ public final class ThalovantControlPlane {
         let (data, response) = try await perform(request)
         guard (200..<300).contains(response.statusCode) else {
             let text = String(decoding: data, as: UTF8.self)
-            throw ThalovantApiError.httpFailure(statusCode: response.statusCode, body: text)
+            throw ThalovantApiError.httpFailure(
+                statusCode: response.statusCode, body: text, header: { response.value(forHTTPHeaderField: $0) })
         }
         return data
     }
@@ -545,7 +546,11 @@ public final class ThalovantControlPlane {
                     if cancellation.isCancelled {
                         continuation.resume(throwing: CancellationError())
                     } else if let error {
-                        continuation.resume(throwing: ThalovantApiError(message: "Thalovant API request failed: \(safeTransportErrorMessage(error))"))
+                        // Never answered: the API is out of reach, which is not
+                        // a refusal and may clear up.
+                        continuation.resume(throwing: ThalovantApiError(
+                            message: "Thalovant API request failed: \(safeTransportErrorMessage(error))",
+                            kind: .unreachable))
                     } else if let http = response as? HTTPURLResponse {
                         continuation.resume(returning: (data ?? Data(), http))
                     } else {

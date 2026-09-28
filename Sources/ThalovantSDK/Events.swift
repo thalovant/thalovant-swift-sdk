@@ -168,21 +168,25 @@ func compactUUID() -> String {
     UUID().uuidString.lowercased().replacingOccurrences(of: "-", with: "")
 }
 
-/// Removes SSML/XML tags, mirroring the sibling SDKs.
+/// Removes SSML/XML markup, as every SDK does: a tag -- `<` or `</` right
+/// before an ASCII letter, then its name, its attributes (a quoted value may
+/// hold a `>`) and `>` or `/>` -- a comment (`<!--` to `-->`) and a processing
+/// instruction (`<?` to `?>`). Any other `<` is text, so "5 < 6 and 7 > 3"
+/// survives whole and an unclosed `<b` stays. Character references are left
+/// as they are.
 public func stripSsml(_ text: String) -> String {
-    var result = ""
-    var insideTag = false
-    for character in text {
-        if character == "<" {
-            insideTag = true
-        } else if character == ">" {
-            insideTag = false
-        } else if !insideTag {
-            result.append(character)
-        }
-    }
-    return result
+    guard text.contains("<") else { return text }
+    return markupPattern.stringByReplacingMatches(
+        in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: "")
 }
+
+/// The markup `stripSsml` removes. White space inside a tag is what Python's
+/// `\s` matches, spelled out so that it is the same on every platform.
+private let markupPattern: NSRegularExpression = {
+    let space = "[\\t\\n\\u000B\\f\\r\\u001C-\\u001F \\u0085\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
+    let pattern = "<!--.*?-->|<\\?.*?\\?>|</?[A-Za-z][A-Za-z0-9._:-]*(?:\(space)+(?:[^<>\"']|\"[^\"]*\"|'[^']*')*)?\(space)*/?>"
+    return try! NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators])
+}()
 
 public func utterancePayload(text: String, lang: String) -> JSONObject {
     ["utterances": .array([.string(text)]), "lang": .string(lang)]

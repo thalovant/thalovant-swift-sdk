@@ -23,7 +23,9 @@ import Foundation
 /// said, with the routing turned round: the reply goes to whoever sent the
 /// request (`destination` becomes the old `source`) and comes from whoever it
 /// was sent to (`source` becomes the old `destination`, its first entry when
-/// that is a list). A hub routes the answer back by it, across bridges and
+/// that is a list). A context with a destination and no source gets a reply
+/// with no destination at all: keeping the old one would address the reply
+/// to its own sender. A hub routes the answer back by it, across bridges and
 /// NAT. An event this SDK delivers carries the context exactly as the hub
 /// sent it, so this is built from that.
 public func replyContext(_ context: JSONObject?) -> JSONObject {
@@ -39,6 +41,8 @@ public func replyContext(_ context: JSONObject?) -> JSONObject {
     }
     if let source {
         swapped["destination"] = source
+    } else if destination != nil {
+        swapped.removeValue(forKey: "destination")
     }
     return swapped
 }
@@ -189,23 +193,26 @@ public struct HomeAnswer: Equatable, Sendable {
 /// Answers a home request: `@Sendable (HomeRequest) async throws -> HomeAnswer`.
 public typealias HomeHandler = @Sendable (HomeRequest) async throws -> HomeAnswer
 
-/// Speech a device can say as it is: markup removed, entities decoded,
-/// whitespace collapsed.
+/// Speech a device can say as it is, made in this order -- the rules every SDK
+/// keeps, with nothing from a platform's HTML library, whose entity tables
+/// differ:
 ///
-/// References decode by Python's `html.unescape` rules: numeric ones
-/// (`&#233;`, `&#xE9;`, with or without the `;`), and named ones from HTML 4's
-/// 252 -- `&amp;`, `&nbsp;`, `&eacute;`, `&mdash;`, `&euro;` and the rest -- plus
-/// `&apos;`, including the old unterminated forms (`&amp chips`). A name only
-/// HTML5 added stays as written.
+/// 1. Markup goes (`stripSsml`): a tag -- `<` or `</` right before an ASCII
+///    letter, up to the next `>` outside a quoted attribute value -- a
+///    comment and a processing instruction. Any other `<` is text, so
+///    "5 < 6 and 7 > 3" stays whole.
+/// 2. Character references are decoded once, left to right: numeric ones
+///    (`&#72;`, `&#x48;`) other than 0, surrogates and anything above
+///    U+10FFFF, the five XML entities, and `&nbsp;`. Nothing else: `&eacute;`
+///    stays as written, and a reference needs its `;`.
+/// 3. Every run of Unicode White_Space becomes one space, and the ends are
+///    trimmed.
 public func plainSpeech(_ text: String?) -> String {
     guard let text, !text.isEmpty else { return "" }
-    let stripped = markupPattern.stringByReplacingMatches(
-        in: text, range: NSRange(text.startIndex..., in: text), withTemplate: "")
-    let decoded = decodeEntities(stripped)
     var out = ""
     var pendingSpace = false
-    for scalar in decoded.unicodeScalars {
-        if isSpeechSpace(scalar) {
+    for scalar in decodeReferences(stripSsml(text)).unicodeScalars {
+        if scalar.properties.isWhitespace {
             pendingSpace = true
             continue
         }
@@ -248,25 +255,56 @@ public func homeResponse(to request: HomeRequest, answer: HomeAnswer) -> JSONObj
 
 extension ThalovantReplying {
     /// Answers one `thalovant.home.request`: runs `handler`, then replies
-    /// whatever happened, and returns the payload it sent.
+    /// whatever happened. Returns the payload it sent, or nil when there was
+    /// no time left to send one.
     ///
-    /// The handler has `timeout` seconds. The answer goes out when it is up
-    /// even if the handler ignores being cancelled -- the hub stops waiting at
-    /// ten seconds, so the SDK does not wait on a handler that will not stop.
-    /// A handler that throws is answered `failed_to_handle`, one too slow
-    /// `timeout`, and one outside the contract `unknown`. Cancelling the task
-    /// that called this cancels the handler and sends nothing.
+    /// Everything happens inside `hubTimeout`, counted from this call: the hub
+    /// gives up on a request after that, and an answer it has given up on only
+    /// confuses the next one. The handler gets `timeout` or what is left of
+    /// the bound, whichever is less, and the answer goes out when that is up
+    /// even if the handler ignores being cancelled. The reply gets what the
+    /// handler left: it is never started after the bound, and one still queued
+    /// behind other frames when the bound passes is withdrawn. A handler that
+    /// throws is answered `failed_to_handle`, one too slow `timeout`, and one
+    /// outside the contract `unknown`. Cancelling the task that called this
+    /// cancels the handler and sends nothing.
     @discardableResult
     public func answerHomeRequest(
         _ event: ThalovantEvent,
         timeout: TimeInterval = HomeLink.handlerTimeout,
+        hubTimeout: TimeInterval = HomeLink.hubTimeout,
         handler: @escaping HomeHandler
-    ) async throws -> JSONObject {
+    ) async throws -> JSONObject? {
+        try await answerHomeRequest(
+            event, arrivedAt: ProcessInfo.processInfo.systemUptime, timeout: timeout, hubTimeout: hubTimeout,
+            handler: handler)
+    }
+
+    /// `answerHomeRequest` with the bound counted from when the request
+    /// arrived rather than from the call.
+    func answerHomeRequest(
+        _ event: ThalovantEvent,
+        arrivedAt: TimeInterval,
+        timeout: TimeInterval,
+        hubTimeout: TimeInterval,
+        handler: @escaping HomeHandler
+    ) async throws -> JSONObject? {
+        func left() -> TimeInterval {
+            hubTimeout.isFinite ? hubTimeout - (ProcessInfo.processInfo.systemUptime - arrivedAt) : HomeLink.hubTimeout
+        }
         let request = HomeRequest(event: event)
-        let answer = try await boundedHomeAnswer(request, timeout: timeout, handler: handler)
+        let bound = timeout.isFinite ? min(timeout, left()) : left()
+        let answer = try await boundedHomeAnswer(request, timeout: max(0, bound), handler: handler)
         let payload = homeResponse(to: request, answer: answer)
-        try await reply(to: event, type: HomeLink.responseMessageType, data: payload, context: [:])
-        return payload
+        let remaining = left()
+        // No time left: the hub has given up on it.
+        guard remaining > 0 else { return nil }
+        let sent = try await firstWithin(remaining) {
+            try await self.reply(to: event, type: HomeLink.responseMessageType, data: payload, context: [:])
+            return true
+        }
+        // Withdrawn: it could only have arrived after the hub gave up.
+        return sent == true ? payload : nil
     }
 }
 
@@ -282,7 +320,11 @@ extension ThalovantClient {
         let answers = HomeAnswers()
         let subscription = on(HomeLink.requestMessageType) { [weak self] event in
             guard let self else { return }
-            answers.start { _ = try? await self.answerHomeRequest(event, timeout: timeout, handler: handler) }
+            let arrived = ProcessInfo.processInfo.systemUptime
+            answers.start {
+                _ = try? await self.answerHomeRequest(
+                    event, arrivedAt: arrived, timeout: timeout, hubTimeout: HomeLink.hubTimeout, handler: handler)
+            }
         }
         return ThalovantSubscription {
             subscription.close()
@@ -304,7 +346,11 @@ extension HubSession {
         let answers = HomeAnswers()
         let subscription = try on(HomeLink.requestMessageType) { [weak self] event in
             guard let self else { return }
-            answers.start { _ = try? await self.answerHomeRequest(event, timeout: timeout, handler: handler) }
+            let arrived = ProcessInfo.processInfo.systemUptime
+            answers.start {
+                _ = try? await self.answerHomeRequest(
+                    event, arrivedAt: arrived, timeout: timeout, hubTimeout: HomeLink.hubTimeout, handler: handler)
+            }
         }
         return ThalovantSubscription {
             subscription.close()
@@ -323,48 +369,22 @@ extension HubSession: ThalovantReplying {}
 /// Not a task group: a group waits for every child to finish, so a handler
 /// that ignores cancellation would hold the answer past the hub's deadline.
 /// The handler runs on a task of its own, cancelled when the time is up and
-/// left to end in its own time.
+/// left to end in its own time; its late result is dropped.
 func boundedHomeAnswer(
     _ request: HomeRequest,
     timeout: TimeInterval,
     handler: @escaping HomeHandler
 ) async throws -> HomeAnswer {
-    let finished = AsyncGate()
-    let outcome = HomeOutcome()
-    let work = Task {
-        do {
-            outcome.keep(.success(try await handler(request)))
-        } catch {
-            outcome.keep(.failure(error))
-        }
-        finished.open()
-    }
     do {
-        try await finished.wait(
-            timeout: timeout.isFinite ? max(0, timeout) : HomeLink.handlerTimeout,
-            timeoutError: HomeHandlerTimedOut())
-    } catch is HomeHandlerTimedOut {
-        work.cancel()
-        return .error(.timeout)
-    } catch {
-        work.cancel()
-        throw error
-    }
-    switch outcome.value {
-    case .success(let answer):
+        guard let answer = try await firstWithin(timeout, { try await handler(request) }) else {
+            return .error(.timeout)
+        }
         return answer
-    case .failure, .none:
+    } catch is CancellationError where Task.isCancelled {
+        throw CancellationError()
+    } catch {
         return .error(.failedToHandle)
     }
-}
-
-private struct HomeHandlerTimedOut: Error {}
-
-private final class HomeOutcome: @unchecked Sendable {
-    private let lock = NSLock()
-    private var stored: Result<HomeAnswer, Error>?
-    var value: Result<HomeAnswer, Error>? { lock.locked { stored } }
-    func keep(_ result: Result<HomeAnswer, Error>) { lock.locked { stored = result } }
 }
 
 /// The answers one subscription has running.
@@ -399,185 +419,40 @@ final class HomeAnswers: @unchecked Sendable {
     }
 }
 
-/// `<...>`, as the reference's `strip_ssml` removes it: a `<` with no closing
-/// `>` is not markup and stays.
-private let markupPattern = try! NSRegularExpression(pattern: "</?[^>]*>")
-
-/// What Python's `\s` matches: Unicode white space, and the four information
-/// separators it counts as space too.
-private func isSpeechSpace(_ scalar: Unicode.Scalar) -> Bool {
-    scalar.properties.isWhitespace || (0x1C...0x1F).contains(scalar.value)
-}
-
-/// HTML 4's named character references -- every one `html.unescape` knows,
-/// which covers what speech carries -- with `&apos;` and the six uppercase
-/// spellings HTML5 added for the oldest ones.
-private let namedEntities: [String: String] = [
-    "apos": "'", "AMP": "&", "COPY": "\u{A9}", "GT": ">", "LT": "<", "QUOT": "\"", "REG": "\u{AE}",
-    "AElig": "\u{C6}", "Aacute": "\u{C1}", "Acirc": "\u{C2}", "Agrave": "\u{C0}", "Alpha": "\u{391}",
-    "Aring": "\u{C5}", "Atilde": "\u{C3}", "Auml": "\u{C4}", "Beta": "\u{392}", "Ccedil": "\u{C7}",
-    "Chi": "\u{3A7}", "Dagger": "\u{2021}", "Delta": "\u{394}", "ETH": "\u{D0}", "Eacute": "\u{C9}",
-    "Ecirc": "\u{CA}", "Egrave": "\u{C8}", "Epsilon": "\u{395}", "Eta": "\u{397}", "Euml": "\u{CB}",
-    "Gamma": "\u{393}", "Iacute": "\u{CD}", "Icirc": "\u{CE}", "Igrave": "\u{CC}", "Iota": "\u{399}",
-    "Iuml": "\u{CF}", "Kappa": "\u{39A}", "Lambda": "\u{39B}", "Mu": "\u{39C}", "Ntilde": "\u{D1}",
-    "Nu": "\u{39D}", "OElig": "\u{152}", "Oacute": "\u{D3}", "Ocirc": "\u{D4}", "Ograve": "\u{D2}",
-    "Omega": "\u{3A9}", "Omicron": "\u{39F}", "Oslash": "\u{D8}", "Otilde": "\u{D5}", "Ouml": "\u{D6}",
-    "Phi": "\u{3A6}", "Pi": "\u{3A0}", "Prime": "\u{2033}", "Psi": "\u{3A8}", "Rho": "\u{3A1}",
-    "Scaron": "\u{160}", "Sigma": "\u{3A3}", "THORN": "\u{DE}", "Tau": "\u{3A4}", "Theta": "\u{398}",
-    "Uacute": "\u{DA}", "Ucirc": "\u{DB}", "Ugrave": "\u{D9}", "Upsilon": "\u{3A5}", "Uuml": "\u{DC}",
-    "Xi": "\u{39E}", "Yacute": "\u{DD}", "Yuml": "\u{178}", "Zeta": "\u{396}", "aacute": "\u{E1}",
-    "acirc": "\u{E2}", "acute": "\u{B4}", "aelig": "\u{E6}", "agrave": "\u{E0}", "alefsym": "\u{2135}",
-    "alpha": "\u{3B1}", "amp": "&", "and": "\u{2227}", "ang": "\u{2220}", "aring": "\u{E5}", "asymp": "\u{2248}",
-    "atilde": "\u{E3}", "auml": "\u{E4}", "bdquo": "\u{201E}", "beta": "\u{3B2}", "brvbar": "\u{A6}",
-    "bull": "\u{2022}", "cap": "\u{2229}", "ccedil": "\u{E7}", "cedil": "\u{B8}", "cent": "\u{A2}",
-    "chi": "\u{3C7}", "circ": "\u{2C6}", "clubs": "\u{2663}", "cong": "\u{2245}", "copy": "\u{A9}",
-    "crarr": "\u{21B5}", "cup": "\u{222A}", "curren": "\u{A4}", "dArr": "\u{21D3}", "dagger": "\u{2020}",
-    "darr": "\u{2193}", "deg": "\u{B0}", "delta": "\u{3B4}", "diams": "\u{2666}", "divide": "\u{F7}",
-    "eacute": "\u{E9}", "ecirc": "\u{EA}", "egrave": "\u{E8}", "empty": "\u{2205}", "emsp": "\u{2003}",
-    "ensp": "\u{2002}", "epsilon": "\u{3B5}", "equiv": "\u{2261}", "eta": "\u{3B7}", "eth": "\u{F0}",
-    "euml": "\u{EB}", "euro": "\u{20AC}", "exist": "\u{2203}", "fnof": "\u{192}", "forall": "\u{2200}",
-    "frac12": "\u{BD}", "frac14": "\u{BC}", "frac34": "\u{BE}", "frasl": "\u{2044}", "gamma": "\u{3B3}",
-    "ge": "\u{2265}", "gt": ">", "hArr": "\u{21D4}", "harr": "\u{2194}", "hearts": "\u{2665}",
-    "hellip": "\u{2026}", "iacute": "\u{ED}", "icirc": "\u{EE}", "iexcl": "\u{A1}", "igrave": "\u{EC}",
-    "image": "\u{2111}", "infin": "\u{221E}", "int": "\u{222B}", "iota": "\u{3B9}", "iquest": "\u{BF}",
-    "isin": "\u{2208}", "iuml": "\u{EF}", "kappa": "\u{3BA}", "lArr": "\u{21D0}", "lambda": "\u{3BB}",
-    "lang": "\u{2329}", "laquo": "\u{AB}", "larr": "\u{2190}", "lceil": "\u{2308}", "ldquo": "\u{201C}",
-    "le": "\u{2264}", "lfloor": "\u{230A}", "lowast": "\u{2217}", "loz": "\u{25CA}", "lrm": "\u{200E}",
-    "lsaquo": "\u{2039}", "lsquo": "\u{2018}", "lt": "<", "macr": "\u{AF}", "mdash": "\u{2014}", "micro": "\u{B5}",
-    "middot": "\u{B7}", "minus": "\u{2212}", "mu": "\u{3BC}", "nabla": "\u{2207}", "nbsp": "\u{A0}",
-    "ndash": "\u{2013}", "ne": "\u{2260}", "ni": "\u{220B}", "not": "\u{AC}", "notin": "\u{2209}",
-    "nsub": "\u{2284}", "ntilde": "\u{F1}", "nu": "\u{3BD}", "oacute": "\u{F3}", "ocirc": "\u{F4}",
-    "oelig": "\u{153}", "ograve": "\u{F2}", "oline": "\u{203E}", "omega": "\u{3C9}", "omicron": "\u{3BF}",
-    "oplus": "\u{2295}", "or": "\u{2228}", "ordf": "\u{AA}", "ordm": "\u{BA}", "oslash": "\u{F8}",
-    "otilde": "\u{F5}", "otimes": "\u{2297}", "ouml": "\u{F6}", "para": "\u{B6}", "part": "\u{2202}",
-    "permil": "\u{2030}", "perp": "\u{22A5}", "phi": "\u{3C6}", "pi": "\u{3C0}", "piv": "\u{3D6}",
-    "plusmn": "\u{B1}", "pound": "\u{A3}", "prime": "\u{2032}", "prod": "\u{220F}", "prop": "\u{221D}",
-    "psi": "\u{3C8}", "quot": "\"", "rArr": "\u{21D2}", "radic": "\u{221A}", "rang": "\u{232A}", "raquo": "\u{BB}",
-    "rarr": "\u{2192}", "rceil": "\u{2309}", "rdquo": "\u{201D}", "real": "\u{211C}", "reg": "\u{AE}",
-    "rfloor": "\u{230B}", "rho": "\u{3C1}", "rlm": "\u{200F}", "rsaquo": "\u{203A}", "rsquo": "\u{2019}",
-    "sbquo": "\u{201A}", "scaron": "\u{161}", "sdot": "\u{22C5}", "sect": "\u{A7}", "shy": "\u{AD}",
-    "sigma": "\u{3C3}", "sigmaf": "\u{3C2}", "sim": "\u{223C}", "spades": "\u{2660}", "sub": "\u{2282}",
-    "sube": "\u{2286}", "sum": "\u{2211}", "sup": "\u{2283}", "sup1": "\u{B9}", "sup2": "\u{B2}", "sup3": "\u{B3}",
-    "supe": "\u{2287}", "szlig": "\u{DF}", "tau": "\u{3C4}", "there4": "\u{2234}", "theta": "\u{3B8}",
-    "thetasym": "\u{3D1}", "thinsp": "\u{2009}", "thorn": "\u{FE}", "tilde": "\u{2DC}", "times": "\u{D7}",
-    "trade": "\u{2122}", "uArr": "\u{21D1}", "uacute": "\u{FA}", "uarr": "\u{2191}", "ucirc": "\u{FB}",
-    "ugrave": "\u{F9}", "uml": "\u{A8}", "upsih": "\u{3D2}", "upsilon": "\u{3C5}", "uuml": "\u{FC}",
-    "weierp": "\u{2118}", "xi": "\u{3BE}", "yacute": "\u{FD}", "yen": "\u{A5}", "yuml": "\u{FF}",
-    "zeta": "\u{3B6}", "zwj": "\u{200D}", "zwnj": "\u{200C}",
+/// The portable set of character references: numeric (decimal and
+/// hexadecimal), the five XML entities, and `&nbsp;`, each with its `;`.
+private let referencePattern = try! NSRegularExpression(
+    pattern: "&(?:#([0-9]{1,7})|#[xX]([0-9A-Fa-f]{1,6})|(amp|lt|gt|quot|apos|nbsp));")
+private let namedReferences: [String: String] = [
+    "amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "nbsp": "\u{A0}",
 ]
 
-/// The names `html.unescape` also takes without a `;` -- `&amp chips` is
-/// `& chips` -- and the longest of which it reads at the start of a name it
-/// does not know: `&notit;` is `¬it;`.
-private let legacyEntities: Set<String> = [
-    "AElig", "AMP", "Aacute", "Acirc", "Agrave", "Aring", "Atilde", "Auml", "COPY", "Ccedil", "ETH", "Eacute",
-    "Ecirc", "Egrave", "Euml", "GT", "Iacute", "Icirc", "Igrave", "Iuml", "LT", "Ntilde", "Oacute", "Ocirc",
-    "Ograve", "Oslash", "Otilde", "Ouml", "QUOT", "REG", "THORN", "Uacute", "Ucirc", "Ugrave", "Uuml", "Yacute",
-    "aacute", "acirc", "acute", "aelig", "agrave", "amp", "aring", "atilde", "auml", "brvbar", "ccedil", "cedil",
-    "cent", "copy", "curren", "deg", "divide", "eacute", "ecirc", "egrave", "eth", "euml", "frac12", "frac14",
-    "frac34", "gt", "iacute", "icirc", "iexcl", "igrave", "iquest", "iuml", "laquo", "lt", "macr", "micro",
-    "middot", "nbsp", "not", "ntilde", "oacute", "ocirc", "ograve", "ordf", "ordm", "oslash", "otilde", "ouml",
-    "para", "plusmn", "pound", "quot", "raquo", "reg", "sect", "shy", "sup1", "sup2", "sup3", "szlig", "thorn",
-    "times", "uacute", "ucirc", "ugrave", "uml", "uuml", "yacute", "yen", "yuml",
-]
-
-/// Windows-1252 for the C1 references, as `html.unescape` reads them; the five
-/// it leaves undefined stand for themselves.
-private let windows1252: [UInt32: UInt32] = [
-    0x81: 0x81, 0x8D: 0x8D, 0x8F: 0x8F, 0x90: 0x90, 0x9D: 0x9D,
-    0x80: 0x20AC, 0x82: 0x201A, 0x83: 0x0192, 0x84: 0x201E, 0x85: 0x2026, 0x86: 0x2020, 0x87: 0x2021,
-    0x88: 0x02C6, 0x89: 0x2030, 0x8A: 0x0160, 0x8B: 0x2039, 0x8C: 0x0152, 0x8E: 0x017D, 0x91: 0x2018,
-    0x92: 0x2019, 0x93: 0x201C, 0x94: 0x201D, 0x95: 0x2022, 0x96: 0x2013, 0x97: 0x2014, 0x98: 0x02DC,
-    0x99: 0x2122, 0x9A: 0x0161, 0x9B: 0x203A, 0x9C: 0x0153, 0x9E: 0x017E, 0x9F: 0x0178,
-]
-
-/// A numeric reference as `html.unescape` decodes it.
-private func numericEntity(_ value: UInt32) -> String {
-    if value == 0 { return "\u{FFFD}" }
-    if value == 0x0D { return "\r" }
-    if let mapped = windows1252[value] { return String(Unicode.Scalar(mapped).map(Character.init) ?? "\u{FFFD}") }
-    if (0xD800...0xDFFF).contains(value) || value > 0x10FFFF { return "\u{FFFD}" }
-    let dropped = (0x1...0x8).contains(value) || (0xE...0x1F).contains(value) || (0x7F...0x9F).contains(value)
-        || (0xFDD0...0xFDEF).contains(value) || value == 0xB || (value & 0xFFFE) == 0xFFFE
-    if dropped { return "" }
-    return Unicode.Scalar(value).map { String(Character($0)) } ?? "\u{FFFD}"
-}
-
-/// What ends a named reference's name.
-private let referenceStops: Set<Unicode.Scalar> = ["\t", "\n", "\u{0C}", " ", "<", "&", "#", ";"]
-
-private func decodeEntities(_ text: String) -> String {
+/// Decodes the portable set of character references, once, left to right. A
+/// numeric reference to no character -- 0, a surrogate, anything above
+/// U+10FFFF -- stays as written.
+func decodeReferences(_ text: String) -> String {
     guard text.contains("&") else { return text }
-    let scalars = Array(text.unicodeScalars)
-    var out = String.UnicodeScalarView()
-    var index = 0
-    while index < scalars.count {
-        let scalar = scalars[index]
-        guard scalar == "&" else {
-            out.append(scalar)
-            index += 1
+    let source = text as NSString
+    var out = ""
+    var cursor = 0
+    for match in referencePattern.matches(in: text, range: NSRange(location: 0, length: source.length)) {
+        out += source.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+        cursor = match.range.location + match.range.length
+        let whole = source.substring(with: match.range)
+        if match.range(at: 3).location != NSNotFound {
+            out += namedReferences[source.substring(with: match.range(at: 3))] ?? whole
             continue
         }
-        var cursor = index + 1
-        if cursor < scalars.count, scalars[cursor] == "#" {
-            cursor += 1
-            let hex = cursor < scalars.count && (scalars[cursor] == "x" || scalars[cursor] == "X")
-            if hex { cursor += 1 }
-            let start = cursor
-            while cursor < scalars.count, hex ? scalars[cursor].properties.isASCIIHexDigit : ("0"..."9").contains(scalars[cursor]) {
-                cursor += 1
-            }
-            if cursor > start {
-                let digits = String(String.UnicodeScalarView(scalars[start..<cursor]))
-                    .drop { $0 == "0" }
-                // Anything past eight digits is past U+10FFFF in either base.
-                let value = digits.isEmpty ? 0 : digits.count > 8 ? nil
-                    : UInt64(digits, radix: hex ? 16 : 10).map { $0 > 0x10FFFF ? 0x110000 : UInt32($0) }
-                if cursor < scalars.count, scalars[cursor] == ";" { cursor += 1 }
-                out.append(contentsOf: numericEntity(value ?? 0x110000).unicodeScalars)
-                index = cursor
-                continue
-            }
-        } else {
-            // `html.unescape`: up to 32 characters that are not white space,
-            // `<`, `&`, `#` or `;`, then an optional `;`.
-            let start = cursor
-            while cursor < scalars.count, cursor - start < 32, !referenceStops.contains(scalars[cursor]) {
-                cursor += 1
-            }
-            if cursor > start {
-                let name = String(String.UnicodeScalarView(scalars[start..<cursor]))
-                let terminated = cursor < scalars.count && scalars[cursor] == ";"
-                if terminated, let decoded = namedEntities[name] {
-                    out.append(contentsOf: decoded.unicodeScalars)
-                    index = cursor + 1
-                    continue
-                }
-                if !terminated, legacyEntities.contains(name), let decoded = namedEntities[name] {
-                    out.append(contentsOf: decoded.unicodeScalars)
-                    index = cursor
-                    continue
-                }
-                // The longest legacy name the reference starts with, the rest
-                // kept as written.
-                let characters = Array(name.unicodeScalars)
-                var length = characters.count - (terminated ? 0 : 1)
-                var matched = false
-                while length >= 2 {
-                    let prefix = String(String.UnicodeScalarView(characters[0..<length]))
-                    if legacyEntities.contains(prefix), let decoded = namedEntities[prefix] {
-                        out.append(contentsOf: decoded.unicodeScalars)
-                        index = start + length
-                        matched = true
-                        break
-                    }
-                    length -= 1
-                }
-                if matched { continue }
-            }
+        let decimal = match.range(at: 1).location != NSNotFound
+        let digits = source.substring(with: match.range(at: decimal ? 1 : 2))
+        guard let value = UInt32(digits, radix: decimal ? 10 : 16), value != 0,
+              !(0xD800...0xDFFF).contains(value), value <= 0x10FFFF,
+              let scalar = Unicode.Scalar(value) else {
+            out += whole
+            continue
         }
-        out.append(scalar)
-        index += 1
+        out.unicodeScalars.append(scalar)
     }
-    return String(out)
+    out += source.substring(from: cursor)
+    return out
 }

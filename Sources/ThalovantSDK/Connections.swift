@@ -47,19 +47,6 @@ extension ThalovantApiError {
         default: return ""
         }
     }
-
-    /// The `retry_after_seconds` of a 429: at the top of the problem, or in a
-    /// `detail` object -- where the API sends it, FastAPI's envelope around a
-    /// structured refusal, as `errorCode` is read.
-    var retryAfterSeconds: TimeInterval? {
-        guard let problem else { return nil }
-        for source in [problem, problem["detail"]?.objectValue ?? [:]] {
-            if let seconds = source["retry_after_seconds"]?.doubleValue, seconds.isFinite, seconds >= 0 {
-                return seconds
-            }
-        }
-        return nil
-    }
 }
 
 extension ThalovantControlPlane {
@@ -137,17 +124,24 @@ extension ThalovantControlPlane {
     /// when there is nothing to wait on: no operation, or one the API no
     /// longer tracks (HTTP 404). A 5xx while polling is ridden out, and so is
     /// a 429 -- a Free plan allows 60 requests a minute, and a wait must not
-    /// end over one of them -- after the `retry_after_seconds` the API names,
-    /// never past `timeout`.
+    /// end over one of them -- for the wait the API names
+    /// (`ThalovantApiError.retryAfterSeconds`), never past `timeout`. No read
+    /// runs past `timeout` either.
     ///
-    /// Throws `ThalovantAdmissionFailedError`, with the operation's
-    /// `errorCode`, when the operation failed or the platform gave up on it;
-    /// and `ThalovantAdmissionTimeoutError` when `timeout` passes first -- a
-    /// connection error and a timeout at once, since the connection may still
-    /// be admitted after that. An operation whose `links.self` points at
-    /// another origin than the API's is never fetched: the token goes nowhere
-    /// else. That, and any other refusal (a revoked token is `.auth`), throws
-    /// the `ThalovantApiError` as it came.
+    /// Throws:
+    /// - `ThalovantAdmissionFailedError` when the operation failed or the
+    ///   platform gave up on it (`errorCode`, the operation's own), or when the
+    ///   API refused the wait itself (`apiError`, with what it answered);
+    /// - `ThalovantAdmissionTimeoutError` when `timeout` passes first -- a
+    ///   connection error and a timeout at once, since the connection may still
+    ///   be admitted after that;
+    /// - the `ThalovantApiError` as it came for a 401 or 403 (kind `.auth`:
+    ///   sign in again) and for an API out of reach (kind `.unreachable`):
+    ///   neither says anything about the connection.
+    ///
+    /// An operation whose `links.self` names another origin than the API's --
+    /// scheme, host and port, the scheme's default port spelled out -- is never
+    /// fetched, and throws: the token goes nowhere else.
     public func waitForAdmission(
         _ result: BootstrapIdentityResult,
         timeout: TimeInterval = defaultAdmissionTimeout,
@@ -181,29 +175,33 @@ extension ThalovantControlPlane {
         timeout: TimeInterval,
         pollInterval: TimeInterval
     ) async throws {
-        guard timeout.isFinite, timeout >= 0, pollInterval.isFinite, pollInterval > 0,
-              pollInterval <= Double(Int32.max) / 1000 else {
+        guard timeout.isFinite, timeout >= 0, timeout <= Double(Int32.max) / 1000,
+              pollInterval.isFinite, pollInterval > 0, pollInterval <= Double(Int32.max) / 1000 else {
             throw ThalovantApiError(message: "An admission wait needs a finite timeout and a positive poll interval.")
         }
         guard let operationId else { return }
-        if let link = selfLink, !linksToThisAPI(link) {
+        if let link = selfLink, link.contains("://"), originOf(link) != originOf(apiURL) {
+            // The token goes to the API's own origin and nowhere else.
             throw ThalovantApiError(message: "The admission operation points outside the Thalovant API.")
         }
         let path = "/v1/operations/\(encodePathComponent(operationId))"
         let deadline = ProcessInfo.processInfo.systemUptime + timeout
-        func timedOut(_ why: String = "") -> ThalovantAdmissionTimeoutError {
-            ThalovantAdmissionTimeoutError(
-                "The hub did not admit the connection within \(wholeSeconds(timeout))s\(why); it may still.",
-                timeout: timeout
-            )
-        }
+        let timedOut = ThalovantAdmissionTimeoutError(
+            "The hub did not admit the connection within \(wholeSeconds(timeout))s; it may still admit it later.",
+            timeout: timeout
+        )
         while true {
             try Task.checkCancellation()
             var wait = pollInterval
             do {
-                // Read as JSON rather than decoded: a status this SDK does not
+                // Every read is bounded by what is left of the wait: a read the
+                // API is slow to answer must not carry the wait past it. Read
+                // as JSON rather than decoded, so a status this SDK does not
                 // know yet keeps the wait going instead of failing it.
-                let current = try await requestObject("GET", path)
+                let left = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+                guard let current = try await firstWithin(left, { try await self.requestObject("GET", path) }) else {
+                    throw timedOut
+                }
                 switch current["status"]?.stringValue {
                 case OperationStatus.ready.rawValue:
                     return
@@ -219,35 +217,90 @@ extension ThalovantControlPlane {
                     break
                 }
             } catch let error as ThalovantApiError {
-                if error.statusCode == 404 { return }
-                if error.statusCode == 429 {
+                switch error.statusCode {
+                case 404?:
+                    return
+                case 429?:
                     wait = max(pollInterval, error.retryAfterSeconds ?? 0)
                     // The API asks for longer than is left: waiting it out
                     // would only end in the same timeout, later.
-                    if wait > deadline - ProcessInfo.processInfo.systemUptime {
-                        throw timedOut(" (the API asked to slow down)")
-                    }
-                } else {
-                    guard let status = error.statusCode, status >= 500 else { throw error }
+                    if wait > deadline - ProcessInfo.processInfo.systemUptime { throw timedOut }
+                case let status? where status >= 500:
+                    break
+                case 401?, 403?:
+                    // The token, not the connection: signing in again fixes it.
+                    throw error
+                default:
+                    // Out of reach is not a failed admission: the connection
+                    // may be admitted already.
+                    if error.kind == .unreachable { throw error }
+                    throw ThalovantAdmissionFailedError(
+                        "The hub could not admit the connection: \(error.message)", apiError: error)
                 }
             }
             let remaining = deadline - ProcessInfo.processInfo.systemUptime
-            if remaining <= 0 { throw timedOut() }
-            try await Task.sleep(nanoseconds: UInt64(min(wait, remaining) * 1_000_000_000))
+            if remaining <= 0 { throw timedOut }
+            try await sleepAtLeast(min(wait, remaining))
         }
     }
+}
 
-    /// Whether an operation link stays on this API's origin. A relative link
-    /// does by definition; an absolute one must name the same scheme, host and
-    /// port.
-    private func linksToThisAPI(_ link: String) -> Bool {
-        let lowered = link.lowercased()
-        guard lowered.hasPrefix("http://") || lowered.hasPrefix("https://") else { return true }
-        guard let target = URLComponents(string: link), let api = URLComponents(string: apiURL) else { return false }
-        return target.scheme?.lowercased() == api.scheme?.lowercased()
-            && target.host?.lowercased() == api.host?.lowercased()
-            && target.port == api.port
-            && target.user == nil && target.password == nil
+/// A URL's origin: its scheme, host and port, the scheme's default port
+/// spelled out, so `https://h` and `https://h:443` are one origin and
+/// `http://h` and `https://h` are two. Nil for a URL without a scheme and host.
+func originOf(_ url: String) -> String? {
+    guard let parts = URLComponents(string: url), let scheme = parts.scheme?.lowercased(),
+          let host = parts.host?.lowercased(), !host.isEmpty else { return nil }
+    let port = parts.port ?? ["http": 80, "https": 443, "ws": 80, "wss": 443][scheme]
+    return "\(scheme)://\(host):\(port.map(String.init) ?? "")"
+}
+
+/// `operation`'s result, or nil when `seconds` pass first. The operation is
+/// cancelled then; one that does not stop at once still cannot hold the
+/// caller, whose wait ends at the deadline.
+func firstWithin<T: Sendable>(
+    _ seconds: TimeInterval, _ operation: @escaping @Sendable () async throws -> T
+) async throws -> T? {
+    let finished = AsyncGate()
+    let outcome = RaceOutcome<T>()
+    let work = Task {
+        do { outcome.keep(.success(try await operation())) } catch { outcome.keep(.failure(error)) }
+        finished.open()
+    }
+    do {
+        try await finished.wait(timeout: seconds, timeoutError: RaceTimedOut())
+    } catch is RaceTimedOut {
+        work.cancel()
+        return nil
+    } catch {
+        work.cancel()
+        throw error
+    }
+    switch outcome.value {
+    case .success(let value)?: return value
+    case .failure(let error)?: throw error
+    case nil: return nil
+    }
+}
+
+struct RaceTimedOut: Error {}
+
+final class RaceOutcome<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Result<T, Error>?
+    var value: Result<T, Error>? { lock.locked { stored } }
+    func keep(_ result: Result<T, Error>) { lock.locked { if stored == nil { stored = result } } }
+}
+
+/// Sleeps the whole of `seconds` on the monotonic clock, never less: a timer
+/// can wake a little early, and a wait the API asked for must not end before
+/// it is up.
+func sleepAtLeast(_ seconds: TimeInterval) async throws {
+    let end = ProcessInfo.processInfo.systemUptime + seconds
+    while true {
+        let left = end - ProcessInfo.processInfo.systemUptime
+        if left <= 0 { return }
+        try await Task.sleep(nanoseconds: UInt64(left * 1_000_000_000) + 1)
     }
 }
 

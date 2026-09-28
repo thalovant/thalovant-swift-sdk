@@ -89,7 +89,7 @@ final class HubSessionLinkTests: XCTestCase {
         do {
             try await session.run()
             XCTFail("expected a refusal")
-        } catch is ThalovantHubRefusedError {}
+        } catch let error as ThalovantConnectionError where error.kind == .refused {}
         XCTAssertGreaterThanOrEqual(hub.attempts, 2, "the first refusals were 'not admitted yet'")
         XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - started, 0.4)
         XCTAssertFalse(session.held)
@@ -118,7 +118,7 @@ final class HubSessionLinkTests: XCTestCase {
             do {
                 try await session.connect()
                 XCTFail("\(code): expected a refusal")
-            } catch is ThalovantHubRefusedError {}
+            } catch let error as ThalovantConnectionError where error.kind == .refused {}
             XCTAssertFalse(session.held, "\(code)")
             hub.refuseWith = nil
             try await session.connect()
@@ -135,7 +135,7 @@ final class HubSessionLinkTests: XCTestCase {
         do {
             try await session.connect()
             XCTFail("expected a refusal")
-        } catch is ThalovantHubRefusedError {}
+        } catch let error as ThalovantConnectionError where error.kind == .refused {}
         await session.close()
     }
 
@@ -149,6 +149,7 @@ final class HubSessionLinkTests: XCTestCase {
                 try await session.connect()
                 XCTFail("\(fakeRefusal): expected a connection error")
             } catch let error as ThalovantConnectionError {
+                XCTAssertEqual(error.kind, .other, "\(fakeRefusal)")
                 XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
             }
             await session.close()
@@ -162,8 +163,8 @@ final class HubSessionLinkTests: XCTestCase {
         do {
             try await session.connect()
             XCTFail("expected a connection error")
-        } catch let error as any ThalovantConnectionFailure {
-            XCTAssertFalse(error is ThalovantHubRefusedError)
+        } catch let error as ThalovantConnectionError {
+            XCTAssertEqual(error.kind, .other)
         }
         XCTAssertEqual(session.retryWait, 0.1, "the ladder doubled")
         let runner = Task { try await session.run() }

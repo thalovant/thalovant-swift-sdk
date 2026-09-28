@@ -7,23 +7,60 @@ import XCTest
 /// shares (`home-link-vectors.json`, vendored and pinned by the parity
 /// contract).
 ///
-/// `reply_context` cases check the routing alone. Every `answer` case runs
-/// through `ThalovantClient.answerHomeRequest` -- the handler, its deadline,
-/// the payload, and the reply sent over a transport -- and the transport must
-/// have carried exactly the one `thalovant.home.response` the SDK returned,
-/// routed back the way the request came.
+/// `reply_context` cases check the routing alone, and `speech` cases the plain
+/// text. Every `answer` and `deadline` case runs through
+/// `ThalovantClient.answerHomeRequest` -- the handler, its deadline, the
+/// payload, and the reply sent over a transport -- and the transport must have
+/// carried exactly the one `thalovant.home.response` the SDK returned, routed
+/// back the way the request came; in a `deadline` case the transport takes
+/// `send_ms` to put it on the wire, and a reply withdrawn at the hub's bound
+/// never reaches it.
 final class HomeLinkVectorTests: XCTestCase {
 
     func testHomeLinkVectors() async throws {
         let vectors = try loadVectors("home-link-vectors")
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 11)
+        XCTAssertEqual(cases.count, 30)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let produced: JSONValue
-            if row["kind"]?.stringValue == "reply_context" {
+            switch row["kind"]?.stringValue {
+            case "reply_context":
                 produced = .object(replyContext(row["context"]?.objectValue))
-            } else {
+            case "speech":
+                produced = .string(plainSpeech(try XCTUnwrap(row["text"]?.stringValue, name)))
+            case "deadline":
+                let fake = LinkFake()
+                fake.sendMilliseconds = try XCTUnwrap(row["send_ms"]?.intValue, name)
+                let client = try fakeClient(fake)
+                let event = ThalovantEvent(
+                    name: HomeLink.requestMessageType,
+                    data: try XCTUnwrap(row["request"]?.objectValue, name),
+                    context: ["source": "skill"]
+                )
+                let hubTimeout = try XCTUnwrap(row["hub_timeout_ms"]?.doubleValue, name) / 1000
+                let started = ProcessInfo.processInfo.systemUptime
+                let sent = try await client.answerHomeRequest(
+                    event,
+                    timeout: try XCTUnwrap(row["timeout_ms"]?.doubleValue, name) / 1000,
+                    hubTimeout: hubTimeout,
+                    handler: handler(try XCTUnwrap(row["handler"]?.objectValue, name))
+                )
+                // Never past the hub's bound, whatever the handler or the transport did.
+                XCTAssertLessThanOrEqual(ProcessInfo.processInfo.systemUptime - started, hubTimeout + 0.1, name)
+                var outcome: JSONObject = ["replied": .bool(sent != nil)]
+                if let sent {
+                    XCTAssertEqual(fake.emitted.map(\.name), [HomeLink.responseMessageType], name)
+                    XCTAssertEqual(fake.emitted.first?.data, sent, name)
+                    outcome["response"] = .object(sent)
+                } else {
+                    // Withdrawn: give a send that was cut short the time it
+                    // would have taken, and see that it never went out.
+                    try await Task.sleep(nanoseconds: UInt64(fake.sendMilliseconds) * 1_000_000 + 50_000_000)
+                    XCTAssertEqual(fake.emitted.count, 0, name)
+                }
+                produced = .object(outcome)
+            default:
                 let fake = LinkFake()
                 let client = try fakeClient(fake)
                 let event = ThalovantEvent(
@@ -31,11 +68,12 @@ final class HomeLinkVectorTests: XCTestCase {
                     data: try XCTUnwrap(row["request"]?.objectValue, name),
                     context: ["source": "skill"]
                 )
-                let payload = try await client.answerHomeRequest(
+                let answered = try await client.answerHomeRequest(
                     event,
                     timeout: row["timeout_ms"]?.doubleValue.map { $0 / 1000 } ?? HomeLink.handlerTimeout,
                     handler: handler(try XCTUnwrap(row["handler"]?.objectValue, name))
                 )
+                let payload = try XCTUnwrap(answered, name)
                 produced = .object(payload)
                 let sent = fake.emitted
                 XCTAssertEqual(sent.map(\.name), [HomeLink.responseMessageType], name)
@@ -82,16 +120,16 @@ final class HomeLinkVectorTests: XCTestCase {
         let event = ThalovantEvent(
             name: HomeLink.requestMessageType, data: ["request_id": "r1", "utterance": "open the gate"])
         let started = ProcessInfo.processInfo.systemUptime
-        let payload = try await client.answerHomeRequest(event, timeout: 0.1) { _ in
+        let payload = try await client.answerHomeRequest(event, timeout: 0.1, hubTimeout: 1) { _ in
             // Deaf to cancellation: a task group would wait the whole two seconds.
             await withCheckedContinuation { (resume: CheckedContinuation<Void, Never>) in
                 DispatchQueue.global().asyncAfter(deadline: .now() + 2) { resume.resume() }
             }
             return HomeAnswer(speech: "too late")
         }
-        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 1.5)
-        XCTAssertEqual(payload["error_code"], .string("timeout"))
-        XCTAssertEqual(payload["speech"], .string(""))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 0.5)
+        XCTAssertEqual(payload?["error_code"], .string("timeout"))
+        XCTAssertEqual(payload?["speech"], .string(""))
         XCTAssertEqual(fake.emitted.count, 1)
     }
 
@@ -134,24 +172,21 @@ final class HomeLinkVectorTests: XCTestCase {
     func testSpeechIsPlainText() {
         XCTAssertEqual(plainSpeech(nil), "")
         XCTAssertEqual(plainSpeech("  <b>Bold</b>\tand\r\n<i>italic</i>  "), "Bold and italic")
-        XCTAssertEqual(plainSpeech("5 < 6 and 7 > 3"), "5 3", "the reference's pattern takes `< 6 and 7 >` for a tag")
-        XCTAssertEqual(plainSpeech("a < b"), "a < b", "a `<` that never closes is not markup")
+        // Only real markup goes: a "<" not before a letter is text.
+        XCTAssertEqual(plainSpeech("5 < 6 and 7 > 3"), "5 < 6 and 7 > 3")
+        XCTAssertEqual(plainSpeech("a < b"), "a < b")
+        XCTAssertEqual(plainSpeech("<br/>x<br />y<P CLASS='a'>z</P>"), "xyz")
+        XCTAssertEqual(plainSpeech("<!-- one\ntwo -->ok<?pi x?>"), "ok")
+        XCTAssertEqual(plainSpeech("<unclosed & open"), "<unclosed & open")
+        // The portable references, and no others.
         XCTAssertEqual(plainSpeech("&lt;speak&gt; is &quot;SSML&quot; &amp; more"), "<speak> is \"SSML\" & more")
-        XCTAssertEqual(plainSpeech("caf&#233; &#xE9;t&eacute; &#65"), "café été A")
-        XCTAssertEqual(plainSpeech("&Eacute;&szlig;&Omega;&rarr;&spades;"), "Éß\u{3A9}→♠")
-        XCTAssertEqual(plainSpeech("&#128; &#0; &#xD800; &#1;x"), "€ \u{FFFD} \u{FFFD} x")
-        XCTAssertEqual(plainSpeech("it costs 5&nbsp;&euro;&mdash;cheap&hellip;"), "it costs 5 €—cheap…")
-        XCTAssertEqual(plainSpeech("&unknown; & &;"), "&unknown; & &;")
-        // Unterminated and run-on names, as html.unescape reads them.
-        for (text, python) in [
-            ("fish &amp chips &copy2026", "fish & chips ©2026"), ("&ampx", "&x"), ("&notit;", "¬it;"),
-            ("&notin;", "∉"), ("a&lt3", "a<3"), ("&AMP;", "&"), ("&amp;&amp", "&&"), ("&ampamp;", "&amp;"),
-            ("Il fait 21&#160;&deg;C &agrave; Paris", "Il fait 21 °C à Paris"), ("&#x80; and &#xD800;", "€ and \u{FFFD}"),
-            ("&#0000000000000065;", "A"), ("&#99999999999;", "\u{FFFD}"), ("&#x81;", "\u{81}"),
-        ] {
-            XCTAssertEqual(plainSpeech(text), python, text)
-        }
-        XCTAssertEqual(plainSpeech("line\u{2028}break\u{1C}sep"), "line break sep")
+        XCTAssertEqual(plainSpeech("caf&#233; &#xE9;t&#XE9; &eacute;"), "café été &eacute;")
+        XCTAssertEqual(plainSpeech("&AMP; &Amp; &#12345678; &#x1234567;"), "&AMP; &Amp; &#12345678; &#x1234567;")
+        XCTAssertEqual(plainSpeech("&#00065;&#x0041;"), "AA")
+        // Unicode White_Space, and nothing else.
+        XCTAssertEqual(plainSpeech("line\u{2028}break\u{85}next\u{3000}end"), "line break next end")
+        XCTAssertEqual(plainSpeech("zero\u{200B}width"), "zero\u{200B}width")
+        XCTAssertEqual(stripSsml("<speak>Hello</speak>"), "Hello")
     }
 
     func testReplyingNeedsAType() async throws {
@@ -160,6 +195,19 @@ final class HomeLinkVectorTests: XCTestCase {
             try await client.reply(to: ThalovantEvent(name: "x"), type: "  ")
             XCTFail("expected a refusal")
         } catch is ThalovantRuntimeError {}
+    }
+
+    func testAReplyThatCannotBeSentInTimeIsWithdrawn() async throws {
+        let fake = LinkFake()
+        fake.sendMilliseconds = 500
+        let client = try fakeClient(fake)
+        let event = ThalovantEvent(name: HomeLink.requestMessageType, data: ["request_id": "w1"])
+        let sent = try await client.answerHomeRequest(event, timeout: 0.05, hubTimeout: 0.2) { _ in
+            HomeAnswer(speech: "Done.")
+        }
+        XCTAssertNil(sent)
+        try await Task.sleep(nanoseconds: 600_000_000)
+        XCTAssertEqual(fake.emitted.count, 0, "a withdrawn reply never goes out")
     }
 
     func testAReplyLaysItsContextOverTheRequestsBeforeTheSwap() async throws {
