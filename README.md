@@ -22,7 +22,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.10.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.10.1"),
 ]
 ```
 
@@ -182,7 +182,7 @@ expand the echoed `scopes`. A denied request throws
 
 A caller that runs its own loop -- a setup screen that shows the code and
 polls on its own schedule -- takes the same flow in steps.
-`beginDeviceLogin(scopes:clientName:)` returns the grant to show;
+`beginDeviceLogin(scopes:clientName:clientId:)` returns the grant to show;
 `pollDeviceLogin(_:)` asks once. A sign-in nobody has approved yet throws
 `ThalovantApiError` of kind `.deviceLoginPending(interval:)`, whose interval
 is already five seconds longer for every `slow_down` the API sent for that
@@ -190,7 +190,8 @@ code; `.deviceLoginExpired` and `.deviceLoginDenied` end it. On approval the
 token is stored as `accessToken`, and its id as `tokenId`.
 
 ```swift
-let grant = try await api.beginDeviceLogin(scopes: homeAssistantScopes, clientName: "Home Assistant")
+let grant = try await api.beginDeviceLogin(
+    scopes: homeAssistantScopes, clientName: "Home Assistant (kitchen)", clientId: homeAssistantClientId)
 show(grant.verificationUriComplete ?? grant.verificationUri, grant.userCode)
 var token: DeviceLoginResult?
 while token == nil {
@@ -206,7 +207,16 @@ try await api.revokeApiToken()
 ```
 
 `homeAssistantScopes` (`hubs:read`, `clients:read`, `clients:write`) is what a
-Home Assistant link needs, and all a Free plan can approve. An empty scope list
+Home Assistant link needs, and all a Free plan can approve. `clientId` signs in
+as a registered app -- `homeAssistantClientId` is Home Assistant's -- so the
+approval screen shows the platform's own name for it as verified, with
+`clientName` as the device's label beside it, and approving the app again
+replaces the token it already holds. An id the API does not know is refused
+(400 `unknown_client`); `nil` leaves the field out.
+`describeDeviceLogin(userCode:)`, signed in as the person who would approve
+the code, reads it as the approval screen does: `scopes`, `clientName`,
+`clientId`, `clientVerified` (true only for a registered app) and `deviceName`;
+a code that is unknown, expired or already answered is a 404. An empty scope list
 is left out of the request, as none is: the API asks for at least one and
 answers `[]` with a 422. Neither the device code nor the token ever appears in
 an error's message. Every sign-in sets
@@ -469,8 +479,18 @@ status, with 1000 or with 1008 -- during the handshake or within 750 ms after
 it, a code learnt up to 250 ms late counting -- by answering the WebSocket
 upgrade 401 or 403, or by a Noise answer that does not authenticate under the
 key the password derives. Each is a `ThalovantConnectionError` of kind
-`.refused`. A new connection is refused until its hub admits it, so refusals
-are retried for 600 seconds before `run()` throws. A connect whose KK
+`.refused`. A close after the hub has sent anything that decrypts -- a JSON or
+WIRE-1 frame, one chunk of a larger one, its own HELLO -- is a drop whenever it
+comes: a hub refuses a key before it says anything. A new connection is refused
+until its hub admits it, so refusals are retried for 600 seconds before `run()`
+throws. A refusal right as an XX handshake ends is different: the hub pinned
+another key for this connection -- another program reading the same identity
+keeps its key elsewhere -- and no handshake can fix that. It is still kind
+`.refused`, so it is caught where a refusal is, but `clientKeyRejected` is set,
+with `keyFolder` (this client's key) and `otherKeyFolder` (where the other
+program likely keeps its own), and a message that says to re-pair, or share the
+key folder; `run()` stops on it at once, and `LinkSupervisor.giveUpReason` says
+`.clientKeyRejected`. After KK the same close is a plain refusal. A connect whose KK
 handshake fails tries XX at once, inside the same connect: only XX tells a
 changed password (`.refused`) from a hub whose key is no longer the pinned one
 (`.keyChanged`), which stops `run()` at once and never replaces the pin. Every

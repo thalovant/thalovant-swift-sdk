@@ -39,18 +39,19 @@ final class LinkKeepingVectorTests: XCTestCase {
         XCTAssertEqual(LinkLifetime.closeCodeGraceMs, policy["close_code_grace_ms"]?.intValue)
         XCTAssertEqual(
             .array(LinkLifetime.refusalCloseCodes.sorted().map { .integer($0) }), policy["refusal_close_codes"])
-        XCTAssertEqual(try XCTUnwrap(vectors()["cases"]?.arrayValue).count, 29)
+        XCTAssertEqual(try XCTUnwrap(vectors()["cases"]?.arrayValue).count, 36)
     }
 
     func testCloseVectors() throws {
         let rows = try cases("close")
-        XCTAssertEqual(rows.count, 14)
+        XCTAssertEqual(rows.count, 17)
         for row in rows {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let refused = LinkLifetime.closeRefuses(
                 code: row["code"]?.intValue,
                 closedAfterHandshakeMs: row["when"]?.stringValue == "after_handshake" ? row["after_ms"]?.intValue : nil,
-                codeLateMs: row["code_late_ms"]?.intValue ?? 0
+                codeLateMs: row["code_late_ms"]?.intValue ?? 0,
+                afterAuthenticatedFrame: row["after_authenticated_frame"]?.boolValue ?? false
             )
             let produced: JSONValue = ["outcome": .string(refused ? "refused" : "dropped")]
             ConformanceRecord.record("link-keeping-vectors.json", name, produced)
@@ -61,7 +62,9 @@ final class LinkKeepingVectorTests: XCTestCase {
     /// What a connect ended as, in the vectors' words.
     private func outcome(_ error: Error?) -> String {
         guard let error else { return "connected" }
-        switch (error as? ThalovantConnectionError)?.kind {
+        let failure = error as? ThalovantConnectionError
+        switch failure?.kind {
+        case .refused? where failure?.clientKeyRejected == true: return "client_key_rejected"
         case .refused?: return "refused"
         case .keyChanged?: return "key_changed"
         default: return "failed"
@@ -80,16 +83,45 @@ final class LinkKeepingVectorTests: XCTestCase {
         }
     }
 
+    /// One connect as a kept link makes it -- the handshake, then the settle
+    /// window -- since a close just after the handshake would otherwise race
+    /// the connect returning. The error it ended with, if any.
+    private func keptAttempt(_ hub: MemoryHub, _ store: MemoryNoiseStore, password: String? = nil) async throws -> Error? {
+        let settle = TimeInterval(try XCTUnwrap(vectors()["policy"]?["settle_ms"]?.intValue)) / 1000
+        let session = HubSession(
+            connect: {
+                let transport = try hub.transport(password: password, store: store)
+                let client = ThalovantClient(identity: transport.identity, transport: transport)
+                do {
+                    try await client.connect(timeout: 10)
+                } catch {
+                    await client.close()
+                    throw error
+                }
+                return client
+            }, policy: try HubSessionPolicy(settleSeconds: settle), warm: false)
+        defer { Task { await session.close() } }
+        do {
+            try await session.connect()
+            return nil
+        } catch {
+            return error
+        }
+    }
+
     func testHandshakeVectors() async throws {
         let rows = try cases("handshake")
-        XCTAssertEqual(rows.count, 8)
+        XCTAssertEqual(rows.count, 11)
         for row in rows {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let situation = try XCTUnwrap(row["situation"]?.stringValue, name)
             let hub = MemoryHub()
-            let store = MemoryNoiseStore()
+            var store = MemoryNoiseStore()
             var password: String?
-            if ["pinned", "password_changed_since_pinning", "hub_key_changed"].contains(situation) {
+            if [
+                "pinned", "password_changed_since_pinning", "hub_key_changed",
+                "client_key_changed", "client_key_changed_pinned_here",
+            ].contains(situation) {
                 // First contact pins both ways.
                 let first = try await attempt(hub, store)
                 XCTAssertNil(first, "\(name): \(String(describing: first))")
@@ -106,11 +138,18 @@ final class LinkKeepingVectorTests: XCTestCase {
                 hub.offerKK = try XCTUnwrap(row["hub_offers_kk"]?.boolValue, name)
             case "upgrade_status":
                 hub.upgradeStatus = try XCTUnwrap(row["status"]?.intValue, name)
+            case "client_key_changed":
+                store = MemoryNoiseStore()  // another program: its own folder, its own key
+            case "client_key_changed_pinned_here":
+                store.replaceClientKey()  // a new key, the hub pins kept
+            case "closed_after_first_frame":
+                hub.closeAfterHandshake = 1005
+                hub.closeAfterHandshakeSpeaks = true
             default:
                 break
             }
             let before = hub.patterns.count
-            let result = outcome(try await attempt(hub, store, password: password))
+            let result = outcome(try await keptAttempt(hub, store, password: password))
             let patterns = hub.patterns.dropFirst(before).map { JSONValue.string(String($0.prefix(2))) }
             let produced: JSONValue = ["outcome": .string(result), "patterns": .array(Array(patterns))]
             ConformanceRecord.record("link-keeping-vectors.json", name, produced)
@@ -124,7 +163,7 @@ final class LinkKeepingVectorTests: XCTestCase {
             TimeInterval(try XCTUnwrap(policy[key]?.intValue)) / 1000
         }
         let rows = try cases("supervise")
-        XCTAssertEqual(rows.count, 7)
+        XCTAssertEqual(rows.count, 8)
         for row in rows {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             var supervisor = LinkSupervisor(policy: try HubSessionPolicy(
@@ -133,14 +172,21 @@ final class LinkKeepingVectorTests: XCTestCase {
                 refusalGraceSeconds: seconds("refusal_grace_ms")))
             var produced: [JSONValue] = []
             for event in (row["events"]?.arrayValue ?? []).compactMap(\.objectValue) {
-                let outcome = try XCTUnwrap(LinkOutcome(rawValue: try XCTUnwrap(event["outcome"]?.stringValue)), name)
+                // LinkOutcome is a public enum, so it has no case of its own
+                // for the hub refusing the client's key: that is a refusal,
+                // marked beside it, as HubSession.run() feeds it.
+                let word = try XCTUnwrap(event["outcome"]?.stringValue)
+                let keyRejected = word == "client_key_rejected"
+                let outcome = try XCTUnwrap(keyRejected ? .refused : LinkOutcome(rawValue: word), name)
                 let at = TimeInterval(try XCTUnwrap(event["at_ms"]?.intValue, name)) / 1000
-                switch supervisor.after(outcome, at: at) {
+                switch supervisor.after(outcome, at: at, clientKeyRejected: keyRejected) {
                 case .hold:
                     produced.append(["action": "hold"])
                 case .retry(let wait):
                     produced.append(["action": "retry", "wait_ms": .integer(Int((wait * 1000).rounded()))])
-                case .giveUp(let reason):
+                case .giveUp(let given):
+                    let reason = try XCTUnwrap(supervisor.giveUpReason, name)
+                    XCTAssertEqual(given, reason == .keyChanged ? .keyChanged : .refused, name)
                     produced.append(["action": "give_up", "reason": .string(reason.rawValue)])
                 }
             }
@@ -210,11 +256,130 @@ final class LinkKeepingVectorTests: XCTestCase {
                 XCTFail("\(code): expected the close to be read")
             } catch let error as ThalovantConnectionError {
                 XCTAssertEqual(error.kind == .refused, refused, "\(code) learnt \(late) ms late: \(error.message)")
-                XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+                // A refusal as XX ends, with nothing from the hub between: the
+                // hub refusing this client's own key.
+                XCTAssertEqual(error.clientKeyRejected, refused, error.message)
+                XCTAssertTrue(
+                    error.message.contains(refused ? "Re-pair, or share the key folder" : "right after the handshake"),
+                    error.message)
             }
             XCTAssertFalse(session.held)
             await session.close()
         }
+    }
+
+    func testEveryFrameThatDecryptsCounts() async throws {
+        let frames = try loadVectors("binary-frames")
+        let wire = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(frames["bus_frame"]?.stringValue)))
+        for spoken in [SpokenFrame.json, .binary(wire), .firstChunk] {
+            let hub = MemoryHub()
+            hub.closeAfterHandshake = 1005
+            hub.closeAfterHandshakeSpeaks = true
+            hub.spoken = spoken
+            let session = session(hub, MemoryNoiseStore())
+            do {
+                try await session.connect()
+                XCTFail("\(spoken): expected the close to be read")
+            } catch let error as ThalovantConnectionError {
+                XCTAssertEqual(error.kind, .other, "\(spoken): the hub had spoken, so the close is a drop: \(error.message)")
+                XCTAssertFalse(error.clientKeyRejected, "\(spoken)")
+            }
+            await session.close()
+        }
+    }
+
+    func testTheSameCloseAfterKKIsAPlainRefusal() async throws {
+        let hub = MemoryHub()
+        let store = MemoryNoiseStore()
+        let pinning = try await attempt(hub, store)
+        XCTAssertNil(pinning)
+        try await eventually { hub.clientPinned }
+        hub.closeAfterHandshake = 1005
+        let session = session(hub, store)
+        do {
+            try await session.connect()
+            XCTFail("expected a refusal")
+        } catch let error as ThalovantConnectionError {
+            XCTAssertEqual(error.kind, .refused, error.message)
+            XCTAssertFalse(error.clientKeyRejected, "the hub could complete KK only with the key it pinned")
+        }
+        // KK completed: no XX follows it.
+        XCTAssertEqual(hub.patterns, ["XXpsk2", "KKpsk0"])
+        await session.close()
+    }
+
+    func testRunStopsAtOnceWhenTheHubRefusesTheClientsKey() async throws {
+        let hub = MemoryHub()
+        let pinning = try await attempt(hub, MemoryNoiseStore())
+        XCTAssertNil(pinning)
+        try await eventually { hub.clientPinned }
+        // Another program reading the same identity, with a key of its own.
+        let session = session(hub, MemoryNoiseStore())
+        do {
+            try await session.run()
+            XCTFail("expected the client's key refused")
+        } catch let error as ThalovantConnectionError {
+            XCTAssertEqual(error.kind, .refused, "still caught where a refusal is")
+            XCTAssertTrue(error.clientKeyRejected, error.message)
+        }
+        // No retry through the refusal grace: one attempt, then run() ends.
+        XCTAssertEqual(hub.attempts, 2)
+        await session.close()
+    }
+
+    func testAFrameThatDecryptedEndsTheRefusalWindow() {
+        let refused = LinkLifetime()
+        refused.pattern = "XXpsk2"
+        refused.heardAuthenticatedFrame()  // before the handshake: not the hub's word on it
+        refused.completeHandshake()
+        refused.end(closeCode: 1005)
+        XCTAssertTrue(refused.refused)
+        XCTAssertTrue(refused.clientKeyRejected)
+
+        let spoke = LinkLifetime()
+        spoke.pattern = "XXpsk2"
+        spoke.completeHandshake()
+        spoke.heardAuthenticatedFrame()
+        spoke.end(closeCode: 1005)
+        XCTAssertFalse(spoke.refused)
+        XCTAssertFalse(spoke.clientKeyRejected)
+
+        let kk = LinkLifetime()
+        kk.pattern = "KKpsk0"
+        kk.completeHandshake()
+        kk.end(closeCode: 1008)
+        XCTAssertTrue(kk.refused)
+        XCTAssertFalse(kk.clientKeyRejected, "after KK the same close is a plain refusal")
+        XCTAssertFalse(kk.refusalAfterHandshake().clientKeyRejected)
+    }
+
+    func testTheRefusedKeyErrorNamesTheKeyFolders() throws {
+        let custom = FileManager.default.temporaryDirectory.appendingPathComponent("thalovant-\(UUID().uuidString)")
+        let placed = noiseKeyFolders(ThalovantFileNoiseStore(directory: custom, identityScope: "hub-access"))
+        XCTAssertEqual(placed.used, custom.standardizedFileURL.path)
+        XCTAssertEqual(placed.other, ThalovantFileNoiseStore.defaultDirectory.standardizedFileURL.path)
+        let usual = noiseKeyFolders(ThalovantFileNoiseStore(identityScope: "hub-access"))
+        XCTAssertEqual(usual.used, ThalovantFileNoiseStore.defaultDirectory.standardizedFileURL.path)
+        XCTAssertNil(usual.other)
+        let memory = noiseKeyFolders(MemoryNoiseStore())
+        XCTAssertNil(memory.used)
+        XCTAssertNil(memory.other)
+
+        let lifetime = LinkLifetime(keyFolder: placed.used, otherKeyFolder: placed.other)
+        lifetime.pattern = "XXpsk2"
+        lifetime.completeHandshake()
+        lifetime.end(closeCode: nil)  // no close frame: a drop, not a refusal
+        XCTAssertFalse(lifetime.refused)
+        let error = ThalovantConnectionError.clientKeyRejected(keyFolder: placed.used, otherKeyFolder: placed.other)
+        XCTAssertEqual(error.kind, .refused)
+        XCTAssertTrue(error.clientKeyRejected)
+        XCTAssertEqual(error.keyFolder, placed.used)
+        XCTAssertEqual(error.otherKeyFolder, placed.other)
+        XCTAssertTrue(error.message.contains(try XCTUnwrap(placed.used)), error.message)
+        XCTAssertTrue(error.message.contains(try XCTUnwrap(placed.other)), error.message)
+        XCTAssertTrue(error.message.contains("Re-pair, or share the key folder"), error.message)
+        // A refusal built the ordinary way is never one of these.
+        XCTAssertFalse(ThalovantConnectionError("refused", kind: .refused).clientKeyRejected)
     }
 
     func testACloseBeforeConnectReturnsIsStillReadByItsCode() async throws {
@@ -235,7 +400,12 @@ final class LinkKeepingVectorTests: XCTestCase {
                     XCTAssertEqual(lifetime.refused, refused, "\(code)")
                 } catch let error as ThalovantConnectionError {
                     XCTAssertEqual(error.kind == .refused, refused, "\(code): \(error.message)")
-                    XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+                    // A fresh store meets the hub with XX, so a refusal as it
+                    // ends is the hub turning this client's key away.
+                    XCTAssertEqual(error.clientKeyRejected, refused, "\(code): \(error.message)")
+                    if !refused {
+                        XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+                    }
                 }
                 await transport.disconnect()
             }

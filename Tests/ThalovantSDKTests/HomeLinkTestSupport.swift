@@ -407,9 +407,11 @@ func cheapPSK(_ password: String, _ nodeID: String) throws -> Data {
 /// A client key store that lives in memory.
 final class MemoryNoiseStore: ThalovantNoiseStore, @unchecked Sendable {
     private let lock = NSLock()
-    private let key = noiseRandomKey()
+    private var key = noiseRandomKey()
     private var pins: [String: Data] = [:]
-    func privateKey() throws -> Data { key }
+    func privateKey() throws -> Data { lock.locked { key } }
+    /// A new client key; the hub pins stay.
+    func replaceClientKey() { lock.locked { key = noiseRandomKey() } }
     func pinnedKey(nodeID: String) throws -> Data? { lock.locked { pins[nodeID] } }
     func pin(_ key: Data, nodeID: String) throws {
         try lock.locked {
@@ -462,8 +464,11 @@ final class MemoryHub: @unchecked Sendable {
         var patterns: [String] = []
         var attempts = 0
         var closeAfterHandshake: Int?
+        var closeAfterHandshakeSpeaks = false
+        var spoken = SpokenFrame.json
         var closeCodeLateMs = 0
         var received: [String] = []
+        var receivedData: [(String, JSONObject)] = []
         var lastSocket: MemorySocket?
     }
 
@@ -478,6 +483,14 @@ final class MemoryHub: @unchecked Sendable {
         get { lock.locked { state.closeAfterHandshake } }
         set { lock.locked { state.closeAfterHandshake = newValue } }
     }
+    /// Send one encrypted frame before that close: a hub that has spoken has
+    /// accepted the client's key, so the close is a drop.
+    var closeAfterHandshakeSpeaks: Bool {
+        get { lock.locked { state.closeAfterHandshakeSpeaks } }
+        set { lock.locked { state.closeAfterHandshakeSpeaks = newValue } }
+    }
+    /// What the hub says before that close: a JSON bus message by default.
+    var spoken: SpokenFrame { get { lock.locked { state.spoken } } set { lock.locked { state.spoken = newValue } } }
     /// Report a close's code this long after the close, as URLSession can.
     var closeCodeLateMs: Int { get { lock.locked { state.closeCodeLateMs } } set { lock.locked { state.closeCodeLateMs = newValue } } }
     var patterns: [String] { lock.locked { state.patterns } }
@@ -487,6 +500,10 @@ final class MemoryHub: @unchecked Sendable {
     var clientPinned: Bool { lock.locked { state.pinnedClient != nil } }
     /// The bus messages clients sent once connected, by type, in order.
     var received: [String] { lock.locked { state.received } }
+    /// The same messages with their data.
+    var receivedMessages: [(type: String, data: JSONObject)] {
+        lock.locked { state.receivedData.map { (type: $0.0, data: $0.1) } }
+    }
     /// The socket the last attempt dialled.
     var lastSocket: MemorySocket? { lock.locked { state.lastSocket } }
 
@@ -564,18 +581,54 @@ final class MemoryHub: @unchecked Sendable {
             guard case .data(let frame) = try await socket.takeFromClient(), try responder.decrypt(frame) != nil else {
                 return await socket.closeFromHub(1005, lateMs: 0)
             }
-            let (closeCode, late) = lock.locked { (state.closeAfterHandshake, state.closeCodeLateMs) }
-            if let closeCode { return await socket.closeFromHub(closeCode, lateMs: late) }
+            let (closeCode, late, speaks, spoken) = lock.locked {
+                (state.closeAfterHandshake, state.closeCodeLateMs, state.closeAfterHandshakeSpeaks, state.spoken)
+            }
+            if let closeCode {
+                if speaks {
+                    let frames: [Data]
+                    switch spoken {
+                    case .json:
+                        let ready = try JSONEncoder().encode(HiveWire.busMessage(type: "hub.ready", data: [:], context: [:]))
+                        frames = try responder.encrypt(ready)
+                    case .binary(let wire):
+                        frames = try responder.encrypt(wire, isJSON: false)
+                    case .firstChunk:
+                        // The first chunk of a larger message (marker 2): it
+                        // decrypts, though the message is never whole. Sealed
+                        // small, as sealing 65 kB in a debug build would
+                        // outlast the settle window.
+                        frames = [try responder.sealFrame(Data([2]) + Data(#"{"msg_type": "bus", "#.utf8))]
+                    }
+                    for frame in frames { await socket.toClientRaw(.data(frame)) }
+                }
+                return await socket.closeFromHub(closeCode, lateMs: late)
+            }
             while true {
                 guard case .data(let frame) = try await socket.takeFromClient(),
                       let (payload, isJSON) = try responder.decrypt(frame), isJSON else { continue }
                 let message = try JSONDecoder().decode(HiveMessage.self, from: payload)
-                if let type = message.payload["type"]?.stringValue { lock.locked { state.received.append(type) } }
+                if let type = message.payload["type"]?.stringValue {
+                    let data = message.payload["data"]?.objectValue ?? [:]
+                    lock.locked {
+                        state.received.append(type)
+                        state.receivedData.append((type, data))
+                    }
+                }
             }
         } catch {
             return
         }
     }
+}
+
+/// What a `MemoryHub` sends before it closes right after the handshake.
+enum SpokenFrame {
+    case json
+    /// A WIRE-1 binary frame, sent as such.
+    case binary(Data)
+    /// Only the first chunk of a message too big for one frame.
+    case firstChunk
 }
 
 /// The client's end of a socket to a `MemoryHub`.
@@ -638,6 +691,10 @@ final class MemorySocket: HiveSocket, @unchecked Sendable {
     fileprivate func toClient(_ message: HiveMessage) async {
         guard let text = try? HiveWire.encode(message, cryptoKey: nil, encrypt: false) else { return }
         await clientBox.put(.string(text))
+    }
+
+    fileprivate func toClientRaw(_ message: URLSessionWebSocketTask.Message) async {
+        await clientBox.put(message)
     }
 
     fileprivate func takeFromClient() async throws -> URLSessionWebSocketTask.Message { try await hubBox.take() }

@@ -21,19 +21,37 @@ final class DeviceLoginVectorTests: XCTestCase {
         let excludes = (vectors["message_excludes"]?.arrayValue ?? []).compactMap(\.stringValue)
         XCTAssertEqual(excludes.count, 2)
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 13)
+        XCTAssertEqual(cases.count, 20)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let call = try XCTUnwrap(row["call"]?.objectValue, name)
             let exchanges = (row["exchanges"]?.arrayValue ?? []).compactMap(\.objectValue)
             ScriptedApi.serve(exchanges)
-            let api = ScriptedApi.controlPlane()
+            // Only the approver's read is signed in; a device signing in has no token yet.
+            let api = ScriptedApi.controlPlane(
+                accessToken: call["op"]?.stringValue == "describe" ? "synthetic-token" : nil)
             var produced: [JSONValue] = []
-            if call["op"]?.stringValue == "begin" {
+            if call["op"]?.stringValue == "describe" {
+                do {
+                    let request = try await api.describeDeviceLogin(
+                        userCode: try XCTUnwrap(call["user_code"]?.stringValue, name))
+                    produced.append(.object([
+                        "outcome": "described",
+                        "scopes": .array(request.scopes.map { .string($0) }),
+                        "client_name": request.clientName.map { .string($0) } ?? .null,
+                        "client_id": request.clientId.map { .string($0) } ?? .null,
+                        "client_verified": .bool(request.clientVerified),
+                        "device_name": request.deviceName.map { .string($0) } ?? .null,
+                    ]))
+                } catch let error as ThalovantApiError {
+                    produced.append(deviceError(error))
+                }
+            } else if call["op"]?.stringValue == "begin" {
                 do {
                     let grant = try await api.beginDeviceLogin(
                         scopes: call["scopes"]?.arrayValue?.compactMap(\.stringValue),
-                        clientName: call["client_name"]?.stringValue
+                        clientName: call["client_name"]?.stringValue,
+                        clientId: call["client_id"]?.stringValue
                     )
                     produced.append(.object([
                         "outcome": "started",
@@ -45,7 +63,7 @@ final class DeviceLoginVectorTests: XCTestCase {
                     ]))
                 } catch let error as ThalovantApiError {
                     assertExcluded(error, excludes, name)
-                    produced.append(.object(["outcome": "error", "status": error.statusCode.map { .integer($0) } ?? .null]))
+                    produced.append(deviceError(error))
                 }
             } else {
                 let authorization = try XCTUnwrap(call["authorization"]?.objectValue, name)
@@ -101,17 +119,22 @@ final class DeviceLoginVectorTests: XCTestCase {
                 return .object(["outcome": "denied", "status": status])
             default:
                 assertExcluded(error, excludes, name)
-                var produced: JSONObject = ["outcome": "error", "status": status]
-                if error.statusCode != nil {
-                    produced["code"] = apiFields(error)["code"]
-                    produced["detail"] = apiFields(error)["detail"]
-                }
-                return .object(produced)
+                return deviceError(error)
             }
         } catch {
             XCTFail("\(name): \(error)")
             return .null
         }
+    }
+
+    /// A failure, with the api-errors fields when the API answered one.
+    private func deviceError(_ error: ThalovantApiError) -> JSONValue {
+        var produced: JSONObject = ["outcome": "error", "status": error.statusCode.map { .integer($0) } ?? .null]
+        if error.statusCode != nil {
+            produced["code"] = apiFields(error)["code"]
+            produced["detail"] = apiFields(error)["detail"]
+        }
+        return .object(produced)
     }
 
     private func assertExcluded(_ error: ThalovantApiError, _ excludes: [String], _ name: String) {
@@ -143,6 +166,48 @@ final class DeviceLoginVectorTests: XCTestCase {
     func testTheContractScopesMatchTheSDK() throws {
         let vectors = try loadVectors("device-login-vectors")
         XCTAssertEqual(.array(homeAssistantScopes.map { .string($0) }), vectors["home_assistant_scopes"])
+        XCTAssertEqual(.string(homeAssistantClientId), vectors["home_assistant_client_id"])
+    }
+
+    func testTheSignaturesBefore0101StillCompile() {
+        // clientId came as overloads, not as a defaulted parameter: a
+        // reference to the old names still resolves.
+        let makeOptions: ([String]?, String?, Bool, @escaping @Sendable (DeviceAuthorizationGrant) -> Void, TimeInterval)
+            -> DeviceLoginOptions = DeviceLoginOptions.init(scopes:clientName:openBrowser:prompt:timeout:)
+        XCTAssertNil(makeOptions(nil, nil, false, { _ in }, 1).clientId)
+        XCTAssertEqual(DeviceLoginOptions(clientId: homeAssistantClientId).clientId, homeAssistantClientId)
+        let api = ThalovantControlPlane(apiURL: "https://api.example.com")
+        let begin: ([String]?, String?) async throws -> DeviceAuthorizationGrant = api.beginDeviceLogin(scopes:clientName:)
+        _ = begin
+    }
+
+    func testLoginWithBrowserSignsInAsTheAppItNames() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(body: #"{"device_code": "dc-1", "user_code": "WDJB-MJHT", "verification_uri": "https://thalovant.com/activate", "interval": 1}"#))
+        StubURLProtocol.enqueue(.init(body: #"{"access_token": "api-token", "token_id": "token-1"}"#))
+        let api = ThalovantControlPlane(apiURL: "https://api.example.com", session: StubURLProtocol.makeSession())
+        try await api.loginWithBrowser(options: DeviceLoginOptions(
+            scopes: homeAssistantScopes, clientName: "Home Assistant (kitchen)", openBrowser: false,
+            prompt: { _ in }, clientId: homeAssistantClientId))
+        let begin = try XCTUnwrap(StubURLProtocol.requests.first?.bodyObject())
+        XCTAssertEqual(begin["client_id"], "thalovant-home-assistant")
+        XCTAssertEqual(begin["client_name"], "Home Assistant (kitchen)")
+        XCTAssertEqual(api.tokenId, "token-1")
+    }
+
+    func testDescribingACodeReadsItAsTheApproverSeesIt() async throws {
+        StubURLProtocol.reset()
+        StubURLProtocol.enqueue(.init(body: #"{"scopes": ["hubs:read"], "client_name": "Home Assistant", "client_verified": true, "expires_at": "2026-09-28T12:15:00Z"}"#))
+        let api = ThalovantControlPlane(
+            apiURL: "https://api.example.com", accessToken: "approver", session: StubURLProtocol.makeSession())
+        let request = try await api.describeDeviceLogin(userCode: "WDJB/MJHT")
+        XCTAssertEqual(StubURLProtocol.requests.first?.url.absoluteString, "https://api.example.com/v1/auth/device/codes/WDJB%2FMJHT")
+        XCTAssertEqual(StubURLProtocol.requests.first?.header("Authorization"), "Bearer approver")
+        XCTAssertEqual(request.scopes, ["hubs:read"])
+        XCTAssertEqual(request.expiresAt, "2026-09-28T12:15:00Z")
+        // Verified only with the app named: a bare true says nothing about who asked.
+        XCTAssertNil(request.clientId)
+        XCTAssertFalse(request.clientVerified)
     }
 
     func testAPendingPollIsStillAnApiErrorAndSaysHowLongToWait() async throws {

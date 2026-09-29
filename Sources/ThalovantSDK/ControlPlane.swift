@@ -9,6 +9,12 @@ public let defaultControlAPIURL = "https://api.thalovant.com"
 /// Free plan can approve.
 public let homeAssistantScopes: [String] = ["hubs:read", "clients:read", "clients:write"]
 
+/// The registered app id Home Assistant signs in as: the `clientId` of a
+/// device sign-in. The approval screen then shows the platform's own name for
+/// it as verified, and approving it again replaces the token the last approval
+/// gave it instead of counting a second one against the plan.
+public let homeAssistantClientId = "thalovant-home-assistant"
+
 /// `spec.connection_type` of a Home Assistant link.
 public let homeAssistantConnectionType = "home_assistant"
 

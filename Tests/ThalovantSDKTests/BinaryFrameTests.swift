@@ -149,4 +149,86 @@ final class BinaryFrameTests: XCTestCase {
             XCTAssertEqual(hiveKinds.contains(kind), accepted, kind)
         }
     }
+
+    /// A zlib stream holding `data` in stored blocks: a real stream, without a
+    /// compressor in the test target.
+    private func zlibStored(_ data: Data) -> Data {
+        var out = Data([0x78, 0x01])
+        let bytes = [UInt8](data)
+        var offset = 0
+        repeat {
+            let count = min(65_535, bytes.count - offset)
+            let final: UInt8 = offset + count == bytes.count ? 1 : 0
+            out.append(final)
+            out.append(contentsOf: [UInt8(count & 0xff), UInt8(count >> 8)])
+            out.append(contentsOf: [UInt8(~count & 0xff), UInt8((~count >> 8) & 0xff)])
+            out.append(contentsOf: bytes[offset..<offset + count])
+            offset += count
+        } while offset < bytes.count
+        var a: UInt32 = 1, b: UInt32 = 0
+        for byte in bytes {
+            a = (a + UInt32(byte)) % 65_521
+            b = (b + a) % 65_521
+        }
+        let adler = (b << 16) | a
+        out.append(contentsOf: [UInt8(adler >> 24), UInt8((adler >> 16) & 0xff), UInt8((adler >> 8) & 0xff), UInt8(adler & 0xff)])
+        return out
+    }
+
+    /// A binarized bus frame whose metadata and payload are compressed.
+    private func compressedBusFrame(_ payload: Data) -> Data {
+        let metadata = zlibStored(Data("{}".utf8))
+        return Data([0x83, UInt8(metadata.count)]) + metadata + payload
+    }
+
+    func testACompressedPartIsCappedWhenItInflates() throws {
+        let body = Data(#"{"type": "speak", "data": {"u": "xxxxxxxxxxxxxxxxxxxx"}, "context": {}}"#.utf8)
+        XCTAssertEqual(body.count, 71)
+        let stream = zlibStored(body)
+        XCTAssertEqual(try inflateWireBytesOrThrow(stream, limit: 71), body, "exactly at the cap still inflates")
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(stream, limit: 70)) { error in
+            XCTAssertTrue("\(error)".contains("size limit"), "\(error)")
+        }
+        XCTAssertEqual(wireInflationLimit, 32 * 1024 * 1024)
+        let message = try HiveWire.decodeBinaryFrame(compressedBusFrame(stream))
+        XCTAssertEqual(message.payload["type"], "speak")
+    }
+
+    func testAPartLargerThanOneInflationStepIsCappedExactly() throws {
+        // Several steps of the fixed scratch buffer, and several stored blocks.
+        let size = 3 * wireInflationChunk + 17
+        let body = Data((0..<size).map { UInt8(truncatingIfNeeded: $0 &* 31) })
+        let stream = zlibStored(body)
+        XCTAssertEqual(try inflateWireBytesOrThrow(stream, limit: size), body)
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(stream, limit: size - 1)) {
+            XCTAssertTrue("\($0)".contains("size limit"), "\($0)")
+        }
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(stream, limit: wireInflationChunk)) {
+            XCTAssertTrue("\($0)".contains("size limit"), "\($0)")
+        }
+        XCTAssertThrowsError(try inflateWireBytesOrThrow(Data(stream.dropLast(4)), limit: size)) {
+            XCTAssertTrue("\($0)".contains("truncated"), "\($0)")
+        }
+    }
+
+    func testATruncatedCompressedPartRefusesTheFrame() throws {
+        let body = Data(#"{"type": "speak", "data": {}, "context": {}}"#.utf8)
+        let truncated = zlibStored(body).dropLast(4)
+        // Read as empty, it would pass for a message with nothing in it.
+        XCTAssertThrowsError(try HiveWire.decodeBinaryFrame(compressedBusFrame(Data(truncated)))) { error in
+            XCTAssertTrue("\(error)".contains("truncated"), "\(error)")
+        }
+        // The metadata too: a clip must not arrive stripped of it.
+        let metadata = Data(zlibStored(Data(#"{"lang": "en-us"}"#.utf8)).dropLast(2))
+        let frame = Data([0x83, UInt8(metadata.count)]) + metadata + zlibStored(body)
+        XCTAssertThrowsError(try HiveWire.decodeBinaryFrame(frame))
+    }
+
+    func testAPartThatInflatesToSomethingOtherThanAnObjectRefusesTheFrame() throws {
+        for text in ["not json", "[1, 2]", "\"speak\""] {
+            XCTAssertThrowsError(try HiveWire.decodeBinaryFrame(compressedBusFrame(zlibStored(Data(text.utf8)))), text) {
+                XCTAssertTrue("\($0)".contains("not a JSON object"), "\($0)")
+            }
+        }
+    }
 }

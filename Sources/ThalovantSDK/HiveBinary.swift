@@ -131,7 +131,7 @@ extension HiveWire {
         let metadataLength = try reader.readUInt(8)
         let metadataBytes = try reader.readBytes(metadataLength)
         let msgType = hiveTypeCodes[typeCode] ?? "3rdparty"
-        let metadata = decodeWireObject(metadataBytes, compressed: compressed)
+        let metadata = try decodeWireObject(metadataBytes, compressed: compressed)
         if msgType == "bin" {
             let kind = try reader.readUInt(4)
             var message = HiveMessage(msgType: msgType, payload: [:], metadata: metadata)
@@ -142,57 +142,79 @@ extension HiveWire {
             )
             return message
         }
-        let payload = decodeWireObject(try reader.readRemainingBytes(), compressed: compressed)
+        let payload = try decodeWireObject(try reader.readRemainingBytes(), compressed: compressed)
         return HiveMessage(msgType: msgType, payload: payload, metadata: metadata)
     }
 
-    private static func decodeWireObject(_ bytes: Data, compressed: Bool) -> JSONObject {
-        let raw = compressed ? (inflateWireBytes(bytes) ?? bytes) : bytes
-        guard !raw.isEmpty, let text = String(data: raw, encoding: .utf8),
-              let object = try? ThalovantJSON.decodeObject(text) else { return [:] }
+    /// A part that is truncated, would inflate past `wireInflationLimit`, or
+    /// is not a JSON object refuses the frame: read as empty, it would hand a
+    /// clip on without its metadata as if it had none. An empty part is an
+    /// empty object, as it always was.
+    private static func decodeWireObject(_ bytes: Data, compressed: Bool) throws -> JSONObject {
+        let raw = compressed ? try inflateWireBytesOrThrow(bytes) : bytes
+        guard !raw.isEmpty else { return [:] }
+        guard let text = String(data: raw, encoding: .utf8), let object = try? ThalovantJSON.decodeObject(text) else {
+            throw ThalovantConnectionError("HiveMind binary frame: a JSON part is not a JSON object.")
+        }
         return object
     }
 }
 
 
-/// Inflates a zlib stream. `nil` when the bytes are not one.
-///
-/// The encoder chooses per frame whether to compress the metadata -- whichever
-/// of the two is shorter -- so a hub really does send both, and a frame whose
-/// metadata cannot be read arrives with no language and no filename beside its
-/// audio. The clip itself is never compressed, whatever the flag says.
 /// How much a single WIRE-1 payload may inflate to.
 ///
 /// A raw-frame size limit bounds the *compressed* input, not the output, so a
 /// hub could send a small compressed metadata block or non-`bin` payload that
 /// expands until the client runs out of memory. zlib reaches ~1000:1, so the
 /// frame limit alone is no bound at all.
-private let wireInflationLimit = 32 * 1024 * 1024
+let wireInflationLimit = 32 * 1024 * 1024
 
-func inflateWireBytes(_ data: Data) -> Data? {
+/// How much one step of inflation writes at most.
+let wireInflationChunk = 64 * 1024
+
+/// Inflates a zlib stream, or says why not: it inflates past the limit, or it
+/// is truncated or not zlib at all.
+///
+/// The encoder chooses per frame whether to compress the metadata -- whichever
+/// of the two is shorter -- so a hub really does send both. The clip itself is
+/// never compressed, whatever the flag says.
+func inflateWireBytesOrThrow(_ data: Data, limit: Int = wireInflationLimit) throws -> Data {
     if data.isEmpty { return data }
     var stream = z_stream()
     guard inflateInit_(&stream, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else {
-        return nil
+        throw ThalovantConnectionError("HiveMind binary frame: zlib could not start.")
     }
     defer { inflateEnd(&stream) }
     var input = [UInt8](data)
     var output = Data()
-    var buffer = [UInt8](repeating: 0, count: max(1024, data.count * 4))
+    // A fixed scratch buffer, never sized from the input: a reassembled
+    // message may itself be 32 MiB, and four times that was allocated before
+    // the limit was ever checked.
+    var buffer = [UInt8](repeating: 0, count: wireInflationChunk)
     var status: Int32 = Z_OK
+    var overLimit = false
     input.withUnsafeMutableBufferPointer { source in
         stream.next_in = source.baseAddress
         stream.avail_in = uInt(source.count)
         repeat {
+            // One byte past what is left is room enough to see the limit
+            // crossed, and nothing past it is ever kept.
+            let room = min(buffer.count, limit - output.count + 1)
             let produced: Int = buffer.withUnsafeMutableBufferPointer { sink -> Int in
                 stream.next_out = sink.baseAddress
-                stream.avail_out = uInt(sink.count)
+                stream.avail_out = uInt(room)
                 status = inflate(&stream, Z_NO_FLUSH)
-                return sink.count - Int(stream.avail_out)
+                return room - Int(stream.avail_out)
             }
+            if produced > limit - output.count { overLimit = true; break }
             if produced > 0 { output.append(contentsOf: buffer[0..<produced]) }
-            if output.count > wireInflationLimit { status = Z_MEM_ERROR; break }
         } while status == Z_OK
     }
-    return status == Z_STREAM_END ? output : nil
+    if overLimit {
+        throw ThalovantConnectionError("HiveMind binary frame inflates past the size limit.")
+    }
+    guard status == Z_STREAM_END else {
+        throw ThalovantConnectionError("HiveMind binary frame holds a truncated compressed stream.")
+    }
+    return output
 }

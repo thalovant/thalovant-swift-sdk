@@ -62,6 +62,25 @@ public enum LinkOutcome: String, Equatable, Sendable {
   case keyChanged = "key_changed"
 }
 
+/// Why a supervisor gave up, in the words every SDK's vectors use.
+///
+/// `LinkDecision.giveUp` carries a `LinkOutcome`, and neither enum can grow a
+/// case without breaking an exhaustive `switch` in code that uses them. So a
+/// hub refusing this client's own key gives up as `.giveUp(.refused)`, and
+/// `LinkSupervisor.giveUpReason` says `.clientKeyRejected` beside it.
+public struct LinkGiveUpReason: RawRepresentable, Hashable, Sendable, CustomStringConvertible {
+  public let rawValue: String
+  public init(rawValue: String) { self.rawValue = rawValue }
+  /// Refusals lasted `refusalGraceSeconds`.
+  public static let refused = LinkGiveUpReason(rawValue: "refused")
+  /// The hub's Noise key is not the one pinned for it.
+  public static let keyChanged = LinkGiveUpReason(rawValue: "key_changed")
+  /// The hub pinned another key for this client
+  /// (`ThalovantConnectionError.clientKeyRejected`).
+  public static let clientKeyRejected = LinkGiveUpReason(rawValue: "client_key_rejected")
+  public var description: String { rawValue }
+}
+
 /// What a supervisor decides after an outcome.
 public enum LinkDecision: Equatable, Sendable {
   /// Keep the link that is up.
@@ -82,11 +101,15 @@ public enum LinkDecision: Equatable, Sendable {
 ///   `retryCeilingSeconds` -- and stop counting refusals;
 /// - `.refused`: wait the ladder's step as for a failure, until refusals have
 ///   lasted `refusalGraceSeconds` since the first of them; then give up;
-/// - `.keyChanged`: give up at once.
+/// - `.keyChanged`: give up at once;
+/// - `.refused` with `clientKeyRejected` -- the hub pinned another key for
+///   this client -- give up at once too: no handshake can change it.
 public struct LinkSupervisor: Sendable {
   public let policy: HubSessionPolicy
   private var wait: TimeInterval
   private var refusedSince: TimeInterval?
+  /// Why the last decision gave up; nil when it did not.
+  public private(set) var giveUpReason: LinkGiveUpReason?
 
   public init(policy: HubSessionPolicy? = nil) {
     self.policy = policy ?? (try! HubSessionPolicy())
@@ -96,6 +119,28 @@ public struct LinkSupervisor: Sendable {
   /// The decision after `outcome`, observed at `now` (seconds on any
   /// monotonic clock).
   public mutating func after(_ outcome: LinkOutcome, at now: TimeInterval) -> LinkDecision {
+    after(outcome, at: now, clientKeyRejected: false)
+  }
+
+  /// The decision after `outcome`; `clientKeyRejected` marks a `.refused`
+  /// that is the hub refusing this client's own key, which gives up at once.
+  public mutating func after(
+    _ outcome: LinkOutcome, at now: TimeInterval, clientKeyRejected: Bool
+  ) -> LinkDecision {
+    let decision = decide(outcome, at: now, clientKeyRejected: clientKeyRejected)
+    if case .giveUp(let given) = decision {
+      giveUpReason =
+        clientKeyRejected && given == .refused
+        ? .clientKeyRejected : given == .keyChanged ? .keyChanged : .refused
+    } else {
+      giveUpReason = nil
+    }
+    return decision
+  }
+
+  private mutating func decide(
+    _ outcome: LinkOutcome, at now: TimeInterval, clientKeyRejected: Bool
+  ) -> LinkDecision {
     switch outcome {
     case .up:
       wait = policy.retrySeconds
@@ -105,6 +150,8 @@ public struct LinkSupervisor: Sendable {
       return .retry(after: 0)
     case .keyChanged:
       return .giveUp(.keyChanged)
+    case .refused where clientKeyRejected:
+      return .giveUp(.refused)
     case .refused:
       let since = refusedSince ?? now
       refusedSince = since
@@ -134,7 +181,10 @@ public func alive(_ client: ThalovantClient?) -> Bool {
 /// retried like any failure -- a new connection is refused until its hub
 /// admits it -- until they have lasted `refusalGraceSeconds`, and then `run()`
 /// throws the refusal (`ThalovantConnectionError` of kind `.refused`). A hub
-/// whose Noise key is not the pinned one (kind `.keyChanged`) stops it at once.
+/// whose Noise key is not the pinned one (kind `.keyChanged`) stops it at once,
+/// and so does a hub that refuses this client's own key (a `.refused` whose
+/// `clientKeyRejected` is set). A close after the hub has sent a frame that
+/// decrypted is a drop, whenever it comes: the hub had accepted the key.
 /// Subscriptions made with `on` follow every client the session builds.
 public final class HubSession: @unchecked Sendable {
   public let policy: HubSessionPolicy
@@ -353,11 +403,7 @@ public final class HubSession: @unchecked Sendable {
     try await lifetime.ended.wait(timeout: window, timeoutError: nil)
     guard lifetime.ended.isOpen else { return }
     await lifetime.awaitLateCode()
-    if lifetime.refused {
-      throw ThalovantConnectionError(
-        "The hub closed the link right after the handshake: it does not accept these credentials, or not yet.",
-        kind: .refused)
-    }
+    if lifetime.refused { throw lifetime.refusalAfterHandshake() }
     throw ThalovantConnectionError("The hub closed the link right after the handshake.")
   }
   private func clockNow() -> TimeInterval { ProcessInfo.processInfo.systemUptime }
@@ -448,6 +494,10 @@ public final class HubSession: @unchecked Sendable {
           debugLog?("hub link: the hub's key changed (\(error.message))")
           failure = error
           decision = supervisor.after(.keyChanged, at: clock())
+        } catch let error as ThalovantConnectionError where error.kind == .refused && error.clientKeyRejected {
+          debugLog?("hub link: the hub refused this client's key (\(error.message))")
+          failure = error
+          decision = supervisor.after(.refused, at: clock(), clientKeyRejected: true)
         } catch let error as ThalovantConnectionError where error.kind == .refused {
           debugLog?("hub link: refused (\(error.message))")
           failure = error

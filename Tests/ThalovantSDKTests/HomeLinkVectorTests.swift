@@ -20,7 +20,7 @@ final class HomeLinkVectorTests: XCTestCase {
     func testHomeLinkVectors() async throws {
         let vectors = try loadVectors("home-link-vectors")
         let cases = try XCTUnwrap(vectors["cases"]?.arrayValue).compactMap(\.objectValue)
-        XCTAssertEqual(cases.count, 30)
+        XCTAssertEqual(cases.count, 35)
         for row in cases {
             let name = try XCTUnwrap(row["name"]?.stringValue)
             let produced: JSONValue
@@ -29,6 +29,8 @@ final class HomeLinkVectorTests: XCTestCase {
                 produced = .object(replyContext(row["context"]?.objectValue))
             case "speech":
                 produced = .string(plainSpeech(try XCTUnwrap(row["text"]?.stringValue, name)))
+            case "queued":
+                produced = try await queuedCase(row, name)
             case "deadline":
                 let fake = LinkFake()
                 fake.sendMilliseconds = try XCTUnwrap(row["send_ms"]?.intValue, name)
@@ -87,6 +89,52 @@ final class HomeLinkVectorTests: XCTestCase {
             ConformanceRecord.record("home-link-vectors.json", name, produced)
             XCTAssertEqual(produced, row["expect"], name)
         }
+    }
+
+    /// A reply that waits behind another frame, over a real link to an
+    /// in-memory hub: another frame holds the send path for `busy_ms`, then
+    /// the same link must carry another message.
+    private func queuedCase(_ row: JSONObject, _ name: String) async throws -> JSONValue {
+        let hub = MemoryHub()
+        let transport = try hub.transport(store: MemoryNoiseStore())
+        let client = ThalovantClient(identity: transport.identity, transport: transport)
+        try await client.connect(timeout: 10)
+        defer { Task { await client.close() } }
+        let socket = try XCTUnwrap(hub.lastSocket, name)
+        let release = AsyncGate()
+        socket.holdNextSend(release)
+        // Another frame is being written ...
+        let busy = Task { try await client.emit("another.frame") }
+        try await eventually { socket.sendHeld }
+        let written = Task {
+            // ... for busy_ms.
+            try await Task.sleep(nanoseconds: UInt64(try XCTUnwrap(row["busy_ms"]?.intValue, name)) * 1_000_000)
+            release.open()
+        }
+        let event = ThalovantEvent(
+            name: HomeLink.requestMessageType, data: try XCTUnwrap(row["request"]?.objectValue, name),
+            context: ["source": "skill", "destination": "ha"])
+        let sent = try await client.answerHomeRequest(
+            event, hubTimeout: try XCTUnwrap(row["hub_timeout_ms"]?.doubleValue, name) / 1000,
+            handler: handler(try XCTUnwrap(row["handler"]?.objectValue, name)))
+        try await written.value
+        try await busy.value
+        // Time enough for a withdrawn reply to go out late, if it would.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let responses = hub.receivedMessages.filter { $0.type == HomeLink.responseMessageType }.map(\.data)
+        XCTAssertEqual(responses, sent.map { [$0] } ?? [], "\(name): never sent late, never twice")
+        // The same link carries the next message.
+        try await client.emit("still.there")
+        var kept = true
+        do {
+            try await eventually { hub.received.last == "still.there" }
+        } catch {
+            kept = false
+        }
+        kept = kept && hub.attempts == 1 && transport.connected && transport.lastError == nil
+        var produced: JSONObject = ["replied": .bool(sent != nil), "link_kept": .bool(kept)]
+        if let sent { produced["response"] = .object(sent) }
+        return .object(produced)
     }
 
     /// The reference's `_handler`: raise, sleep, or answer what the case says.

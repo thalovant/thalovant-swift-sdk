@@ -71,6 +71,9 @@ public struct DeviceLoginOptions: Sendable {
     public var prompt: @Sendable (DeviceAuthorizationGrant) -> Void
     /// Seconds to keep polling before throwing `ThalovantTimeoutError`.
     public var timeout: TimeInterval
+    /// The registered app signing in, such as `homeAssistantClientId` (sent
+    /// as `client_id` when set). See `beginDeviceLogin(scopes:clientName:clientId:)`.
+    public var clientId: String?
 
     public init(
         scopes: [String]? = nil,
@@ -86,6 +89,63 @@ public struct DeviceLoginOptions: Sendable {
         self.openBrowser = openBrowser
         self.prompt = prompt
         self.timeout = timeout
+        self.clientId = nil
+    }
+
+    /// The same options, signing in as the registered app `clientId`.
+    ///
+    /// A second initializer rather than a new defaulted parameter on the first,
+    /// so a reference to `init(scopes:clientName:openBrowser:prompt:timeout:)`
+    /// still compiles.
+    public init(
+        scopes: [String]? = nil,
+        clientName: String? = nil,
+        openBrowser: Bool = true,
+        prompt: @escaping @Sendable (DeviceAuthorizationGrant) -> Void = { grant in
+            print("To sign in, visit \(grant.verificationUri) and enter the code \(grant.userCode)")
+        },
+        timeout: TimeInterval = 900,
+        clientId: String?
+    ) {
+        self.init(scopes: scopes, clientName: clientName, openBrowser: openBrowser, prompt: prompt, timeout: timeout)
+        self.clientId = clientId
+    }
+}
+
+/// A pending device sign-in as the person approving it sees it: what
+/// `describeDeviceLogin(userCode:)` returns.
+///
+/// `clientVerified` is true only when a registered app asked (it named its
+/// `clientId`): `clientName` is then the platform's own name for that app, and
+/// `deviceName` whatever the device called itself, which nothing checks.
+/// Otherwise `clientName` is the device's own claim.
+public struct DeviceLoginRequest: Sendable {
+    /// The scopes the device asked for.
+    public let scopes: [String]
+    public let clientName: String?
+    /// When the code expires, as the API wrote it (ISO 8601).
+    public let expiresAt: String?
+    public let clientId: String?
+    public let clientVerified: Bool
+    public let deviceName: String?
+    /// The raw response.
+    public let raw: JSONObject
+
+    /// Reads `GET /v1/auth/device/codes/{user_code}`; absent or empty fields are nil.
+    public init(response: JSONObject) {
+        func text(_ key: String) -> String? {
+            guard let value = response[key]?.stringValue, !value.isEmpty else { return nil }
+            return value
+        }
+        scopes = response["scopes"]?.arrayValue?.compactMap(\.stringValue) ?? []
+        clientName = text("client_name")
+        expiresAt = text("expires_at")
+        clientId = text("client_id")
+        // Verified only as the API says it, and only with the app named: a
+        // true without an id says nothing about who asked.
+        clientVerified = response["client_verified"]?.boolValue == true && clientId != nil
+        deviceName = text("device_name")
+        raw = response
     }
 }
 
@@ -120,7 +180,8 @@ extension ThalovantControlPlane {
     /// the same flow one step at a time, for a caller that runs its own loop.
     @discardableResult
     public func loginWithBrowser(options: DeviceLoginOptions = DeviceLoginOptions()) async throws -> DeviceLoginResult {
-        let grant = try await beginDeviceLogin(scopes: options.scopes, clientName: options.clientName)
+        let grant = try await beginDeviceLogin(
+            scopes: options.scopes, clientName: options.clientName, clientId: options.clientId)
         defer { setDeviceInterval(grant.deviceCode, nil) }
 
         options.prompt(grant)
@@ -143,7 +204,24 @@ extension ThalovantControlPlane {
     /// carries the code), then call `pollDeviceLogin(_:)` every `interval`
     /// seconds. A verification URL that is not http(s), has no host, or
     /// carries credentials throws: it is about to be opened in a browser.
+    ///
+    /// `clientId` signs in as a registered app, such as `homeAssistantClientId`:
+    /// the approval screen shows the platform's name for the app as verified
+    /// (`clientName` becomes the device's own label beside it), and approving
+    /// the app again replaces the token it already holds. Such an app may ask
+    /// only for its own scopes, and an id the API does not know is refused
+    /// (400 `unknown_client`). `nil` leaves the field out.
     public func beginDeviceLogin(scopes: [String]? = nil, clientName: String? = nil) async throws -> DeviceAuthorizationGrant {
+        try await beginDeviceLogin(scopes: scopes, clientName: clientName, clientId: nil)
+    }
+
+    /// `beginDeviceLogin(scopes:clientName:)`, signing in as the registered
+    /// app `clientId` when it is not nil. A method of its own rather than a
+    /// new defaulted parameter, so a reference to the two-argument form still
+    /// compiles.
+    public func beginDeviceLogin(
+        scopes: [String]? = nil, clientName: String? = nil, clientId: String?
+    ) async throws -> DeviceAuthorizationGrant {
         var payload: JSONObject = [:]
         if let scopes, !scopes.isEmpty {
             payload["scopes"] = .array(scopes.map { .string($0) })
@@ -151,10 +229,26 @@ extension ThalovantControlPlane {
         if let clientName, !clientName.isEmpty {
             payload["client_name"] = .string(clientName)
         }
+        if let clientId {
+            // Sent as given, an empty string included: the API refuses one,
+            // which is better than signing in unverified in silence.
+            payload["client_id"] = .string(clientId)
+        }
         let response = try await requestObject("POST", "/v1/auth/device/authorize", body: payload, auth: false)
         let grant = try DeviceAuthorizationGrant(authorizationResponse: response)
         setDeviceInterval(grant.deviceCode, grant.interval)
         return grant
+    }
+
+    /// Reads a pending device sign-in by its `userCode`, as its approver sees it.
+    ///
+    /// `GET /v1/auth/device/codes/{user_code}`, signed in as the person who
+    /// would approve it. Says which app asked and whether the platform vouches
+    /// for its name (`clientVerified`). A code that is unknown, expired or
+    /// already answered is a `ThalovantApiError` with status 404.
+    public func describeDeviceLogin(userCode: String) async throws -> DeviceLoginRequest {
+        DeviceLoginRequest(
+            response: try await requestObject("GET", "/v1/auth/device/codes/\(encodePathComponent(userCode))"))
     }
 
     /// Asks once whether the device sign-in was approved.
