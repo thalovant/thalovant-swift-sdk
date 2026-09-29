@@ -139,7 +139,7 @@
         "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0bfa3286a462c8467d98dedd20ab3c77ddc4d154ff65dda7e871dcc31758c555",
         "Tests/ThalovantSDKTests/HomeLinkVectorTests.swift": "7b83de76fc73680e4a830329aec93f07de1ce280ec563cff14000d9b9ffdf517",
         "Tests/ThalovantSDKTests/HubSessionLinkTests.swift": "d2b112db7c4f0ca10336603cee428955b5f049b774a3ddb3818d1b136aae8e88",
-        "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "5318d245018dcd99951ab4c7e47b58cb90dcaac531452066655571d6a1394e89"
+        "Tests/ThalovantSDKTests/LinkKeepingVectorTests.swift": "8b3d5da6ab5ef76b1553c4f560112fd4400c59407b35daedd724355cd89f570a"
       },
       "vectors": {
         "home-link-vectors.json": "Tests/ThalovantSDKTests/Fixtures/home-link-vectors.json",

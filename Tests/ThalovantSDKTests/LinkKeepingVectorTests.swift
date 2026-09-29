@@ -400,7 +400,12 @@ final class LinkKeepingVectorTests: XCTestCase {
                     XCTAssertEqual(lifetime.refused, refused, "\(code)")
                 } catch let error as ThalovantConnectionError {
                     XCTAssertEqual(error.kind == .refused, refused, "\(code): \(error.message)")
-                    XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+                    // A fresh store meets the hub with XX, so a refusal as it
+                    // ends is the hub turning this client's key away.
+                    XCTAssertEqual(error.clientKeyRejected, refused, "\(code): \(error.message)")
+                    if !refused {
+                        XCTAssertTrue(error.message.contains("right after the handshake"), error.message)
+                    }
                 }
                 await transport.disconnect()
             }
