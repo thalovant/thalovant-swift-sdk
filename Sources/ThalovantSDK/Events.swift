@@ -157,7 +157,7 @@ public struct ThalovantReply: Sendable {
         let stages = pipelineIds
         return stages.isEmpty || stages.contains { !$0.contains("fallback") }
     }
-    /// Whether some event carries a skill's own positive assertion --
+    /// Whether the skill's own `speak` event carries a positive assertion --
     /// `data.meta[thalovantClaimedMetaKey] == true` -- that it genuinely
     /// answered. Checked before the pipeline-tier heuristic, and only ever
     /// turns a would-be `false` into `true`, never the reverse: it runs after
@@ -165,9 +165,15 @@ public struct ThalovantReply: Sendable {
     /// reply cannot be rescued by it. A missing key, a non-`true` value
     /// (`false`, a string, a number), or no meta at all leaves this `false`,
     /// so a reply/skill that never sets the key is judged exactly as before.
+    ///
+    /// Scoped to `speak`/`ovos.utterance.speak` only -- a correlated event
+    /// this reply happens to carry (e.g. `ovos.utterance.handled`) with the
+    /// same meta shape must never assert a claim; only a skill's own speak
+    /// event may.
     private var hasAssertedClaim: Bool {
         events.contains {
-            $0.data["meta"]?.objectValue?[ThalovantEvents.thalovantClaimedMetaKey]?.boolValue == true
+            [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains($0.name)
+                && $0.data["meta"]?.objectValue?[ThalovantEvents.thalovantClaimedMetaKey]?.boolValue == true
         }
     }
     private func contextIdentifiers(_ key: String) -> [String] {

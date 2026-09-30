@@ -10,12 +10,14 @@ final class ReplyClaimsTests: XCTestCase {
             let failed = row["failed"]!.boolValue!
             let contexts = row["contexts"]!.arrayValue!.compactMap(\.objectValue)
             let metas = row["metas"]?.arrayValue ?? []
+            let names = row["names"]?.arrayValue ?? []
             let reply = ThalovantReply(text: "reply", displayText: "reply", utterances: [], handled: handled, ok: handled && !failed,
                 sessionId: nil, requestId: nil,
                 events: contexts.enumerated().map { index, context in
                     let meta = index < metas.count ? metas[index] : .null
                     let data: JSONObject = meta.objectValue != nil ? ["meta": meta] : [:]
-                    return ThalovantEvent(name: "speak", data: data, context: context)
+                    let name = index < names.count ? (names[index].stringValue ?? "speak") : "speak"
+                    return ThalovantEvent(name: name, data: data, context: context)
                 },
                 failureEvent: failed ? ThalovantEvent(name: "failure", data: [:], context: [:]) : nil)
             let expected = row["expected"]!.objectValue!
@@ -102,5 +104,22 @@ final class ReplyClaimsTests: XCTestCase {
                 failureEvent: nil)
             XCTAssertFalse(reply.claimed, "meta \(meta) must be inert")
         }
+    }
+
+    /// (f) Regression: a correlated non-speak event (e.g. `ovos.utterance.handled`)
+    /// carrying the same meta shape must never assert a claim -- only a skill's
+    /// own `speak`/`ovos.utterance.speak` event may.
+    func testAssertionOnANonSpeakEventIsIgnored() {
+        let reply = ThalovantReply(
+            text: "Je ne peux pas répondre à cela.", displayText: "", utterances: [], handled: true, ok: true,
+            sessionId: nil, requestId: nil,
+            events: [
+                ThalovantEvent(
+                    name: ThalovantEvents.utteranceHandled,
+                    data: ["meta": .object([ThalovantEvents.thalovantClaimedMetaKey: true])],
+                    context: ["pipeline_id": .string("ovos-fallback-pipeline-plugin"), "skill_id": .string("thalovant-skill-custos-fallback.thalovant")])
+            ],
+            failureEvent: nil)
+        XCTAssertFalse(reply.claimed)
     }
 }
