@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.2
+
+Acknowledges the Python reference's 0.9.2 contract: a skill may now positively assert that it genuinely answered from the shared fallback priority band (90-101), where a real fallback skill and the fleet's own generic "nothing matched" catch-all sit side by side and are otherwise indistinguishable by pipeline id alone -- the gap that let a satellite listening without a wake word read thalovant-skill-home's real answer as room noise. `ThalovantEvents.thalovantClaimedMetaKey` (`"thalovant_claimed"`) is the `data.meta` key a skill's own `speak` event may set to the literal `true`; `ThalovantReply.claimed` checks it across the reply's events, still after the existing `ok`/`handled`/no-failure gate, so it can only turn a would-be `false` into `true` and can never rescue a failed or unhandled reply. Only a literal `true` counts -- `false`, a string, a number, or the key missing are all inert. Additive: a reply or skill that never sets the key is judged exactly as before, and the fleet's real generic catch-all skill still comes back `claimed: false`. `reply-claim-vectors.json` re-vendored with six new cases.
+
 ## 0.10.1
 
 Acknowledges the Python reference's 0.9.1 contract (`d33dc2be8b00`): the four changed vector files re-vendored, 21 new cases recorded, and `link-carriers` declared not-applicable -- this SDK speaks only the WebSocket. Nothing existing changes shape: every addition is a new member, a new overload, or a flag beside a case that stays as it was.

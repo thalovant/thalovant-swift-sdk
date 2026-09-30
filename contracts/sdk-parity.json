@@ -92,7 +92,7 @@
     "conversation": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54"
+        "Sources/ThalovantSDK/Events.swift": "3c91fc6109005c6a9056e024795ba514eb40df3f12c47a7693dc63fa3e9964ca"
       },
       "reason": "carryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
@@ -126,7 +126,7 @@
     "home-link": {
       "implementation": {
         "Sources/ThalovantSDK/Errors.swift": "e5ba85d374e4e274946a40f911c1f14eacd7c6d451e1386bfa523adc751bff08",
-        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54",
+        "Sources/ThalovantSDK/Events.swift": "3c91fc6109005c6a9056e024795ba514eb40df3f12c47a7693dc63fa3e9964ca",
         "Sources/ThalovantSDK/HomeLink.swift": "290b7e4b5d5ddd77f0d6c9671b5d7c3e9c28fe11cbe74a0f2e3db3e29d91be8f",
         "Sources/ThalovantSDK/Noise.swift": "0834967663e78ad079e445c2ba87ff55288c7749e89d5ef74b6d2851cab21a70",
         "Sources/ThalovantSDK/Session.swift": "9db8f90339b58dbd400e04052c014e2fa7908c0b5f6679bc3dd69a460b00bf39",
@@ -194,7 +194,7 @@
     "mesh": {
       "implementation": {
         "Sources/ThalovantSDK/Client.swift": "4b626d07325342efe07b04e70b7e0e2ea620f818e052ce8896072e219ce067b6",
-        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54"
+        "Sources/ThalovantSDK/Events.swift": "3c91fc6109005c6a9056e024795ba514eb40df3f12c47a7693dc63fa3e9964ca"
       },
       "reason": "onHive over the five hive kinds, and propagate/escalate/broadcast. Run against the shared mesh vectors.",
       "status": "required",
@@ -225,16 +225,16 @@
     },
     "runtime": {
       "implementation": {
-        "Sources/ThalovantSDK/Events.swift": "fe22b40adca438aea61adceda4f7127b88dd07c38220f47c56a7a7f2440a9c54",
+        "Sources/ThalovantSDK/Events.swift": "3c91fc6109005c6a9056e024795ba514eb40df3f12c47a7693dc63fa3e9964ca",
         "Sources/ThalovantSDK/Runtime.swift": "bf3854d449b403be29c750fc3c8b8ea73f8d4624c2396ad82394d8bf78af81de",
         "Sources/ThalovantSDK/Transport.swift": "2e6a8d2a27e3b650edc92a667ef767c3104a1202fba6e5d1e84e9fce9abec45a"
       },
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs. Since 0.9.2: a skill's own speak event may set data.meta[thalovantClaimedMetaKey] (ThalovantEvents.thalovantClaimedMetaKey, \"thalovant_claimed\") to the literal true to positively assert it genuinely answered from the shared fallback tier; ThalovantReply.claimed checks this across events first, still after the ok/handled/no-failure gate, so it can turn a would-be false into true but never rescue a failed or unhandled reply, and any other value or a missing key is inert. Additive: an unstamped reply is judged exactly as before.",
       "status": "required",
       "tests": {
-        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
+        "Tests/ThalovantSDKTests/Fixtures/reply-claim-vectors.json": "1cbc462004555e6af183b365150fb32bf6e92052f5c053dd29be7d50e160a754",
         "Tests/ThalovantSDKTests/NoiseTests.swift": "bc934dd63c8e93854768b0c034e61cdae41f294ca5a5646296dd3a58acd6c99b",
-        "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "9b8f5e731a4fdaab98eddbe4ed3f491094deb53bf3440fa043770f2a5b5fdfab",
+        "Tests/ThalovantSDKTests/ReplyClaimsTests.swift": "2eafeb1bb5775fe4522868a0e8c0b22e519c706cad1a76cb9bfefc7df2d848c2",
         "Tests/ThalovantSDKTests/RuntimeTests.swift": "ca22aac58b7543e853e531a21636f383438bdf19bf4dea7664fd5ad058b021b2"
       },
       "vectors": {
