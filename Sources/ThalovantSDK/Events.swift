@@ -35,6 +35,16 @@ public enum ThalovantEvents {
         policyDenied,
         queryTimeout,
     ]
+
+    /// The `data.meta` key a skill's own `speak` event may set to `true` to
+    /// positively assert that it genuinely answered, even from the shared
+    /// fallback priority band (90-101) where a real fallback skill and the
+    /// fleet's generic "nothing matched" catch-all sit side by side and are
+    /// otherwise indistinguishable by pipeline id alone. Only a literal
+    /// `true` asserts the claim; thalovant-skillkit's `speak_to`/
+    /// `emit_speech` already put a `meta` dict with `skill_id` on every
+    /// `speak` message, so this is additive to something already there.
+    public static let thalovantClaimedMetaKey = "thalovant_claimed"
 }
 
 /// A bus event emitted by the hub (`{type, data, context}` payloads on
@@ -143,8 +153,28 @@ public struct ThalovantReply: Sendable {
     /// Advisory claim status; successful unstamped legacy replies remain claimed.
     public var claimed: Bool {
         guard handled, ok, failureEvent == nil else { return false }
+        if hasAssertedClaim { return true }
         let stages = pipelineIds
         return stages.isEmpty || stages.contains { !$0.contains("fallback") }
+    }
+    /// Whether the skill's own `speak` event carries a positive assertion --
+    /// `data.meta[thalovantClaimedMetaKey] == true` -- that it genuinely
+    /// answered. Checked before the pipeline-tier heuristic, and only ever
+    /// turns a would-be `false` into `true`, never the reverse: it runs after
+    /// the `ok`/`handled`/no-failure gate above, so a failed or unhandled
+    /// reply cannot be rescued by it. A missing key, a non-`true` value
+    /// (`false`, a string, a number), or no meta at all leaves this `false`,
+    /// so a reply/skill that never sets the key is judged exactly as before.
+    ///
+    /// Scoped to `speak`/`ovos.utterance.speak` only -- a correlated event
+    /// this reply happens to carry (e.g. `ovos.utterance.handled`) with the
+    /// same meta shape must never assert a claim; only a skill's own speak
+    /// event may.
+    private var hasAssertedClaim: Bool {
+        events.contains {
+            [ThalovantEvents.speak, ThalovantEvents.ovosUtteranceSpeak].contains($0.name)
+                && $0.data["meta"]?.objectValue?[ThalovantEvents.thalovantClaimedMetaKey]?.boolValue == true
+        }
     }
     private func contextIdentifiers(_ key: String) -> [String] {
         var seen = Set<String>()

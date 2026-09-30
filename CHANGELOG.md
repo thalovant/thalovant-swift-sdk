@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.10.2
+
+Acknowledges the Python reference's 0.9.2 contract: a skill may now positively assert that it genuinely answered from the shared fallback priority band (90-101), where a real fallback skill and the fleet's own generic "nothing matched" catch-all sit side by side and are otherwise indistinguishable by pipeline id alone -- the gap that let a satellite listening without a wake word read thalovant-skill-home's real answer as room noise. `ThalovantEvents.thalovantClaimedMetaKey` (`"thalovant_claimed"`) is the `data.meta` key a skill's own `speak` event may set to the literal `true`; `ThalovantReply.claimed` checks it across the reply's events, still after the existing `ok`/`handled`/no-failure gate, so it can only turn a would-be `false` into `true` and can never rescue a failed or unhandled reply. Only a literal `true` counts -- `false`, a string, a number, or the key missing are all inert. Additive: a reply or skill that never sets the key is judged exactly as before, and the fleet's real generic catch-all skill still comes back `claimed: false`. `reply-claim-vectors.json` re-vendored, now with eight new cases.
+
+**Revision.** The assertion check originally scanned every collected event for `data.meta.thalovant_claimed`, not only the skill's own `speak` event -- a correlated event a reply happens to carry (e.g. `ovos.utterance.handled`) with the same meta shape would have wrongly asserted a claim too. The scan is now restricted to `ThalovantEvents.speak`/`ThalovantEvents.ovosUtteranceSpeak` -- the same two names `mediaEvents` already narrows to for `speak`-type events, never the wider set that also admits an audio-clip-only event. Reference digest moved to `841f3bbeec23`; `reply-claim-vectors.json` re-vendored again for the `names` array and the new `assertion-on-a-non-speak-event-is-ignored` case.
+
 ## 0.10.1
 
 Acknowledges the Python reference's 0.9.1 contract (`d33dc2be8b00`): the four changed vector files re-vendored, 21 new cases recorded, and `link-carriers` declared not-applicable -- this SDK speaks only the WebSocket. Nothing existing changes shape: every addition is a new member, a new overload, or a flag beside a case that stays as it was.
