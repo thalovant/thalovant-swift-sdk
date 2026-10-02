@@ -60,8 +60,10 @@ do {
 }
 ```
 
-Keep `result.identity` secret. `result.asJSON(includeSecrets: true)` returns the
-real secrets; never log or persist it.
+Keep `result.identity` secret: it carries the client credentials the hub trusts,
+and the raw hub and client resources carry bootstrap credentials too.
+`result.asJSON()` redacts all of them; only `result.asJSON(includeSecrets:
+true)` returns the real secrets, so never log or persist that variant.
 
 ## Documentation
 
