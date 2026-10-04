@@ -205,7 +205,7 @@ public struct InventoryCache: Sendable {
     let root =
       ProcessInfo.processInfo.environment["XDG_CACHE_HOME"].flatMap {
         $0.isEmpty ? nil : URL(fileURLWithPath: $0)
-      } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache")
+      } ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent(".cache")
     self.directory = directory ?? root.appendingPathComponent("thalovant")
     self.ttl = ttl
   }

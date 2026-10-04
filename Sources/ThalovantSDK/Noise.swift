@@ -38,7 +38,7 @@ public final class ThalovantFileNoiseStore: ThalovantNoiseStore, @unchecked Send
     /// hash of its access key.
     public static var defaultDirectory: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".thalovant")
+            ?? URL(fileURLWithPath: NSHomeDirectory(), isDirectory: true).appendingPathComponent(".thalovant")
         return base.appendingPathComponent("Thalovant/noise-swift", isDirectory: true)
     }
 
