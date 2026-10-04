@@ -128,7 +128,7 @@
         "Sources/ThalovantSDK/Errors.swift": "e5ba85d374e4e274946a40f911c1f14eacd7c6d451e1386bfa523adc751bff08",
         "Sources/ThalovantSDK/Events.swift": "36b1c68365205384ebb583d3bd41d60e57f571e7372bbabd996c120f4797e043",
         "Sources/ThalovantSDK/HomeLink.swift": "290b7e4b5d5ddd77f0d6c9671b5d7c3e9c28fe11cbe74a0f2e3db3e29d91be8f",
-        "Sources/ThalovantSDK/Noise.swift": "0834967663e78ad079e445c2ba87ff55288c7749e89d5ef74b6d2851cab21a70",
+        "Sources/ThalovantSDK/Noise.swift": "9a108cd539762a5eca5261c8253393f63a57d53928fb470478c17b1e3648af87",
         "Sources/ThalovantSDK/Session.swift": "9db8f90339b58dbd400e04052c014e2fa7908c0b5f6679bc3dd69a460b00bf39",
         "Sources/ThalovantSDK/Transport.swift": "2e6a8d2a27e3b650edc92a667ef767c3104a1202fba6e5d1e84e9fce9abec45a"
       },
@@ -160,7 +160,7 @@
     },
     "inventory": {
       "implementation": {
-        "Sources/ThalovantSDK/Inventory.swift": "9420f08ccf993bc3c48230f20f7b32ac0f575402c2cf50286e21ac6af81b8d20"
+        "Sources/ThalovantSDK/Inventory.swift": "76ce439fc364309398d7f3633b98b25cfbd7b74a54efc879227f9011cd9a6da3"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
       "status": "required",
