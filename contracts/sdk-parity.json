@@ -151,7 +151,7 @@
         "Sources/ThalovantSDK/Identity.swift": "47359a7835cc6f5b4596693b3720cb27b63b082bfa8920810d12bba8e688a712",
         "Sources/ThalovantSDK/Protocols.swift": "2b8ca8b994d8ede83ccd848375be64237155badb53a502dd7a897a3760bc0cb7"
       },
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. 0.9.5 reference (3f37b7453397): Python now reads a wss:// or ws:// default_master as the WSS endpoint when none is named; this SDK already did, case-insensitively, with the same precedence (explicit endpoint first, never for MQTT, protocols still gate the choice) and its identity tests cover it. No code change.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. 0.9.5 reference (3f37b7453397): Python now reads a wss:// or ws:// default_master as the WSS endpoint when none is named; this SDK already did, case-insensitively, with the same precedence (explicit endpoint first, never for MQTT, protocols still gate the automatic choice, while an explicitly requested WSS transport uses the master as the reference does) and its identity tests cover it. No code change.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ModelRoundTripTests.swift": "d6392e12baf5992828b340379c277e4e6a81eca57308823e94f18ba655b6ff62",
