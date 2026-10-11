@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.10.6
+
+- Automated patch release of the unreleased changes on `main` since v0.10.5.
+
 ## Unreleased
 
 - Listing rules are bounded by work, not time, so a slow machine writes the same sentences as a fast one. `asSentence` and `asks` gave each call a 100 ms wall-clock deadline and left a line bare when it ran out: a loaded macOS runner wrote "Como esta el tiempo" with no full stop, and a slow phone could have done the same. Now a text longer than `ListingRules.maxRuleText` (1,000 UTF-16 units) is cut before any rule runs, and one call's rules share `ListingRules.defaultStepLimit` (10,000) NSRegularExpression progress reports. ICU reports progress once per start position and once per 10,000 backtracking steps, never on a clock. An ordinary phrase uses about one report per character per rule. A pathological rule still throws `ListingRuleError.regexBudgetExceeded` and `asSentence` leaves that line bare, the same way on every machine.
