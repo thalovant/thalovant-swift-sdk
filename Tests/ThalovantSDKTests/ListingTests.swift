@@ -60,6 +60,48 @@ final class ListingTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(start),2)
         XCTAssertTrue(costly.asSentence(text,lang:"xq") == "A"+text.dropFirst())
     }
+    /// The budget counts matching work, not time: a pathological rule is cut,
+    /// explicitly and identically every time, and an ordinary one never is.
+    func testTheRuleBudgetIsWorkNotTime() throws {
+        let costly = try ListingRules(data:data(#"{"sentence_ends":".!?","languages":{"xq":{"question_patterns":["(a+)+$"],"question_openers":["como"]}}}"#))
+        let pathological = String(repeating:"a",count:40)+"x"
+        for _ in 0..<5 {
+            XCTAssertThrowsError(try costly.asks(pathological,lang:"xq")) { XCTAssertEqual($0 as? ListingRuleError, .regexBudgetExceeded) }
+            XCTAssertEqual(costly.asSentence(pathological,lang:"xq"),"A"+pathological.dropFirst(),"a cut rule leaves the line bare")
+            XCTAssertEqual(costly.asSentence("como esta el tiempo",lang:"xq"),"Como esta el tiempo?")
+        }
+        // A text past the input bound is cut before any rule runs, whatever it says.
+        let ordinary = try ListingRules(data:data(#"{"sentence_ends":".!?","languages":{"xq":{"question_patterns":["\\bplim\\b"]}}}"#))
+        let atBound = String(repeating:"b",count:ListingRules.maxRuleText-5)+" plim"
+        XCTAssertTrue(try ordinary.asks(atBound,lang:"xq"))
+        XCTAssertThrowsError(try ordinary.asks(atBound+" b",lang:"xq")) { XCTAssertEqual($0 as? ListingRuleError, .regexBudgetExceeded) }
+        XCTAssertEqual(ordinary.asSentence(atBound+" b",lang:"xq"),"B"+(atBound+" b").dropFirst())
+    }
+    /// The work budget is shared by every rule in one call: many rules that are
+    /// each affordable on a short text are cut together.
+    func testManyAffordableRulesShareOneBudget() throws {
+        let text = String(repeating:"a",count:18)+"x"
+        let one = try ListingRules(data:data(#"{"languages":{"xq":{"question_patterns":["(a+)+$"]}}}"#))
+        XCTAssertFalse(try one.asks(text,lang:"xq"),"one copy fits the budget")
+        let many = try ListingRules(data:["languages":.object(["xq":.object(["question_patterns":.array(Array(repeating:.string("(a+)+$"),count:1024))])])])
+        XCTAssertThrowsError(try many.asks(text,lang:"xq")) { XCTAssertEqual($0 as? ListingRuleError, .regexBudgetExceeded) }
+        let small = try ListingRules(data:data(#"{"languages":{"xq":{"question_patterns":["(a+)+$"]}}}"#), stepLimit:10)
+        XCTAssertThrowsError(try small.asks(text,lang:"xq"),"the limit is the one given")
+    }
+    /// A slow machine writes the same sentences. The Spanish reference case
+    /// lost its full stop on a loaded macOS runner under the old 100 ms
+    /// deadline; here every reference case runs while the CPU is saturated.
+    func testReferenceCasesDoNotDependOnMachineSpeed() throws {
+        let stop = UnsafeAtomicFlag()
+        let busy = (0..<max(2, ProcessInfo.processInfo.activeProcessorCount * 2)).map { _ in
+            Thread { var x = 0.0; while !stop.isSet { x = (x + 1).squareRoot() } }
+        }
+        busy.forEach { $0.start() }
+        defer { stop.set() }
+        for row in try fixture("listing-vectors")["cases"]!.arrayValue!.compactMap(\.objectValue) where row["kind"]?.stringValue == "sentence" {
+            XCTAssertEqual(JSONValue.string(asSentence(row["text"]!.stringValue!,lang:row["lang"]?.stringValue)),row["expected"],"\(row)")
+        }
+    }
 
     func testUnicodeNonBoundaries() throws {
         let rules = try ListingRules(data: JSONDecoder().decode(JSONObject.self,from:Data(#"{"languages":{"xq":{"question_patterns":["\\Bété\\B"]}}}"#.utf8)))
@@ -83,4 +125,11 @@ final class ListingTests: XCTestCase {
         XCTAssertLessThan(Double(DispatchTime.now().uptimeNanoseconds-start)/1_000_000_000,1.5)
         XCTAssertEqual(rules.asSentence(text,lang:"xq"),"A"+text.dropFirst())
     }
+}
+
+/// A stop signal for the busy threads above, read and written under a lock.
+private final class UnsafeAtomicFlag: @unchecked Sendable {
+    private let lock = NSLock(); private var value = false
+    var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+    func set() { lock.lock(); value = true; lock.unlock() }
 }
