@@ -18,8 +18,18 @@ public enum ThalovantEvents {
 
     // The hub runtime's intent manifest (OVOS-INTENT-4 section 10) and the
     // engines' own manifests. See `ThalovantClient.intents`.
+    /// Which skills answer whatever nothing else matched. ovos-core #951 added
+    /// this query and #988 took it out again the same day, so no runtime
+    /// answers it. Kept so code that names it still compiles; the inventory
+    /// asks `skillsList` instead and never sends this.
     public static let fallbackList = "ovos.skills.fallback.list"
     public static let fallbackListResponse = "ovos.skills.fallback.list.response"
+    /// Every skill the runtime loaded and what it declared it can do
+    /// (OVOS-INTENT-4 section 10.3): `{"ok", "skills": [{skill_id,
+    /// session_id, capabilities, intents}]}`. A skill whose capabilities
+    /// include `fallback` is offered whatever nothing else matched.
+    public static let skillsList = "ovos.skills.list"
+    public static let skillsListResponse = "ovos.skills.list.response"
     public static let intentList = "ovos.intent.list"
     public static let intentListResponse = "ovos.intent.list.response"
     public static let intentDescribe = "ovos.intent.describe"

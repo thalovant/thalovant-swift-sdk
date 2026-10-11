@@ -73,7 +73,9 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     let describePayload: JSONObject?
     /// What `intent.service.adapt.manifest.get` answers (names only).
     let adaptNames: [String]
-    let fallbackPayload: JSONObject
+    /// What `ovos.skills.list` answers. `ovos.skills.fallback.list` is never
+    /// answered: ovos-core added it in #951 and took it out again in #988.
+    let skillsPayload: JSONObject
     let foreignFirst: Bool
     let fallbackDelay: TimeInterval
     let connectDelay: TimeInterval
@@ -84,7 +86,16 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     /// Folded languages whose `ovos.intent.list` gets no answer.
     let listSilentIn: Set<String>
     /// Folded languages whose `ovos.intent.list` is answered `ok: false`.
+    /// `""` in either set is the listing asked with no language.
     let listFailsIn: Set<String>
+    /// The hub's default language, stamped on the session of a reply to a
+    /// listing that named no language -- what a live hub does.
+    let hubLang: String?
+    /// The order the listing with no language names the registered
+    /// languages in; sorted when not given.
+    let loadedOrder: [String]?
+    /// Answer the listing with no language `hive.policy.denied`.
+    let denyHubListing: Bool
 
     private let lock = NSLock()
     private var handlers: [UUID: (JSONObject) -> Void] = [:]
@@ -107,11 +118,14 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         listError: String? = nil,
         describePayload: JSONObject? = nil,
         adaptNames: [String] = [],
-        fallbackPayload: JSONObject = ["fallbacks": .array([])],
+        skillsPayload: JSONObject = ["ok": true, "skills": .array([])],
         foreignFirst: Bool = false, fallbackDelay: TimeInterval = 0, connectDelay: TimeInterval = 0,
         keywords: [String: [(skillId: String, intentName: String)]] = [:],
         listSilentIn: Set<String> = [],
-        listFailsIn: Set<String> = []
+        listFailsIn: Set<String> = [],
+        hubLang: String? = nil,
+        loadedOrder: [String]? = nil,
+        denyHubListing: Bool = false
     ) {
         self.registered = registered
         self.refuse = refuse
@@ -126,11 +140,14 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.listError = listError
         self.describePayload = describePayload
         self.adaptNames = adaptNames
-        self.fallbackPayload = fallbackPayload
+        self.skillsPayload = skillsPayload
         self.foreignFirst = foreignFirst; self.fallbackDelay = fallbackDelay; self.connectDelay = connectDelay
         self.keywords = keywords
         self.listSilentIn = listSilentIn
         self.listFailsIn = listFailsIn
+        self.hubLang = hubLang
+        self.loadedOrder = loadedOrder
+        self.denyHubListing = denyHubListing
     }
 
     var connected: Bool { lock.locked { connectedFlag } }
@@ -211,7 +228,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     }
 
     func emitBus(type: String, data: JSONObject, context: JSONObject) async throws {
-        if type == ThalovantEvents.fallbackList && fallbackDelay > 0 { try await Task.sleep(nanoseconds: UInt64(fallbackDelay * 1_000_000_000)) }
+        if type == ThalovantEvents.skillsList && fallbackDelay > 0 { try await Task.sleep(nanoseconds: UInt64(fallbackDelay * 1_000_000_000)) }
         if foreignFirst { deliver(ThalovantEvents.policyDenied, data: ["denied_type": .string(type)], context: ["request_id": .string("foreign-request")]) }
         lock.locked {
             emittedLog.append(Emitted(type: type, data: data, context: context))
@@ -219,7 +236,7 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
                 describesInWindow += 1
             }
         }
-        if refuse.contains(type) {
+        if refuse.contains(type) || (denyHubListing && type == ThalovantEvents.intentList && data["lang"] == nil) {
             deliver(ThalovantEvents.policyDenied, data: [
                 "denied_type": .string(type),
                 "code": "acl_disallowed_type",
@@ -237,14 +254,47 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         let sent = data["lang"]?.stringValue ?? ""
         let lang = normalizedLanguageTag(sent)
         switch type {
-        case ThalovantEvents.fallbackList:
-            deliver(ThalovantEvents.fallbackListResponse, data: fallbackPayload, context: context)
+        case ThalovantEvents.skillsList:
+            deliver(ThalovantEvents.skillsListResponse, data: skillsPayload, context: context)
         case ThalovantEvents.intentList:
             if listSilentIn.contains(lang) {
                 return
             }
             if listFailsIn.contains(lang) {
                 deliver(ThalovantEvents.intentListResponse, data: ["ok": false, "error": "listing failed"], context: context)
+                return
+            }
+            if data["lang"] == nil, listRows == nil, listError == nil {
+                // Every language the hub loaded, in the hub's spelling (en-US).
+                var rows: [JSONValue] = []
+                for tag in loadedOrder ?? registered.keys.sorted() {
+                    let parts = tag.split(separator: "-", maxSplits: 1).map(String.init)
+                    let spelled = parts.count == 2 ? "\(parts[0])-\(parts[1].uppercased())" : tag
+                    for entry in registered[tag] ?? [] {
+                        var row: JSONObject = [
+                            "skill_id": .string(entry.skillId),
+                            "intent_name": .string(entry.intentName),
+                            "lang": .string(spelled),
+                            "method": "template",
+                            "enabled": true,
+                            "session_id": "default",
+                        ]
+                        if data["include_definitions"]?.boolValue == true {
+                            row["definition"] = .object([
+                                "skill_id": .string(entry.skillId),
+                                "intent_name": .string(entry.intentName),
+                                "lang": .string(spelled),
+                                "samples": .array(entry.samples.map { .string($0) }),
+                            ])
+                        }
+                        rows.append(.object(row))
+                    }
+                }
+                var replyContext = context
+                if let hubLang {
+                    replyContext["session"] = .object(["session_id": "s", "lang": .string(hubLang)])
+                }
+                deliver(ThalovantEvents.intentListResponse, data: ["ok": true, "intents": .array(rows)], context: replyContext)
                 return
             }
             if let listError {
@@ -523,10 +573,10 @@ final class IntentInventoryTests: XCTestCase {
     }
 
     func testFallbackDiscoveryDistinguishesUnknownFromKnownEmpty() async throws {
-        for hub in [FakeHubTransport(refuse: [ThalovantEvents.fallbackList]),
-                    FakeHubTransport(silent: [ThalovantEvents.fallbackList]),
-                    FakeHubTransport(fallbackPayload: ["fallbacks": .string("invalid")]),
-                    FakeHubTransport(fallbackPayload: ["ok": .bool(false), "fallbacks": .array([])])] {
+        for hub in [FakeHubTransport(refuse: [ThalovantEvents.skillsList]),
+                    FakeHubTransport(silent: [ThalovantEvents.skillsList]),
+                    FakeHubTransport(skillsPayload: ["ok": true, "skills": .string("invalid")]),
+                    FakeHubTransport(skillsPayload: ["ok": .bool(false), "skills": .array([])])] {
             let inventory = try await client(hub).intents(languages: ["fr-fr"], options: IntentInventoryOptions(timeout: 0.03))
             XCTAssertFalse(inventory.fallbacksKnown)
             XCTAssertTrue(inventory.mayAnswer("de-de"))
@@ -571,21 +621,63 @@ final class IntentInventoryTests: XCTestCase {
         XCTAssertEqual(try JSONDecoder().decode(HubIntentInventory.self, from: JSONEncoder().encode(inventory)), inventory)
     }
 
-    func testFallbackDiscoveryParsesSortsAndRejectsUnsafePriority() async throws {
+    func testOnlyTheHubsOwnFallbackSkillsAreListed() async throws {
+        // `ovos.skills.list` names every skill the runtime loaded. A skill
+        // without the fallback capability answers through its intents and is
+        // in the manifest already; one loaded in somebody else's session is
+        // not this hub's; a malformed row is skipped rather than taking the
+        // rest down.
         let rows: [JSONValue] = [
-            .object(["skill_id": .string("b"), "priority": .integer(20)]),
-            .object(["skill_id": .string("a"), "priority": .number(20.5)]),
-            .object(["skill_id": .string("true"), "priority": .bool(true)]),
-            .object(["skill_id": .string("default"), "priority": .string("42")]),
-            .object(["skill_id": .string("huge"), "priority": .number(1e100)]),
-            .object(["skill_id": .string("")]), .bool(false),
+            .object(["skill_id": "thalovant-skill-memory.thalovant", "session_id": "default",
+                     "capabilities": .array(["fallback", "converse"]), "intents": .integer(0)]),
+            .object(["skill_id": .string(weather), "session_id": "default",
+                     "capabilities": .array([]), "intents": .integer(16)]),
+            .object(["skill_id": "someone-elses.fallback", "session_id": "another-session",
+                     "capabilities": .array(["fallback"]), "intents": .integer(0)]),
+            .object(["skill_id": "custos-fallback.thalovant", "capabilities": .array(["fallback"])]),
+            .object(["skill_id": "empty-session.thalovant", "session_id": "", "capabilities": .array(["fallback"])]),
+            .object(["skill_id": "custos-fallback.thalovant", "session_id": .null, "capabilities": .array(["fallback"])]),
+            .object(["skill_id": "", "session_id": "default", "capabilities": .array(["fallback"])]),
+            .object(["skill_id": "no-capabilities.thalovant", "session_id": "default", "capabilities": .null]),
+            .object(["skill_id": "numbered-session.thalovant", "session_id": .integer(1), "capabilities": .array(["fallback"])]),
+            .string("not a row"),
         ]
-        let sdk = try client(FakeHubTransport(fallbackPayload: ["fallbacks": .array(rows)]))
+        let hub = FakeHubTransport(skillsPayload: ["ok": true, "skills": .array(rows)])
+        let sdk = try client(hub)
         let handlers = try await sdk.listFallbacks()
-        XCTAssertEqual(handlers, [HubFallback(skillId: "default"), HubFallback(skillId: "true", priority: 1), HubFallback(skillId: "a", priority: 20), HubFallback(skillId: "b", priority: 20)])
+        XCTAssertEqual(handlers?.map(\.skillId), [
+            "custos-fallback.thalovant", "empty-session.thalovant", "thalovant-skill-memory.thalovant",
+        ], "skill id order, once each")
+        XCTAssertEqual(handlers?.map(\.priority), [nil, nil, nil], "the hub serves no priority, so none is invented")
+
         let inventory = try await sdk.intents(languages: ["fr-fr"])
-        XCTAssertTrue(inventory.mayAnswer("de-de"))
         XCTAssertTrue(inventory.fallbacksKnown)
+        XCTAssertTrue(inventory.mayAnswer("de-de"))
+        XCTAssertEqual(inventory.fallbacks.map(\.skillId), handlers?.map(\.skillId))
+        XCTAssertEqual(inventory.asJSON()["fallbacks"]?[0], .object(["skill_id": "custos-fallback.thalovant"]),
+                       "no priority key when there is no priority")
+        XCTAssertEqual(HubIntentInventory.fromJSON(inventory.asJSON()), inventory)
+        XCTAssertFalse(hub.emitted.contains { $0.type == ThalovantEvents.fallbackList },
+                       "no runtime answers it, and asking cost every inventory a second and a half")
+        XCTAssertEqual(ThalovantEvents.fallbackList, "ovos.skills.fallback.list", "still exported")
+    }
+
+    func testAPriorityFromAnOlderPayloadIsReadNeverMadeUp() {
+        let rows: [JSONObject] = [
+            ["skill_id": "b", "priority": .integer(20)],
+            ["skill_id": "a", "priority": .number(20.5)],
+            ["skill_id": "true", "priority": .bool(true)],
+            ["skill_id": "default", "priority": .string("42")],
+            ["skill_id": "huge", "priority": .number(1e100)],
+            ["skill_id": "absent"],
+            ["skill_id": ""],
+        ]
+        XCTAssertEqual(rows.compactMap(HubFallback.fromJSON), [
+            HubFallback(skillId: "b", priority: 20), HubFallback(skillId: "a", priority: 20),
+            HubFallback(skillId: "true"), HubFallback(skillId: "default"),
+            HubFallback(skillId: "huge"), HubFallback(skillId: "absent"),
+        ])
+        XCTAssertEqual(HubFallback(skillId: "s", priority: 5).asJSON(), ["skill_id": "s", "priority": .integer(5)])
     }
 
     func testADescribeThatNeverComesLeavesThatIntentWithoutSentences() async throws {
@@ -1032,8 +1124,8 @@ final class IntentInventoryTests: XCTestCase {
         for refused in [false, true] {
             let hub = FakeHubTransport(
                 keywords: ["en-ca": scoutKeywords],
-                listSilentIn: refused ? [] : ["en-us"],
-                listFailsIn: refused ? ["en-us"] : []
+                listSilentIn: refused ? [] : ["en-us", ""],
+                listFailsIn: refused ? ["en-us", ""] : []
             )
             let inventory = try await client(hub).intents(
                 languages: ["en-CA"], options: IntentInventoryOptions(timeout: 0.2)
@@ -1093,6 +1185,151 @@ final class IntentInventoryTests: XCTestCase {
 
         XCTAssertEqual(listingsAsked(hub), ["en-CA"])
         XCTAssertEqual(inventory.listedIn, ["en-CA"])
+    }
+
+    // MARK: A language the hub never loaded (reference #105)
+    //
+    // Measured on all 13 public hubs on 2026-10-11: a hub loads its `lang` and
+    // `secondary_langs` (en-US and fr-FR on most) and lists nothing under any
+    // other tag. A phone set to Spanish, Japanese or German asked in its own
+    // language, then its usual form, got nothing twice and showed an empty
+    // list -- while the hub answered those people in its own language.
+
+    /// The hub's own listing order on Daily Desk and Rewrite Forge: French first.
+    private let frenchFirst = ["fr-fr", "en-us"]
+
+    /// The listings asked with no `lang` key at all.
+    private func hubListings(_ hub: FakeHubTransport) -> [FakeHubTransport.Emitted] {
+        hub.emitted.filter { $0.type == ThalovantEvents.intentList && $0.data["lang"] == nil }
+    }
+
+    func testALanguageTheHubNeverLoadedIsListedInTheHubsOwn() async throws {
+        for phone in ["es-ES", "ja-JP", "de-DE"] {
+            let hub = FakeHubTransport(hubLang: "en-US", loadedOrder: frenchFirst)
+            let inventory = try await client(hub).intents(languages: [phone])
+
+            XCTAssertEqual(inventory.languages, [phone])
+            XCTAssertEqual(inventory.listedIn, ["en-US"], "the language the hub answers \(phone) in")
+            XCTAssertTrue(inventory.hasPhrases, phone)
+            XCTAssertEqual(inventory.skills.map(\.skillId), [shadow, weather], phone)
+            XCTAssertEqual(inventory.skills[1].intents[0].phrasesFor(inventory.listedIn[0]).first, "what is the weather", phone)
+            let whole = hubListings(hub)
+            XCTAssertEqual(whole.count, 1, "the hub's own listing is asked once for \(phone)")
+            XCTAssertEqual(whole.first?.data, ["include_definitions": true], "describing, so definitions are asked for")
+            XCTAssertNil(whole.first?.context["lang"], "no language in the context either")
+        }
+    }
+
+    func testTheSameLanguageInAnotherRegionComesFirst() async throws {
+        // en-CA's usual form is en-us; a hub that loaded en-GB has neither.
+        let english = try XCTUnwrap(registrations["en-us"]), french = try XCTUnwrap(registrations["fr-fr"])
+        let hub = FakeHubTransport(registered: ["fr-fr": french, "en-gb": english], hubLang: "fr-FR",
+                                   loadedOrder: ["fr-fr", "en-gb"])
+        let inventory = try await client(hub).intents(languages: ["en-CA"])
+        XCTAssertEqual(inventory.listedIn, ["en-GB"], "English before the hub's own French")
+    }
+
+    func testWithoutASessionHintTheLanguageWithMostSentencesWins() async throws {
+        let hub = FakeHubTransport(loadedOrder: frenchFirst)
+        let inventory = try await client(hub).intents(languages: ["ja-JP"])
+        XCTAssertEqual(inventory.listedIn, ["en-US"], "two intents in English, one in French")
+    }
+
+    func testNearestHubLanguageOrder() {
+        func rows(_ lang: String, _ method: String = "template") -> [IntentRegistration] {
+            [IntentRegistration(skillId: "s", intentName: "i", lang: lang, method: method)]
+        }
+        let listed = [(lang: "fr-FR", rows: rows("fr-FR")), (lang: "en-US", rows: rows("en-US"))]
+        XCTAssertEqual(nearestHubLanguage("ja-JP", listed: listed), "fr-FR", "a tie goes to the first listed")
+        XCTAssertEqual(nearestHubLanguage("ja-JP", listed: listed, hubLang: "en-US"), "en-US")
+        XCTAssertEqual(nearestHubLanguage("ja-JP", listed: listed, hubLang: "ko-KR"), "fr-FR",
+                       "a hint the hub never listed is no hint")
+        XCTAssertEqual(nearestHubLanguage("fr-CA", listed: listed, hubLang: "en-US"), "fr-FR")
+        XCTAssertNil(nearestHubLanguage("ja-JP", listed: [(lang: "en-US", rows: rows("en-US", "keyword"))]))
+        XCTAssertNil(nearestHubLanguage("ja-JP", listed: []))
+    }
+
+    func testALanguageTheHubLoadedNeverAsksTheWholeManifest() async throws {
+        let hub = FakeHubTransport(hubLang: "en-US")
+        let inventory = try await client(hub).intents(languages: ["fr-fr", "en-us"])
+        XCTAssertEqual(inventory.listedIn, ["fr-fr", "en-us"])
+        XCTAssertTrue(hubListings(hub).isEmpty)
+    }
+
+    func testTwoLanguagesThatLandOnTheSameHubLanguageShareOneListing() async throws {
+        let hub = FakeHubTransport(hubLang: "en-US")
+        let inventory = try await client(hub).intents(languages: ["en-us", "ja-JP"])
+        XCTAssertEqual(inventory.listedIn, ["en-us", "en-us"], "one key per language, not en-us and en-US")
+        let weatherIntent = try XCTUnwrap(inventory.intents.first { $0.skillId == weather })
+        XCTAssertEqual(Array(weatherIntent.phrases.keys), ["en-us"])
+        XCTAssertEqual(weatherIntent.languages, ["en-us"])
+    }
+
+    func testAHubThatCannotListItsLanguagesLeavesTheAnswerAsItWas() async throws {
+        for failure in ["silent", "refused", "denied"] {
+            let hub = FakeHubTransport(
+                keywords: ["ja-jp": scoutKeywords],
+                listSilentIn: failure == "silent" ? [""] : [],
+                listFailsIn: failure == "refused" ? [""] : [],
+                denyHubListing: failure == "denied"
+            )
+            let inventory = try await client(hub).intents(languages: ["ja-JP"], options: IntentInventoryOptions(timeout: 0.2))
+
+            XCTAssertEqual(inventory.source, .intentManifest, failure)
+            XCTAssertEqual(inventory.listedIn, ["ja-JP"], failure)
+            XCTAssertEqual(inventory.intents.map(\.name), ["SourceScoutRealPromptIntent", "SourceScoutTopicIntent"], failure)
+            XCTAssertEqual(hubListings(hub).count, 1, failure)
+        }
+    }
+
+    func testTheHubsOwnListingAnswersWhenTheUsualFormFails() async throws {
+        for refused in [false, true] {
+            let hub = FakeHubTransport(
+                keywords: ["en-ca": scoutKeywords],
+                listSilentIn: refused ? [] : ["en-us"],
+                listFailsIn: refused ? ["en-us"] : []
+            )
+            let inventory = try await client(hub).intents(languages: ["en-CA"], options: IntentInventoryOptions(timeout: 0.2))
+            XCTAssertEqual(inventory.listedIn, ["en-US"], "refused=\(refused)")
+            XCTAssertTrue(inventory.hasPhrases, "refused=\(refused)")
+        }
+    }
+
+    func testAnEmptyHubStaysEmptyRatherThanFailing() async throws {
+        let inventory = try await client(FakeHubTransport(registered: [:])).intents(languages: ["ja-JP"])
+        XCTAssertTrue(inventory.skills.isEmpty)
+        XCTAssertEqual(inventory.listedIn, ["ja-JP"])
+    }
+
+    func testTheHubsOwnListingIsNotAskedWhenNearestIsOff() async throws {
+        let hub = FakeHubTransport()
+        let inventory = try await client(hub).intents(languages: ["ja-JP"], options: IntentInventoryOptions(nearest: false))
+        XCTAssertTrue(inventory.skills.isEmpty)
+        XCTAssertEqual(hub.emitted.filter { $0.type == ThalovantEvents.intentList }.map(\.data),
+                       [["lang": "ja-JP", "include_definitions": true]])
+    }
+
+    func testDefinitionsFromTheHubsOwnListingNeedNoDescribe() async throws {
+        let hub = FakeHubTransport(definitionsInList: true, hubLang: "en-US")
+        let inventory = try await client(hub).intents(languages: ["es-ES"])
+        XCTAssertTrue(inventory.hasPhrases)
+        XCTAssertFalse(hub.emitted.contains { $0.type == ThalovantEvents.intentDescribe })
+    }
+
+    func testWithoutDescribingTheHubsOwnListingAsksForNoDefinitions() async throws {
+        let hub = FakeHubTransport(hubLang: "en-US")
+        let inventory = try await client(hub).intents(languages: ["es-ES"], options: IntentInventoryOptions(describe: false))
+        XCTAssertEqual(inventory.listedIn, ["en-US"])
+        XCTAssertEqual(hubListings(hub).map(\.data), [[:]])
+    }
+
+    func testTheSerialisedInventorySaysWhichLanguageItListedIn() async throws {
+        let inventory = try await client(FakeHubTransport(hubLang: "en-US")).intents(languages: ["es-ES"])
+        let payload = inventory.asJSON()
+        XCTAssertEqual(payload["languages"], .array(["es-ES"]))
+        XCTAssertEqual(payload["listed_in"], .array(["en-US"]))
+        XCTAssertEqual(HubIntentInventory.fromJSON(payload).listedIn, ["en-US"])
+        XCTAssertEqual(try JSONDecoder().decode(HubIntentInventory.self, from: JSONEncoder().encode(inventory)), inventory)
     }
 }
 
