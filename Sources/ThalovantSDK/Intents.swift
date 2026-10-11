@@ -22,6 +22,12 @@ import Foundation
 //   `ovos.intent.describe.response` `{"ok", "definitions": [{method,
 //   definition}]}` or `{"ok": false, "error"}`.
 //
+// `ovos.intent.list` with no `lang` at all lists every language the hub
+// loaded; the inventory asks it once, only for a language the hub did not
+// load. Fallback skills come from `ovos.skills.list` `{}` ->
+// `ovos.skills.list.response` `{"ok", "skills": [{skill_id, session_id,
+// capabilities, intents}]}`.
+//
 // A hub whose connection may not publish a type answers `hive.policy.denied`
 // naming it; that becomes `ThalovantPolicyDeniedError` at once rather than a
 // timeout. The engines' own manifests (`intent.service.adapt.manifest.get` and
@@ -56,6 +62,13 @@ public struct IntentInventoryOptions: Sendable {
     /// a hub which demonstrably answers in that language is a fault, not a
     /// preference. The usual form's listing is taken when it has a template
     /// row, or when the first was empty. See `usualForm`.
+    ///
+    /// When the usual form has no sentences either, the hub did not load the
+    /// language, and `ovos.intent.list` is asked once more with no `lang`:
+    /// that listing names every language the hub loaded, and the inventory
+    /// lists in the nearest of them (see `nearestHubLanguage`), recorded in
+    /// `HubIntentInventory.listedIn`. Asked at most once per inventory; a hub
+    /// that cannot answer it leaves the result as it was.
     public var nearest: Bool
 
     public init(timeout: TimeInterval = 5, describe: Bool = true, fallback: Bool = true, nearest: Bool = true) {
@@ -106,6 +119,62 @@ func normalizedLanguageTag(_ tag: String) -> String {
 /// Whether a listing has an enabled template row: the only kind with sentences.
 func canCarrySentences(_ rows: [IntentRegistration]) -> Bool {
     rows.contains { $0.enabled && $0.method == "template" }
+}
+
+/// How many enabled template rows a listing has: the sentences it can carry.
+func sentenceRows(_ rows: [IntentRegistration]) -> Int {
+    rows.filter { $0.enabled && $0.method == "template" }.count
+}
+
+/// Which of the hub's languages to list in, for a person who asked in `asked`.
+///
+/// `listed` is the hub's whole manifest grouped by language, in the order the
+/// hub listed them. Only a language with a sentence to show (an enabled
+/// `template` row) is a candidate. The same language first, by the matcher
+/// the rest of OVOS uses (`en-CA` takes `en-GB`); then the hub's own
+/// language, `hubLang`, when the hub listed it; then the language with the
+/// most sentences, the first listed on a tie. `nil` when no language the hub
+/// listed carries a sentence.
+///
+/// The hub does not say which language is its own. A person asking in a
+/// language the hub never loaded is answered all the same -- in the hub's
+/// language, by its fallback or persona -- so the sentences worth showing them
+/// are the ones in that language, and the order above is the closest this can
+/// get to it without inventing a fact.
+public func nearestHubLanguage(
+    _ asked: String,
+    listed: [(lang: String, rows: [IntentRegistration])],
+    hubLang: String? = nil
+) -> String? {
+    let candidates = listed.map { (lang: $0.lang, count: sentenceRows($0.rows)) }.filter { $0.count > 0 }
+    guard !candidates.isEmpty else { return nil }
+    let tags = candidates.map(\.lang)
+    if let match = closestLanguage(asked, available: tags) {
+        return match
+    }
+    if let hubLang, !hubLang.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+       let own = closestLanguage(hubLang, available: tags) {
+        return own
+    }
+    // Strictly more, so the first listed wins a tie.
+    var best = candidates[0]
+    for candidate in candidates.dropFirst() where candidate.count > best.count {
+        best = candidate
+    }
+    return best.lang
+}
+
+/// The hub's whole manifest, by the language each row was registered in.
+///
+/// `byLang` keeps the hub's own spelling and the order it listed them in.
+/// `sessionLang` is the language the hub stamped on its reply's session: a
+/// request that names no language is answered in a session the hub opened in
+/// its default language, which is the nearest thing to "the hub's own
+/// language" the bus offers. It is a hint, not a promise, so it only ever
+/// breaks a choice between languages the hub actually listed.
+struct HubLanguages {
+    let byLang: [(lang: String, rows: [IntentRegistration])]
+    let sessionLang: String?
 }
 
 /// Whether a retried listing failed the way the first listing's names
@@ -443,27 +512,71 @@ public struct HubSkillIntents: Codable, Equatable, Sendable {
     }
 }
 
-/// One registered fallback handler, ordered by priority and then skill id.
+/// A skill that answers whatever nothing else matched.
+///
+/// It has no sentences to publish for that -- being offered everything is what
+/// a fallback is -- so a caller can learn that it exists and nothing more. That
+/// is still the difference between "no skill handles this" and "something will
+/// try".
+///
+/// `priority` is `nil`: no runtime serves it. The hub's own list of skills
+/// (`ovos.skills.list`) says which skills declared the fallback capability and
+/// not in what order they are tried, and the query that would have carried
+/// the order (`ovos.skills.fallback.list`, ovos-core #951) was reverted the
+/// same day it landed. A number here would be invented, so there is none; the
+/// inventory lists fallbacks in skill id order, which says nothing about who
+/// goes first. `asJSON()` leaves the key out when there is no priority.
 public struct HubFallback: Codable, Equatable, Sendable {
     public let skillId: String
-    public let priority: Int
-    public init(skillId: String, priority: Int = 0) { self.skillId = skillId; self.priority = priority }
+    public let priority: Int?
+    public init(skillId: String, priority: Int? = nil) { self.skillId = skillId; self.priority = priority }
     enum CodingKeys: String, CodingKey { case skillId = "skill_id"; case priority }
     public func asJSON() -> JSONObject { encodedJSONObject(self) }
+    /// Parses a fallback as `asJSON()` wrote it. A priority from an older
+    /// payload is read when it is a usable whole number, and otherwise left
+    /// out rather than guessed.
     static func fromJSON(_ raw: JSONObject) -> HubFallback? {
         guard let skill = raw["skill_id"]?.stringValue,
               !skill.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        let priority: Int
+        let priority: Int?
         switch raw["priority"] {
         case .integer(let value): priority = value
-        case .bool(let value): priority = value ? 1 : 0
         case .number(let value):
-            guard value.isFinite, value >= Double(Int.min), value < Double(Int.max) else { return nil }
-            priority = Int(value)
-        default: priority = 0
+            priority = value.isFinite && value >= Double(Int.min) && value < Double(Int.max) ? Int(value) : nil
+        default: priority = nil
         }
         return HubFallback(skillId: skill, priority: priority)
     }
+}
+
+/// The capability a skill announces in `ovos.skills.list` when it takes what
+/// nothing else matched.
+let fallbackCapability = "fallback"
+
+/// The fallback skills in an `ovos.skills.list` answer, in skill id order, once each.
+///
+/// Only the hub's own skills: a row in another session (`default` is where the
+/// runtime loads every installed skill) is somebody else's, and a row with no
+/// session, or an empty one, is taken as the hub's, which is what the runtime
+/// means by leaving it out. A malformed row -- no skill id, capabilities that
+/// are not a list -- is skipped and the rest kept.
+func fallbacksFromSkills(_ rows: [JSONValue]) -> [HubFallback] {
+    var found = Set<String>()
+    for row in rows {
+        guard let object = row.objectValue,
+              let skill = object["skill_id"]?.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !skill.isEmpty else { continue }
+        switch object["session_id"] {
+        case nil, .some(.null): break
+        case .some(.string(let session)) where session.isEmpty || session == "default": break
+        default: continue
+        }
+        guard let capabilities = object["capabilities"]?.arrayValue else { continue }
+        if capabilities.contains(where: { $0.stringValue == fallbackCapability }) {
+            found.insert(skill)
+        }
+    }
+    return found.sorted().map { HubFallback(skillId: $0) }
 }
 
 /// Everything a hub can be asked, grouped by skill.
@@ -485,11 +598,16 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
     public let fallbacks: [HubFallback]
     public let fallbacksKnown: Bool
     /// The tag the hub actually listed each requested language under, in
-    /// `languages` order. Equal to `languages` unless a listing came back
-    /// with no sentences to carry (empty, or keyword rows alone) and the
-    /// language's usual form answered instead, which is the only way the two
-    /// differ. Callers rendering sentences must read them
-    /// from the tag that answered.
+    /// `languages` order. Equal to `languages` unless the listing in that
+    /// language had no sentences and another answered instead: the
+    /// language's usual form (`en-CA` -> `en-us`), or else one of the
+    /// languages the hub loaded -- the same language in another region
+    /// first, then the hub's own -- because a hub lists nothing under a
+    /// language it did not load and still answers a person speaking it. Two
+    /// requested languages that land on the same listing share its tag.
+    /// Callers rendering sentences must read them from the tag that
+    /// answered, and should say which language they are in when it differs
+    /// from what was asked in a way the person would notice.
     public let listedIn: [String]
 
     enum CodingKeys: String, CodingKey {
@@ -549,7 +667,8 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
             source: raw["source"]?.stringValue.flatMap(HubIntentSource.init(rawValue:)) ?? .intentManifest,
             denied: raw["denied"]?.arrayValue?.compactMap { $0.stringValue } ?? [],
             fallbacks: (raw["fallbacks"]?.arrayValue ?? []).compactMap { $0.objectValue.flatMap(HubFallback.fromJSON) },
-            fallbacksKnown: raw["fallbacks_known"]?.boolValue ?? false
+            fallbacksKnown: raw["fallbacks_known"]?.boolValue ?? false,
+            listedIn: raw["listed_in"]?.arrayValue?.compactMap { $0.stringValue }
         )
     }
 
@@ -745,6 +864,47 @@ extension ThalovantClient {
             .compactMap { $0.objectValue.flatMap(IntentRegistration.fromJSON) }
     }
 
+    /// `ovos.intent.list` with no `lang`: every language the hub loaded.
+    ///
+    /// `nil` when the hub refused, failed or did not answer: this is only ever
+    /// asked to improve an answer, and an answer it cannot improve stands.
+    /// Cancellation is none of those and propagates.
+    func listHubLanguages(timeout: TimeInterval, includeDefinitions: Bool) async throws -> HubLanguages? {
+        var data: JSONObject = [:]
+        if includeDefinitions {
+            data["include_definitions"] = .bool(true)
+        }
+        let event: ThalovantEvent
+        do {
+            event = try await requestReply(
+                queryType: ThalovantEvents.intentList,
+                replyType: ThalovantEvents.intentListResponse,
+                data: data,
+                lang: nil,
+                timeout: timeout
+            )
+        } catch let failure where isFailedListing(failure) {
+            return nil
+        }
+        if event.data["ok"]?.boolValue == false {
+            return nil
+        }
+        var byLang: [(lang: String, rows: [IntentRegistration])] = []
+        for row in event.data["intents"]?.arrayValue ?? [] {
+            guard let entry = row.objectValue.flatMap(IntentRegistration.fromJSON),
+                  !entry.lang.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            // `fr-fr` and `fr-FR` are one group; the first spelling seen is kept.
+            if let index = byLang.firstIndex(where: { sameLanguage($0.lang, entry.lang) }) {
+                byLang[index].rows.append(entry)
+            } else {
+                byLang.append((entry.lang, [entry]))
+            }
+        }
+        let session = event.context["session"]?.objectValue?["lang"]?.stringValue?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return HubLanguages(byLang: byLang, sessionLang: session?.isEmpty == false ? session : nil)
+    }
+
     /// Every registration behind one intent in one language
     /// (`ovos.intent.describe`), keyword ones first as the runtime lists them.
     func describeIntentDefinitions(
@@ -918,6 +1078,10 @@ extension ThalovantClient {
         }
 
         var listed: [(lang: String, rows: [IntentRegistration])] = []
+        var answered: [String] = []
+        // The language-less listing, asked at most once and only when needed.
+        var askedHub = false
+        var hubLanguages: HubLanguages?
         do {
             for lang in asked {
                 let listingOptions = ListIntentsOptions(timeout: options.timeout, includeDefinitions: options.describe)
@@ -963,7 +1127,45 @@ extension ThalovantClient {
                         }
                     }
                 }
-                listed.append((tag, rows))
+                if options.nearest, !canCarrySentences(rows) {
+                    // Still nothing a person can say: the hub did not load
+                    // this language. A hub loads its `lang` and
+                    // `secondary_langs` (en-US and fr-FR on most public hubs)
+                    // and lists nothing under any other tag, so a phone set to
+                    // Spanish, Japanese or German was shown an empty list -- by
+                    // a hub that answered every one of those people, in its
+                    // own language. Measured on all 13 public hubs on
+                    // 2026-10-11.
+                    //
+                    // The listing without a language names every language the
+                    // hub loaded; list in the nearest of them and say so in
+                    // `listedIn`. Asked once per inventory, only here, and
+                    // taken only when it has sentences, so it never replaces
+                    // names with fewer names. A hub that cannot answer it
+                    // leaves the result exactly as it was.
+                    if !askedHub {
+                        askedHub = true
+                        hubLanguages = try await listHubLanguages(
+                            timeout: options.timeout, includeDefinitions: options.describe
+                        )
+                    }
+                    if let hub = hubLanguages,
+                       let chosen = nearestHubLanguage(lang, listed: hub.byLang, hubLang: hub.sessionLang),
+                       let group = hub.byLang.first(where: { $0.lang == chosen }) {
+                        rows = group.rows
+                        tag = chosen
+                    }
+                }
+                // One key per language: `en-us` asked and `en-US` chosen for
+                // another tag are the same listing, and two keys would split
+                // its phrases.
+                if let index = listed.firstIndex(where: { sameLanguage($0.lang, tag) }) {
+                    tag = listed[index].lang
+                    listed[index].rows = rows
+                } else {
+                    listed.append((tag, rows))
+                }
+                answered.append(tag)
             }
         } catch let denied as ThalovantPolicyDeniedError {
             guard options.fallback, denied.deniedType == ThalovantEvents.intentList else { throw denied }
@@ -1039,7 +1241,7 @@ extension ThalovantClient {
         return try await withFallbacks(
             HubIntentInventory(
                 languages: asked, skills: skills, source: .intentManifest,
-                listedIn: listed.map(\.lang)
+                listedIn: answered
             ),
             timeout: options.timeout)
     }
@@ -1072,7 +1274,20 @@ func inventoryFromNames(
 
 
 extension ThalovantClient {
-    /// Registered fallback handlers; nil means discovery unavailable, [] means none registered.
+    /// Which skills answer whatever nothing else matched, or `nil` if unknowable.
+    ///
+    /// Read from `ovos.skills.list`: every skill the hub loaded, with the
+    /// capabilities it declared; a fallback is one declaring `fallback`, in the
+    /// hub's own (`default`) session. It used to ask
+    /// `ovos.skills.fallback.list`, which ovos-core added in #951 and removed
+    /// in #988 the same day, so no hub ever answered it; that query is no
+    /// longer sent.
+    ///
+    /// `nil` and `[]` are deliberately different answers. `[]` means the hub
+    /// said it has no fallbacks; `nil` means it could not say -- a runtime
+    /// without `ovos.skills.list`, a connection not allowed to publish it, a
+    /// failed answer, or a hub that did not reply within `timeout`. The list
+    /// is in skill id order and carries no priority: see `HubFallback`.
     public func listFallbacks(timeout: TimeInterval = 5) async throws -> [HubFallback]? {
         try validateRuntimeTimeout(timeout)
         let event: ThalovantEvent
@@ -1080,8 +1295,8 @@ extension ThalovantClient {
             event = try await withThrowingTaskGroup(of: ThalovantEvent.self) { group in
                 defer { group.cancelAll() }
                 group.addTask {
-                    try await self.requestReply(queryType: ThalovantEvents.fallbackList,
-                        replyType: ThalovantEvents.fallbackListResponse, data: [:], timeout: timeout)
+                    try await self.requestReply(queryType: ThalovantEvents.skillsList,
+                        replyType: ThalovantEvents.skillsListResponse, data: [:], timeout: timeout)
                 }
                 group.addTask {
                     try await AsyncGate().wait(timeout: timeout, timeoutError: ThalovantTimeoutError("Fallback discovery timed out."))
@@ -1091,10 +1306,8 @@ extension ThalovantClient {
             }
         } catch is ThalovantPolicyDeniedError { return nil }
           catch is ThalovantTimeoutError { return nil }
-        guard event.data["ok"]?.boolValue != false, let rows = event.data["fallbacks"]?.arrayValue else { return nil }
-        return rows.compactMap { $0.objectValue.flatMap(HubFallback.fromJSON) }.sorted {
-            $0.priority != $1.priority ? $0.priority < $1.priority : $0.skillId < $1.skillId
-        }
+        guard event.data["ok"]?.boolValue != false, let rows = event.data["skills"]?.arrayValue else { return nil }
+        return fallbacksFromSkills(rows)
     }
 
     private func withFallbacks(_ inventory: HubIntentInventory, timeout: TimeInterval) async throws -> HubIntentInventory {
