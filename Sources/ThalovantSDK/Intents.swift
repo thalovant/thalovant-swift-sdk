@@ -50,10 +50,12 @@ public struct IntentInventoryOptions: Sendable {
     /// When the hub refuses `ovos.intent.list`, fall back to the engines' own
     /// manifests and return names only, marked `source: .engineManifests`.
     public var fallback: Bool
-    /// Retry an empty listing once in the language's usual form. On by
-    /// default: a listing that returns nothing from a hub which demonstrably
-    /// answers in that language is a fault, not a preference. See
-    /// `usualForm`.
+    /// Retry once in the language's usual form a listing with no enabled
+    /// template row -- empty, or keyword rows alone, which carry no
+    /// sentences. On by default: a listing with nothing a person can say from
+    /// a hub which demonstrably answers in that language is a fault, not a
+    /// preference. The usual form's listing is taken when it has a template
+    /// row, or when the first was empty. See `usualForm`.
     public var nearest: Bool
 
     public init(timeout: TimeInterval = 5, describe: Bool = true, fallback: Bool = true, nearest: Bool = true) {
@@ -99,6 +101,21 @@ func normalizedLanguageTag(_ tag: String) -> String {
     tag.trimmingCharacters(in: .whitespacesAndNewlines)
         .lowercased()
         .replacingOccurrences(of: "_", with: "-")
+}
+
+/// Whether a listing has an enabled template row: the only kind with sentences.
+func canCarrySentences(_ rows: [IntentRegistration]) -> Bool {
+    rows.contains { $0.enabled && $0.method == "template" }
+}
+
+/// Whether a retried listing failed the way the first listing's names
+/// outlive: no answer in time, `ok: false`, or a refusal. Cancellation is
+/// none of these.
+func isFailedListing(_ error: Error) -> Bool {
+    error is ThalovantTimeoutError
+        || error is ThalovantRuntimeError
+        || error is ThalovantPolicyDeniedError
+        || error is ThalovantUnansweredError
 }
 
 /// The engine behind a manifest `method`: `template` is padatious, `keyword`
@@ -469,8 +486,9 @@ public struct HubIntentInventory: Codable, Equatable, Sendable {
     public let fallbacksKnown: Bool
     /// The tag the hub actually listed each requested language under, in
     /// `languages` order. Equal to `languages` unless a listing came back
-    /// empty and the language's usual form answered instead, which is the
-    /// only way the two differ. Callers rendering sentences must read them
+    /// with no sentences to carry (empty, or keyword rows alone) and the
+    /// language's usual form answered instead, which is the only way the two
+    /// differ. Callers rendering sentences must read them
     /// from the tag that answered.
     public let listedIn: [String]
 
@@ -905,7 +923,7 @@ extension ThalovantClient {
                 let listingOptions = ListIntentsOptions(timeout: options.timeout, includeDefinitions: options.describe)
                 var rows = try await listIntentRegistrations(lang: lang, options: listingOptions)
                 var tag = lang
-                if rows.isEmpty, options.nearest {
+                if options.nearest, !canCarrySentences(rows) {
                     // Listing and asking do not agree about languages. The hub
                     // matches an utterance to the closest language it knows, so
                     // a phone set to en-CA is understood by skills registered
@@ -913,12 +931,33 @@ extension ThalovantClient {
                     // same hub lists nothing for en-CA and a person is shown an
                     // empty hub by the hub that is answering them.
                     //
-                    // Once only, and only on an empty listing: a hub that
-                    // answered is never asked twice, and a language whose usual
-                    // form is itself has nothing to retry with.
+                    // Not only on an empty listing: on a listing with no
+                    // template row, which can never carry a sentence. The Pop
+                    // Culture hub (2026-10-11) listed five keyword intents of
+                    // one skill under en-CA -- that skill registers keyword
+                    // vocabulary in 63 regional tags -- and 141 intents with
+                    // sentences under en-US; five names is not an answer a
+                    // person can use.
+                    //
+                    // Once only: a listing with a template row is never asked
+                    // twice, a language whose usual form is itself has nothing
+                    // to retry with, and the usual form's listing is taken only
+                    // when it can carry sentences (or the first was empty), so
+                    // keyword names are never traded for other names.
                     if let usual = usualForm(lang) {
-                        let retried = try await listIntentRegistrations(lang: usual, options: listingOptions)
-                        if !retried.isEmpty {
+                        let retried: [IntentRegistration]
+                        do {
+                            retried = try await listIntentRegistrations(lang: usual, options: listingOptions)
+                        } catch let failure where !rows.isEmpty && isFailedListing(failure) {
+                            // A retry never makes the answer worse than the
+                            // first listing. Names the hub already gave stand
+                            // when the usual form times out, is refused or
+                            // answers `ok: false`; only an empty first listing
+                            // lets the failure through, exactly as before.
+                            // Cancellation is neither, so it always propagates.
+                            retried = []
+                        }
+                        if canCarrySentences(retried) || (!retried.isEmpty && rows.isEmpty) {
                             rows = retried
                             tag = usual
                         }

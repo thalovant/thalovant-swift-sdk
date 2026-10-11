@@ -77,6 +77,14 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
     let foreignFirst: Bool
     let fallbackDelay: TimeInterval
     let connectDelay: TimeInterval
+    /// Keyword (adapt) registrations per folded language: listed, never
+    /// described with sentences, exactly as ovos-core lists an IntentBuilder
+    /// intent.
+    let keywords: [String: [(skillId: String, intentName: String)]]
+    /// Folded languages whose `ovos.intent.list` gets no answer.
+    let listSilentIn: Set<String>
+    /// Folded languages whose `ovos.intent.list` is answered `ok: false`.
+    let listFailsIn: Set<String>
 
     private let lock = NSLock()
     private var handlers: [UUID: (JSONObject) -> Void] = [:]
@@ -100,7 +108,10 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         describePayload: JSONObject? = nil,
         adaptNames: [String] = [],
         fallbackPayload: JSONObject = ["fallbacks": .array([])],
-        foreignFirst: Bool = false, fallbackDelay: TimeInterval = 0, connectDelay: TimeInterval = 0
+        foreignFirst: Bool = false, fallbackDelay: TimeInterval = 0, connectDelay: TimeInterval = 0,
+        keywords: [String: [(skillId: String, intentName: String)]] = [:],
+        listSilentIn: Set<String> = [],
+        listFailsIn: Set<String> = []
     ) {
         self.registered = registered
         self.refuse = refuse
@@ -117,6 +128,9 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         self.adaptNames = adaptNames
         self.fallbackPayload = fallbackPayload
         self.foreignFirst = foreignFirst; self.fallbackDelay = fallbackDelay; self.connectDelay = connectDelay
+        self.keywords = keywords
+        self.listSilentIn = listSilentIn
+        self.listFailsIn = listFailsIn
     }
 
     var connected: Bool { lock.locked { connectedFlag } }
@@ -226,6 +240,13 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
         case ThalovantEvents.fallbackList:
             deliver(ThalovantEvents.fallbackListResponse, data: fallbackPayload, context: context)
         case ThalovantEvents.intentList:
+            if listSilentIn.contains(lang) {
+                return
+            }
+            if listFailsIn.contains(lang) {
+                deliver(ThalovantEvents.intentListResponse, data: ["ok": false, "error": "listing failed"], context: context)
+                return
+            }
             if let listError {
                 deliver(
                     ThalovantEvents.intentListResponse,
@@ -259,6 +280,16 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
                     ])
                 }
                 rows.append(.object(row))
+            }
+            for keyword in keywords[lang] ?? [] {
+                rows.append(.object([
+                    "skill_id": .string(keyword.skillId),
+                    "intent_name": .string(keyword.intentName),
+                    "lang": .string(lang),
+                    "method": "keyword",
+                    "enabled": true,
+                    "session_id": "default",
+                ]))
             }
             deliver(ThalovantEvents.intentListResponse, data: ["ok": true, "intents": .array(rows)], context: context)
         case ThalovantEvents.intentDescribe:
@@ -309,6 +340,17 @@ private final class FakeHubTransport: HiveMindBusTransport, @unchecked Sendable 
             break
         }
     }
+}
+
+private let scout = "thalovant-skill-source-scout.thalovant"
+private let scoutKeywords: [(skillId: String, intentName: String)] = [
+    (scout, "SourceScoutTopicIntent"),
+    (scout, "SourceScoutRealPromptIntent"),
+]
+
+/// The tags `ovos.intent.list` was asked for, in order, as sent.
+private func listingsAsked(_ hub: FakeHubTransport) -> [String] {
+    hub.emitted.filter { $0.type == ThalovantEvents.intentList }.compactMap { $0.data["lang"]?.stringValue }
 }
 
 private func identity() throws -> ThalovantIdentity {
@@ -954,6 +996,103 @@ final class IntentInventoryTests: XCTestCase {
         XCTAssertEqual(inventory.intents.map { $0.id }, ["\(weather):gone.away"])
         XCTAssertEqual(inventory.intents[0].phrasesFor("en-us"), [])
         XCTAssertFalse(inventory.hasPhrases)
+    }
+    // MARK: Nearest: a listing with no sentences (reference #103)
+
+    func testATagWithOnlyKeywordRowsIsListedUnderItsUsualForm() async throws {
+        // Not empty is not the same as answered. The Pop Culture hub on
+        // 2026-10-11: one skill registers its keyword vocabulary in 63 regional
+        // tags, every other skill only in en-US. Its en-CA listing was five
+        // keyword rows, which carry no sentences, so a phone in Toronto was
+        // shown five names and nothing it could say -- the retry in the usual
+        // form only ran on an empty listing.
+        let hub = FakeHubTransport(keywords: ["en-ca": scoutKeywords, "en-us": scoutKeywords])
+        let inventory = try await client(hub).intents(languages: ["en-CA"])
+
+        XCTAssertEqual(inventory.listedIn, ["en-us"], "the usual form has sentences, en-CA has none")
+        XCTAssertTrue(inventory.hasPhrases)
+        XCTAssertEqual(inventory.skills.map { $0.skillId }, [shadow, scout, weather])
+        XCTAssertEqual(listingsAsked(hub), ["en-CA", "en-us"])
+    }
+
+    func testKeywordRowsAreKeptWhenTheUsualFormHasNoSentencesEither() async throws {
+        let hub = FakeHubTransport(
+            registered: [:],
+            keywords: ["en-ca": scoutKeywords, "en-us": Array(scoutKeywords.prefix(1))]
+        )
+        let inventory = try await client(hub).intents(languages: ["en-CA"])
+
+        XCTAssertEqual(inventory.listedIn, ["en-CA"], "nothing better to take")
+        XCTAssertEqual(inventory.intents.map { $0.name }, ["SourceScoutRealPromptIntent", "SourceScoutTopicIntent"])
+        XCTAssertEqual(listingsAsked(hub), ["en-CA", "en-us"])
+    }
+
+    func testAFailedRetryKeepsTheNamesTheFirstListingGave() async throws {
+        // A retry never makes the answer worse than the first listing.
+        for refused in [false, true] {
+            let hub = FakeHubTransport(
+                keywords: ["en-ca": scoutKeywords],
+                listSilentIn: refused ? [] : ["en-us"],
+                listFailsIn: refused ? ["en-us"] : []
+            )
+            let inventory = try await client(hub).intents(
+                languages: ["en-CA"], options: IntentInventoryOptions(timeout: 0.2)
+            )
+
+            XCTAssertEqual(inventory.source, .intentManifest, "refused=\(refused)")
+            XCTAssertEqual(inventory.listedIn, ["en-CA"], "refused=\(refused)")
+            XCTAssertEqual(
+                inventory.intents.map { $0.name },
+                ["SourceScoutRealPromptIntent", "SourceScoutTopicIntent"],
+                "refused=\(refused)"
+            )
+            XCTAssertEqual(listingsAsked(hub), ["en-CA", "en-us"], "refused=\(refused)")
+        }
+    }
+
+    func testAFailedRetryAfterAnEmptyListingStillFailsAsBefore() async throws {
+        let hub = FakeHubTransport(registered: [:], listFailsIn: ["en-us"])
+        do {
+            _ = try await client(hub).intents(languages: ["en-CA"], options: IntentInventoryOptions(timeout: 0.2))
+            XCTFail("expected ThalovantRuntimeError")
+        } catch let error as ThalovantRuntimeError {
+            XCTAssertTrue(error.message.contains("listing failed"), error.message)
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testCancellingTheRetryIsNotKeptAsAFailedRetry() async throws {
+        // The first listing's names stand against a timeout or a refusal,
+        // never against the caller giving up.
+        let hub = FakeHubTransport(keywords: ["en-ca": scoutKeywords], listSilentIn: ["en-us"])
+        let sdk = try client(hub)
+        let pending = Task { try await sdk.intents(languages: ["en-CA"], options: IntentInventoryOptions(timeout: 30)) }
+        let deadline = Date().addingTimeInterval(5)
+        while listingsAsked(hub).count < 2, Date() < deadline {
+            try await Task.sleep(nanoseconds: 1_000_000)
+        }
+        XCTAssertEqual(listingsAsked(hub), ["en-CA", "en-us"], "the retry went out before the cancel")
+        pending.cancel()
+        do {
+            _ = try await pending.value
+            XCTFail("expected CancellationError")
+        } catch is CancellationError {
+        } catch {
+            XCTFail("unexpected error: \(error)")
+        }
+    }
+
+    func testAListingWithSentencesIsNotRetriedForItsKeywordRows() async throws {
+        let english = try XCTUnwrap(registrations["en-us"])
+        let hub = FakeHubTransport(
+            registered: ["en-ca": english, "en-us": english],
+            keywords: ["en-ca": scoutKeywords]
+        )
+        let inventory = try await client(hub).intents(languages: ["en-CA"])
+
+        XCTAssertEqual(listingsAsked(hub), ["en-CA"])
+        XCTAssertEqual(inventory.listedIn, ["en-CA"])
     }
 }
 

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`intents()` asks the language's usual form when the first listing has no sentences, not only when it is empty.** `nearest` retried `en-CA` as `en-us` only on an empty listing, and a listing of keyword intents alone is not empty but has nothing a person can say: the Pop Culture hub lists five Source Scout keyword intents under `en-CA` (that skill registers keyword vocabulary in 63 regional tags) and 141 intents with sentences under `en-US`, so a phone in Toronto was shown five names. Now the usual form is asked whenever the first listing has no enabled `template` row, and its listing is taken when it has one, or when the first was empty. A listing with a template row is still asked once, keyword names are never traded for other names, and a retry that times out (`ThalovantTimeoutError`) or is refused (`ThalovantRuntimeError`, `ThalovantPolicyDeniedError`, `ThalovantUnansweredError`) keeps the names the first listing gave; it fails as before only after an empty first listing. A `CancellationError` always propagates. Ports the Python reference's change (thalovant-python-sdk #103).
+
 ## 0.10.4
 
 Fixes the SDK failing to compile for iOS. `Noise.swift` and `Inventory.swift` called `FileManager.homeDirectoryForCurrentUser` for their fallback folders, which the iOS SDK marks unavailable, so every iOS build of a project depending on the package failed. Both fallbacks now use `NSHomeDirectory()`, which is the same user folder on macOS and Linux and the app container on iOS. The default folders are unchanged wherever the old call worked.
