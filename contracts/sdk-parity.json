@@ -179,13 +179,13 @@
     "listing": {
       "implementation": {
         "Sources/ThalovantSDK/Intents.swift": "7aee9665203381bb78640f2663fe6060b632369a0fd0584ddaa5ccfba7618b45",
-        "Sources/ThalovantSDK/Listing.swift": "bc1fb4cb834e48549aee379d0480e550353b08a7abd695cb1c852a271173a1a7"
+        "Sources/ThalovantSDK/Listing.swift": "5564b60daeae23b71b4408cad52c2c0d1ef1c1be41e6408f9a1cecaddd9b1273"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/Fixtures/question-vectors.json": "a6ae21cb27eac6a33cf1026677f0c36be50f0e13faa7ce724bedc9a3b8bb8386",
-        "Tests/ThalovantSDKTests/ListingTests.swift": "374fd87a4f5b3c6a9db413ec616026154ab4642f755328be4a1fb6dfdd1fa021"
+        "Tests/ThalovantSDKTests/ListingTests.swift": "db4d1c7667e17b19b7aa5d6c645967c5b6300c81c75016cce9492e1a87b97e53"
       },
       "vectors": {
         "question-vectors.json": "Tests/ThalovantSDKTests/Fixtures/question-vectors.json"

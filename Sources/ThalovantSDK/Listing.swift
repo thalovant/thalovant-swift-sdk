@@ -1,6 +1,8 @@
 import Foundation
-import Dispatch
 
+/// A rule needed more matching work than one listing rule is allowed. The bound
+/// counts work, not time, so the same rule on the same text is cut on every
+/// machine or on none.
 public enum ListingRuleError: Error { case regexBudgetExceeded }
 
 /// Value-owned language data and immutable Foundation regexes, safe for concurrent readers.
@@ -8,6 +10,25 @@ public final class ListingRules: @unchecked Sendable {
     public static let bundled = try! ListingRules(data: loadResource("listing"))
     public let available: Bool
     public let sentenceEnds: String
+    /// The longest text, in UTF-16 units, the rules are run on at all. A longer
+    /// one is cut before any rule runs: `asks` throws and `asSentence` leaves
+    /// the line bare. Listing phrases are sentences; the longest reference case
+    /// is 34 characters.
+    public static let maxRuleText = 1_000
+    /// The matching work one call may spend across all its rules, in progress
+    /// reports.
+    ///
+    /// NSRegularExpression (ICU) reports progress once per start position a
+    /// search advances over and once per fixed slice of backtracking work
+    /// (ICU's 10,000-step tick), never on a clock. An ordinary phrase costs
+    /// about one report per character per rule: at most 8,000 with the bundled
+    /// data at ``maxRuleText``. 10,000 is about a hundred million matcher
+    /// steps, so only a pathological rule is cut, and it is cut the same way
+    /// on every machine. This used to be a 100 ms wall-clock deadline, which a
+    /// slow machine overran on an ordinary phrase: macOS CI wrote "Como esta el
+    /// tiempo" with no full stop.
+    public static let defaultStepLimit = 10_000
+    internal let stepLimit: Int
     private let languages: [String: JSONValue]
     private let patterns: [String: [NSRegularExpression]]
     private let written: [String: [(NSRegularExpression,String)]]
@@ -29,7 +50,9 @@ public final class ListingRules: @unchecked Sendable {
         return try NSRegularExpression(pattern:result,options:ignoreCase ? [.caseInsensitive] : [])
     }
     /// Nil selects bare rendering. Invalid custom regexes fail construction.
-    public init(data: JSONObject?) throws {
+    public convenience init(data: JSONObject?) throws { try self.init(data: data, stepLimit: Self.defaultStepLimit) }
+    internal init(data: JSONObject?, stepLimit: Int) throws {
+        self.stepLimit = stepLimit
         available = data != nil
         sentenceEnds = data?["sentence_ends"]?.stringValue ?? ""
         languages = data?["languages"]?.objectValue ?? [:]
@@ -54,32 +77,34 @@ public final class ListingRules: @unchecked Sendable {
         guard let last = words(text.trimmingCharacters(in:CharacterSet(charactersIn:sentenceEnds+" "))).last else { return false }
         return wordSet(lang,"trailing_words").contains(last.lowercased())
     }
-    private func matches(_ pattern: NSRegularExpression, _ text: String, firstOnly: Bool, deadline: UInt64) throws -> [NSTextCheckingResult] {
-        guard DispatchTime.now().uptimeNanoseconds < deadline else { throw ListingRuleError.regexBudgetExceeded }
-        var found: [NSTextCheckingResult] = []; var interrupted = false
-        pattern.enumerateMatches(in:text,options:[.reportProgress,.reportCompletion],range:NSRange(text.startIndex...,in:text)) { match, flags, stop in
-            if DispatchTime.now().uptimeNanoseconds >= deadline || flags.contains(.internalError) { interrupted = true; stop.pointee = true; return }
-            if let match { found.append(match); if firstOnly { stop.pointee = true } }
+    /// Progress reports left for one call, shared by every rule it runs.
+    private final class Budget { var remaining: Int; init(_ remaining: Int) { self.remaining = remaining } }
+    private func matches(_ pattern: NSRegularExpression, _ text: String, firstOnly: Bool, budget: Budget) throws -> [NSTextCheckingResult] {
+        guard text.utf16.count <= Self.maxRuleText else { throw ListingRuleError.regexBudgetExceeded }
+        var found: [NSTextCheckingResult] = []; var exceeded = false
+        pattern.enumerateMatches(in:text,options:[.reportProgress],range:NSRange(text.startIndex...,in:text)) { match, flags, stop in
+            if flags.contains(.internalError) { exceeded = true; stop.pointee = true; return }
+            if let match { found.append(match); if firstOnly { stop.pointee = true }; return }
+            if flags.contains(.progress) { budget.remaining -= 1; if budget.remaining < 0 { exceeded = true; stop.pointee = true } }
         }
-        if interrupted { throw ListingRuleError.regexBudgetExceeded }; return found
+        if exceeded { throw ListingRuleError.regexBudgetExceeded }; return found
     }
-    /// Throws when a custom rule exceeds its bounded evaluation window.
-    public func asks(_ text: String, lang: String? = nil) throws -> Bool {
-        try asks(text, lang: lang, deadline: DispatchTime.now().uptimeNanoseconds + 100_000_000)
-    }
-    private func asks(_ text: String, lang: String?, deadline: UInt64) throws -> Bool {
+    /// Throws when the text is longer than ``maxRuleText`` or the rules need
+    /// more than ``defaultStepLimit`` progress reports on it.
+    public func asks(_ text: String, lang: String? = nil) throws -> Bool { try asks(text, lang: lang, budget: Budget(stepLimit)) }
+    private func asks(_ text: String, lang: String?, budget: Budget) throws -> Bool {
         if !available { return false }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if let last = text.unicodeScalars.last, Set<UInt32>([0x3f, 0xbf, 0x37e, 0x55e, 0x61f, 0x1367, 0x1945, 0x2047, 0x2049, 0x2753, 0x2754, 0x2a7b, 0x2a7c, 0x2cfa, 0x2cfb, 0x2e2e, 0x2e54, 0xa60f, 0xa6f7, 0xfe16, 0xfe56, 0xff1f, 0x11143, 0x1e95f, 0x1fbc4, 0xe003f]).contains(last.value) { return true }
         let rules = (lang == nil || lang == "") ? patterns.values.flatMap { $0 } : patterns[tag(lang) ?? ""] ?? []
-        for pattern in rules { if try !matches(pattern,text,firstOnly:true,deadline:deadline).isEmpty { return true } }
+        for pattern in rules { if try !matches(pattern,text,firstOnly:true,budget:budget).isEmpty { return true } }
         let words = words(text).map { $0.trimmingCharacters(in:CharacterSet(charactersIn:",;:!?.’'\"()")).lowercased() }.filter { !$0.isEmpty }
         let openers = wordSet(lang,"question_openers"); let anywhere = wordSet(lang,"question_words_anywhere")
         return words.first.map { openers.contains($0) } == true || words.contains { anywhere.contains($0) }
     }
     /// Unknown, dangling or failed rules leave a bare line instead of guessing marks.
     public func asSentence(_ raw: String, lang: String? = nil) -> String {
-        let deadline = DispatchTime.now().uptimeNanoseconds + 100_000_000
+        let budget = Budget(stepLimit)
         var text = raw.trimmingCharacters(in:.whitespacesAndNewlines)
         guard let first = text.unicodeScalars.first else { return text }
         let index = text.unicodeScalars.index(after:text.unicodeScalars.startIndex)
@@ -90,13 +115,13 @@ public final class ListingRules: @unchecked Sendable {
         do {
             for (pattern,replacement) in written[tag] ?? [] {
                 var next = ""; var previous = text.startIndex
-                for match in try matches(pattern,text,firstOnly:false,deadline:deadline) {
+                for match in try matches(pattern,text,firstOnly:false,budget:budget) {
                     guard let range = Range(match.range,in:text) else { return text }
                     next += text[previous..<range.lowerBound]; next += replacement; previous = range.upperBound
                 }
                 next += text[previous...]; text = next
             }
-            text += try asks(text,lang:lang,deadline:deadline) ? "?" : "."
+            text += try asks(text,lang:lang,budget:budget) ? "?" : "."
         } catch { return text }
         return text
     }
