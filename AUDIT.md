@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Record the sandboxed-macOS default-folder behaviour.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Note the chat-apps capability this SDK does not implement.
 
 # Audit
 
@@ -11,3 +11,8 @@ Known issues, technical debt and review decisions, each tied to the code that sh
 ## Open
 
 - None recorded.
+
+## Chat apps not covered (2026-11-03)
+
+- **What:** this SDK has no methods for the chat apps routes (`/v1/bridges`), which the Python, Node, Go and Rust SDKs and the MCP server cover. `contracts/sdk-parity.json` records `chat-apps` as not applicable.
+- **Status:** a scope decision, not a defect: the API's impact records for chat apps list no obligation here. Revisit if an app built on this SDK needs to manage chat apps.
