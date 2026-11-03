@@ -25,7 +25,7 @@
 
 ## 0.10.4
 
-Fixes the SDK failing to compile for iOS. `Noise.swift` and `Inventory.swift` called `FileManager.homeDirectoryForCurrentUser` for their fallback folders, which the iOS SDK marks unavailable, so every iOS build of a project depending on the package failed. Both fallbacks now use `NSHomeDirectory()`, which is the same user folder on macOS and Linux and the app container on iOS. The default folders are unchanged wherever the old call worked.
+Fixes the SDK failing to compile for iOS. `Noise.swift` and `Inventory.swift` called `FileManager.homeDirectoryForCurrentUser` for their fallback folders, which the iOS SDK marks unavailable, so every iOS build of a project depending on the package failed. Both fallbacks now use `NSHomeDirectory()`, which is the user's home folder on Linux and on an unsandboxed macOS app, and the app's container on iOS and in a sandboxed macOS app. The default folders are unchanged wherever the old call worked: a sandboxed macOS app got its container from `homeDirectoryForCurrentUser` too.
 
 ## 0.10.3
 
