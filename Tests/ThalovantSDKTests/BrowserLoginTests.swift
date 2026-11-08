@@ -919,6 +919,9 @@ final class BrowserLoginListenerTests: XCTestCase {
         }
         let accepted = await listener.wait(timeout: 5)
         XCTAssertEqual(accepted, .code("c"))
+        // The accepted tab is still held, and counts against the cap.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertLessThanOrEqual(listener.openConnections, LoopbackListener.maxConnections)
         listener.finish(signedIn: true)
         XCTAssertTrue(try RawHTTP.parse(tab.readAll()).body.contains("Signed in to Thalovant."))
         await listener.close()
@@ -1107,12 +1110,15 @@ final class TinyHTTPServer: @unchecked Sendable {
 
     /// Stops accepting, and ends every connection still open: a worker
     /// blocked reading one returns, and closes it.
+    ///
+    /// The shutdowns happen under the lock a worker takes to deregister its
+    /// connection before closing it, so a descriptor shut down here is always
+    /// still that connection's, never one another socket has reused.
     func stop() {
-        let connections = lock.locked { () -> Set<Int32> in
+        lock.locked {
             stopped = true
-            return open
+            for connection in open { Self.systemShutdown(connection) }
         }
-        for connection in connections { Self.systemShutdown(connection) }
         Self.systemShutdown(fd)
         Self.systemClose(fd)
     }

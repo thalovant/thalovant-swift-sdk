@@ -1,6 +1,40 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the macOS CI fix on #52 (IP hosts parsed as the reference does), with verification.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the last CodeRabbit round on #52, with verification.
 
 # Maintenance Report
+
+## 2026-11-08 — Browser sign-in: last CodeRabbit round on #52 (0.12.0)
+
+**What changed:** CodeRabbit's eight threads on `25b2047`.
+
+- **Fixed in code (2):**
+  - The connection cap now counts the accepted tab waiting for its page (`held` in `Loopback.swift`). Before, serving a ready callback while making room could let one more connection in, 65 in all. `testACallbackThatHasArrivedIsServedBeforeAnyConnectionIsClosed` now checks the cap.
+  - `TinyHTTPServer.stop()` shuts its connections down under the lock a worker takes to deregister one, so it can never shut down a descriptor another socket has reused.
+- **Fixed in the docs (3):**
+  - AUDIT.md's links now point at the lines they name; all 21 were checked against the code.
+  - The FAQ uses `interactiveLogin()`, which compiles, instead of `interactiveLogin(.auto)`.
+  - README, FAQ and CHANGELOG give both printed notices, `Opening your browser …` and, with `openBrowser: false`, `To sign in to Thalovant, visit:`.
+- **Answered (3):**
+  - A hex numeric label (`auth.0x1`) and a scoped IPv6 host (`[fe80::1%25eth0]`) stay usable. The reference's verdicts are the contract, and Swift's must match them.
+  - A JSON number is not scrubbed. The API mints codes with `secrets.token_urlsafe(32)`, and verifiers and states are base64url strings, all sent as JSON strings and echoed as such, so none can arrive as a number. The reference's `_scrub` reads strings alone.
+
+**Verification:**
+
+- `swift build` and `THALOVANT_CONFORMANCE_OUT=contracts/conformance-results.json swift test` (Linux, Swift 6.3.2): **490 tests, 0 failures**.
+- The CI's `swift:5.10` image (5.10.1), full `swift build` and `swift test` with the recorder: **490 tests, 0 failures**. It recorded a file identical to the committed one.
+- The conformance record is unchanged: `browser-login-vectors.json` 119/119 equals the reference's.
+- `check-sdk-parity.py`: verified against Python `39e31d8` (still the PR head) and `main` `44b6e2b`.
+- Evidence hashes were refreshed for `Loopback.swift` and `BrowserLoginTests.swift` only (browser-login); every other recorded hash was asserted unchanged.
+- macOS: decided by the hosted `test-macos` job on the pushed commit.
+
+### Transparency Report
+
+- **AI Model:** Claude Opus 5.5 (claude-opus-5-5), as a Claude Code agent working for the lead's cross-SDK rollout.
+- **Actions Taken:**
+  - Checked each thread against the code, the reference's verdicts and the API's code minting.
+  - Changed `Loopback.swift`, `BrowserLoginTests.swift` and the docs.
+  - Re-ran the suites and the recorder, and refreshed the changed files' hashes.
+  - Replied to and resolved each thread, and watched CI.
+- **Oversight:** hosted CI (macOS, Linux), the SDK parity workflow and the PR review gate the merge; only the lead merges.
 
 ## 2026-11-08 — Browser sign-in: the macOS CI failure on `bf70147` (0.12.0)
 

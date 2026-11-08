@@ -508,7 +508,7 @@ final class LoopbackListener: @unchecked Sendable {
                 return
             }
             Self.configure(connection)
-            if pending.count + draining.count >= Self.maxConnections {
+            if held >= Self.maxConnections {
                 makeRoom(&chunk)
             }
             let now = Self.now()
@@ -525,7 +525,8 @@ final class LoopbackListener: @unchecked Sendable {
         if !ready.isEmpty, poll(&ready, nfds_t(ready.count), 0) > 0 {
             for entry in ready where entry.revents != 0 { serve(entry.fd, &chunk) }
         }
-        guard pending.count + draining.count >= Self.maxConnections else { return }
+        // Served, a callback is accepted and its tab still held: it counts.
+        guard held >= Self.maxConnections else { return }
         if let oldest = pending.min(by: { $0.value.opened < $1.value.opened })?.key {
             pending[oldest] = nil
             systemClose(oldest)
@@ -645,8 +646,12 @@ final class LoopbackListener: @unchecked Sendable {
         systemClose(fd)
     }
 
+    /// Every connection the listener holds: waiting for a head, the accepted
+    /// tab waiting for its page, or being drained. The cap applies to this.
+    private var held: Int { pending.count + draining.count + (acceptedFD >= 0 ? 1 : 0) }
+
     private func publishCount() {
-        let count = pending.count + draining.count + (acceptedFD >= 0 ? 1 : 0)
+        let count = held
         lock.locked { connectionCount = count }
     }
 

@@ -108,11 +108,12 @@ let token = try await api.browserLogin(options: BrowserLoginOptions(
 ```
 
 - The URL is always shown as well as opened (`open` on macOS, `xdg-open` on
-  Linux). Without a `prompt` it is printed: `Opening your browser to sign in to
-  Thalovant. If it does not open, visit:` and the URL on the next line. A
-  `prompt` receives the URL **instead of** the print, so a command-line tool
-  that passes one must show the URL itself. `openBrowser: false` only shows it,
-  and `opener` opens it your own way.
+  Linux). Without a `prompt` it is printed, the URL on the line after:
+  `Opening your browser to sign in to Thalovant. If it does not open, visit:`
+  when the browser is opened, and `To sign in to Thalovant, visit:` with
+  `openBrowser: false`, which opens nothing. A `prompt` receives the URL
+  **instead of** the print, so a command-line tool that passes one must show
+  the URL itself. `opener` opens it your own way.
 - Denied in the browser throws `ThalovantDeviceLoginError.denied`; no answer
   within `timeout` seconds throws `ThalovantDeviceLoginError.expired`; a code
   the API will not exchange throws `ThalovantApiError` (`detail` is

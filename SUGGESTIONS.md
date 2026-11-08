@@ -34,7 +34,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Third CodeRabbit round on #52:
 
 ## Fall back to device login when the listener cannot start?
 
-- **Problem:** in a sandboxed macOS app without `com.apple.security.network.server`, `interactiveLogin(.auto)` throws, though a device login would work.
+- **Problem:** in a sandboxed macOS app without `com.apple.security.network.server`, `interactiveLogin()` (`.auto`) throws when it picks browser sign-in, though a device login would work.
 - **Proposal:** the porting brief (`39e31d8`) decided to keep this an error in every SDK, and that is the contract. If it is revisited, it changes for all SDKs at once, with a vector that injects a bind failure. Until then, README and FAQ tell such an app to add the entitlement or pass `method: .device`.
 - **Impact:** medium for sandboxed Mac apps; none elsewhere.
 
