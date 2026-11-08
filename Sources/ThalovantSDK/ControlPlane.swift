@@ -506,6 +506,12 @@ public final class ThalovantControlPlane {
         guard let url = URL(string: apiURL + trimmedPath) else {
             throw ThalovantApiError(message: "Invalid Thalovant API URL.")
         }
+        // Every request, and the token on it, stays on the API's origin:
+        // whatever the path says, the URL URLSession is handed must name the
+        // API's scheme, host and port.
+        guard let base = URL(string: apiURL), Self.origin(of: url) == Self.origin(of: base) else {
+            throw ThalovantApiError(message: "Refusing a request off the Thalovant API's origin.")
+        }
         guard ["https", "http"].contains(url.scheme?.lowercased() ?? "") else {
             throw ThalovantApiError(message: "Thalovant API URLs require HTTP or HTTPS.")
         }
@@ -577,7 +583,29 @@ public final class ThalovantControlPlane {
         return object
     }
 
+    /// A URL's origin: scheme, host and port, the default port spelled out.
+    static func origin(of url: URL) -> String {
+        let scheme = url.scheme?.lowercased() ?? ""
+        let port = url.port ?? ["https": 443, "http": 80][scheme] ?? -1
+        return "\(scheme)://\(url.host?.lowercased() ?? ""):\(port)"
+    }
+
     func perform(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        try await perform(request, on: session)
+    }
+
+    /// `perform(_:)` on a session of its own, so the request goes out on a
+    /// connection nothing used before. An HTTP stack that finds a reused
+    /// connection dead may send the request again on a fresh one; a
+    /// connection of its own leaves none to find dead. Same configuration and
+    /// delegate as every other request.
+    func performOnce(_ request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let single = URLSession(configuration: session.configuration, delegate: session.delegate, delegateQueue: nil)
+        defer { single.finishTasksAndInvalidate() }
+        return try await perform(request, on: single)
+    }
+
+    private func perform(_ request: URLRequest, on session: URLSession) async throws -> (Data, HTTPURLResponse) {
         let cancellation = HTTPRequestCancellation()
         let result: (Data, HTTPURLResponse) = try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()

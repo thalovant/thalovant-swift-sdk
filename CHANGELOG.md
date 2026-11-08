@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.12.0
+
+Browser sign-in, ported from the Python reference's final 0.11.0 producer (`browser-login`, thalovant-python-sdk #113 at `39e31d8`). A device code can be passed on: somebody reads it off one screen and types it in anywhere. With a loopback redirect, the browser that approves hands the code to its own computer's `127.0.0.1`, so a link or code sent to someone on another computer delivers nothing to the sender. A forwarded callback port (`ssh -L`) or another user of the same computer can still complete a sign-in. So on a machine with a browser the SDK now signs in through that browser, and device login stays the fallback for machines with none. Everything is additive: device login (`loginWithBrowser`, `beginDeviceLogin`, `pollDeviceLogin`, `describeDeviceLogin`, `revokeApiToken`) keeps its shapes, defaults, messages and behaviour.
+
+- **`browserLogin(options:)`** signs in with the OAuth authorization code grant and PKCE (S256 only, RFC 7636) on a loopback redirect (RFC 8252 section 7.3), and returns a `DeviceLoginResult`. It reads `GET /v1/auth/native/config` and binds `127.0.0.1` on port 0 before building the URL. It then opens `{authorization_endpoint}?response_type=code&client_id=…&redirect_uri=http://127.0.0.1:<port>/callback&code_challenge=…&code_challenge_method=S256&state=…&scope=…&device_name=…`, in that order, RFC 3986 percent-encoded.
+  - `scope` is left out when no non-empty scope is asked for.
+  - `device_name` is cut to 120 code points. A nil name is `thalovant-swift-sdk on <hostname>`; an empty one is left out, so the hostname stays off the consent page.
+  - The URL is always shown. Without a `prompt` it is printed, the URL on the next line: `Opening your browser to sign in to Thalovant. If it does not open, visit:` when the browser is opened, or `To sign in to Thalovant, visit:` with `openBrowser: false`. A `prompt` receives it **instead of** the print.
+  - `BrowserLoginOptions` takes `scopes`, `deviceName`, `openBrowser`, `timeout` (300 s), `prompt`, and an `opener` in place of `open`/`xdg-open`. The browser is opened off the waiting task.
+- **The listener** is POSIX sockets and `poll(2)` on a thread of its own, with no new dependency.
+  - It serves only `GET /callback`: anything else is a 404, and a `HEAD`'s 404 has headers and no body. A head that cannot be read, or is over 16 KiB, is a 400.
+  - A missing, repeated or wrong `state` (compared in constant time) is a 400, and the wait goes on.
+  - The first callback with the right state is accepted, and the port stops listening.
+  - Its tab waits as long as the sign-in takes, with no deadline of its own, and is answered once the sign-in has ended: `Signed in to Thalovant. You can close this tab.` or `Sign-in was not completed.`. Closing the listener answers it at once.
+  - Every answer sends `no-store`, `no-referrer`, `default-src 'none'` and `nosniff`, and the page loads nothing.
+  - After every answer the listener shuts its write side and drains what the browser still sends (at most 2 s and 1 MiB) before closing. Closing with bytes unread would reset the connection, and macOS would lose the answer.
+  - A connection that sends nothing never holds the sign-in. Connections are accepted in bounded batches, and past 64 the oldest idle one makes room.
+  - The listener writes nothing to a log.
+- **The exchange** sends exactly `code`, `code_verifier`, `client_id` and `redirect_uri` to the configuration's `token_endpoint`, once, on a connection of its own, so no HTTP stack can resend it on a fresh one. It keeps the token as a device login does (`accessToken` and `tokenId`, through `keepSignIn`), so `revokeApiToken()` revokes it the same way. The returned `tokenId` is read from the same answer as the token. `ai_disclosure` stays in `raw`.
+- **No request leaves the API's origin.** Every request the control plane builds is checked against the API's scheme, host and port, and refused with an error with no status otherwise.
+- **Errors reuse the device-login types.**
+  - Denied is `ThalovantDeviceLoginError.denied` and a timeout is `ThalovantDeviceLoginError.expired`.
+  - A refused exchange is a `ThalovantApiError` with the answer's own HTTP status and its api-errors fields: the API answers every way an exchange fails with 400, detail `invalid_grant`, and another status (a 422, a 503) is kept as sent. A transport failure, or a 2xx that is not a token, is a `ThalovantApiError` with no status.
+  - Another `error` from the consent page is a `ThalovantApiError` whose `errorCode` is kept only when it is one of RFC 6749's codes.
+  - A 404 on the configuration means an API without browser sign-in.
+  - A configuration that cannot be used safely is an error with no status:
+    - a dashboard that is not https (or loopback http), or that carries credentials, a query or a fragment;
+    - a dashboard on port 0 or above 65535;
+    - a dashboard host that is not an IPv6 address in brackets, an IPv4 address or an ASCII DNS name (`xn--` for international names). Addresses are read exactly as the reference's `ipaddress` reads them, on every platform, never by the platform's `inet_pton` (macOS's accepts `01.2.3.4`);
+    - a token endpoint that is not a path on the API (no colon, no broken `%`-escape);
+    - a bad `sdk_client_id`, or no S256.
+  - A cleartext API URL (neither https nor http on `localhost`, `127.0.0.1` or `::1`) is refused before anything is asked or opened, and a listener that cannot start is an error, in `interactiveLogin` too.
+  - Cancelling the task closes the port.
+  - The code, the verifier, the state and the token never reach an error. An API that echoes them back, as a 422 does, has them replaced by `[redacted]` before the message is built, in one pass that leaves no part of an overlapping value, in the message, body and problem. The error is always a new one.
+- **`interactiveLogin(options:)`** chooses the method.
+  - `LoginMethod.auto` (the default) uses the browser when this build has the listener (`BrowserLogin.isAvailable`: macOS and Linux), `BrowserLogin.canOpenBrowser()` allows it, and the configuration is usable. The `canOpenBrowser` rule: never with `CI`, `SSH_CONNECTION` or `SSH_TTY` set; macOS and Windows yes; elsewhere only with `DISPLAY` or `WAYLAND_DISPLAY`, an empty variable counting as unset.
+  - Otherwise it uses a device login, with `deviceName` as its `client_name` (an empty name sends none), and opens the verification page with the caller's `opener` off the polling task.
+  - `.browser` and `.device` force one. Once the browser has opened, its outcome stands.
+  - `timeout` defaults to each method's own: 300 s for the browser, 900 s for a device login.
+- **Platforms.** The listener runs on macOS and Linux. On iOS, tvOS, watchOS and visionOS, `browserLogin` is marked unavailable and `interactiveLogin` uses a device login (`.browser` throws). An app signs in with `NativeSignIn` and `ASWebAuthenticationSession`, as `thalovant-ios` does. A sandboxed macOS app needs `com.apple.security.network.server` to listen. The desktop-only tests are compiled for macOS and Linux only.
+- `BrowserLogin` holds the pieces, so each can be checked on its own: `authorizationURL`, `loopbackRedirectURI(port:)` (1024-65535), `newVerifier()` (86 characters), `newState()` (192 bits), `challenge(for:)`, `canOpenBrowser(environment:platform:)`, `platformName`, `defaultDeviceName()`, `isAvailable`, `sdkClientId` (`thalovant-sdk`), `defaultTimeout`, `maxDeviceNameLength` and `callbackPath`. `NativeSignInConfig(payload:)` reads the configuration.
+- **Vectors.** The suite runs `browser-login-vectors.json` (119 cases, byte-identical to the reference's).
+  - The pure sections run against the functions that decide them, and the callback cases also run through a real listener.
+  - `sign_ins` and `chooser` run for real, with a scripted API checking every request through URLSession and a raw TCP client playing the browser.
+  - The results are recorded in `contracts/conformance-results.json`, and every case digest matches the reference's.
+  - `contracts/sdk-parity.json` accepts the current reference digest `57c7e71f6456` and the final candidate `6dfb3bb31ac7`.
+
 ## 0.11.0
 
 - **`intents()` lists in one of the hub's own languages when the language asked has no sentences there.** A hub loads its `lang` and `secondary_langs` (en-US and fr-FR on most public hubs) and lists nothing under any other tag. On 2026-10-11 a phone set to Spanish, Japanese, or German saw an empty "What you can say" on every public hub, even though the hub answered those people in its own language. With `nearest` on (the default), when the language and its usual form both have no enabled `template` row, `ovos.intent.list` is now asked once per inventory with no `lang` (with `include_definitions` only when describing). That listing names every language the hub loaded. The inventory lists in the nearest of them and `listedIn` says which one: the same language in another region first (`en-CA` takes `en-GB`), then the hub's own language (from `context.session.lang` on the reply), then the language with the most sentences, the first listed on a tie. Two asked languages that land on the same listing share one key. A timeout, a refusal, or `ok: false` on that query leaves the result as it was; cancellation still propagates. `nearestHubLanguage(_:listed:hubLang:)` is public, and `HubIntentInventory.fromJSON` now reads `listed_in` back.
