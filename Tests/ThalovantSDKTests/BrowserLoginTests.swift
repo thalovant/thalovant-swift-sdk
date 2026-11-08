@@ -13,10 +13,11 @@ import Darwin
 #endif
 
 /// Browser sign-in beyond the shared vectors: what is shown and opened, the
-/// generated secrets, the listener's own edges, and what never reaches an
-/// error. `BrowserLoginVectorTests` runs the contract every SDK shares; these
-/// are the parts that are this SDK's own -- its threads, its sockets -- or
-/// that are about what must not happen.
+/// generated secrets, the configuration's own edges, the chooser's device
+/// path, and what never reaches an error. `BrowserLoginVectorTests` runs the
+/// contract every SDK shares; these are the parts that are this SDK's own, or
+/// that are about what must not happen. They run on every platform;
+/// `BrowserLoginListenerTests` below needs the loopback listener (macOS, Linux).
 final class BrowserLoginTests: XCTestCase {
     static let config = """
         {"authorization_endpoint": "https://dash.thalovant.com/authorize", "token_endpoint": "/v1/auth/native/token",
@@ -27,12 +28,313 @@ final class BrowserLoginTests: XCTestCase {
         {"access_token": "tvpat_unit_token", "token_type": "bearer", "scopes": ["hubs:read"],
          "expires_at": "2027-11-08T12:00:00Z", "token_id": "tok-unit", "ai_disclosure": "AI"}
         """
+    static let deviceGrant = """
+        {"device_code": "dc-unit", "user_code": "WDJB-MJHT", "verification_uri": "https://thalovant.com/activate",
+         "verification_uri_complete": "https://thalovant.com/activate?code=WDJB-MJHT", "interval": 0}
+        """
 
+    /// The device-login routes.
+    static func serveDeviceLogin() {
+        UnitApi.serve { _, path, _ in
+            switch path {
+            case "/v1/auth/device/authorize": return .init(200, Self.deviceGrant)
+            case "/v1/auth/device/token": return .init(200, Self.token)
+            default: return .init(599, "{}")
+            }
+        }
+    }
+
+    // MARK: What the person sees
+
+    func testTheNoticeShowsTheURLOnTheLineAfter() {
+        XCTAssertEqual(
+            BrowserLogin.notice(for: "https://x.test/a", openBrowser: true),
+            "Opening your browser to sign in to Thalovant. If it does not open, visit:\nhttps://x.test/a")
+        XCTAssertEqual(BrowserLogin.notice(for: "https://x.test/a", openBrowser: false), "To sign in to Thalovant, visit:\nhttps://x.test/a")
+    }
+
+    func testTheDeviceNameDefaultsToThisSDKOnThisHost() {
+        XCTAssertEqual(BrowserLogin.deviceName(host: "workstation"), "thalovant-swift-sdk on workstation")
+        XCTAssertEqual(BrowserLogin.deviceName(host: String(repeating: "h", count: 300)).unicodeScalars.count, 120)
+        XCTAssertEqual(BrowserLogin.deviceName(host: ""), "thalovant-swift-sdk")
+        XCTAssertTrue(BrowserLogin.defaultDeviceName().hasPrefix("thalovant-swift-sdk"))
+        XCTAssertLessThanOrEqual(BrowserLogin.defaultDeviceName().unicodeScalars.count, 120)
+        // Code points, not grapheme clusters: a flag is two of them.
+        XCTAssertEqual(BrowserLogin.truncatedToCodePoints("🇨🇦🇫🇷", 3).unicodeScalars.count, 3)
+    }
+
+    // MARK: The secrets
+
+    func testEveryVerifierAndStateIsFreshAndWellFormed() {
+        let verifiers = Set((0..<50).map { _ in BrowserLogin.newVerifier() })
+        let states = Set((0..<50).map { _ in BrowserLogin.newState() })
+        XCTAssertEqual(verifiers.count, 50)
+        XCTAssertEqual(states.count, 50)
+        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        let base64URL = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
+        for verifier in verifiers {
+            XCTAssertEqual(verifier.count, 86)
+            XCTAssertTrue(verifier.unicodeScalars.allSatisfy(unreserved.contains))
+        }
+        for state in states {
+            // 24 random bytes: 192 bits, well over the 128 the contract asks for.
+            XCTAssertEqual(state.count, 32)
+            XCTAssertTrue(state.unicodeScalars.allSatisfy(base64URL.contains))
+        }
+        XCTAssertEqual(BrowserLogin.challenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+                       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+    }
+
+    func testScrubbingIsOnePassAndLeavesItsMarkerAlone() {
+        let hidden = ["abc", "abcdef", "c"]
+        XCTAssertEqual(redacting("xx-abc-abcdef-[redacted]", hidden), "xx-[redacted]-[redacted]-[redacted]")
+        let once = redacting(.object(["seen:abcdef": ["c", ["deep": "abc"]]]), hidden)
+        XCTAssertEqual(once, .object(["seen:[redacted]": ["[redacted]", ["deep": "[redacted]"]]]))
+        XCTAssertEqual(redacting(once, hidden), once)
+        XCTAssertEqual(redacting("nothing hidden", []), "nothing hidden")
+        // A short value inside a longer one cannot break the longer one up, in
+        // either order, and overlapping values leave nothing of either.
+        XCTAssertEqual(redacting("zabq", ["ab", "zabq"]), "[redacted]")
+        XCTAssertEqual(redacting("zabq", ["zabq", "ab"]), "[redacted]")
+        XCTAssertEqual(redacting("<abcde>", ["abc", "cde"]), "<[redacted]>")
+        XCTAssertEqual(redacting("a[redacted]b", ["a[redacted]b"]), "a[redacted]b")
+    }
+
+    func testScrubbingMakesANewErrorFromTheScrubbedFieldsAlone() {
+        let original = ThalovantApiError(
+            message: "failed for code-123", statusCode: 422,
+            body: #"{"detail": [{"input": "code-123"}], "seen:code-123": "x"}"#)
+        let clean = original.withoutSecrets(["code-123"])
+        XCTAssertEqual(clean.statusCode, 422)
+        let shown = printedForms(clean) + [clean.body ?? "", String(describing: clean.problem)]
+        XCTAssertFalse(shown.contains { $0.contains("code-123") })
+        XCTAssertEqual(clean.problem?["seen:[redacted]"], "x")
+        XCTAssertEqual(clean.message, "failed for [redacted]")
+    }
+
+    func testOnlyRFC6749ErrorsAreKeptFromACallback() {
+        let state = "Xx0-_yLq7m3Vw9ZtR2cKp4HdN8sFjB6a"
+        for error in ["invalid_request", "unauthorized_client", "unsupported_response_type", "invalid_scope",
+                      "server_error", "temporarily_unavailable"] {
+            XCTAssertEqual(classifyLoopbackRequest(method: "GET", target: "/callback?error=\(error)&state=\(state)", state: state).callback,
+                           .failed(error: error))
+        }
+        for error in ["not-an-oauth-code", state, "denied-\(state)", "Server_Error", "access_denied%20"] {
+            let (status, callback) = classifyLoopbackRequest(
+                method: "GET", target: "/callback?error=\(error)&state=\(state)", state: state)
+            XCTAssertEqual(status, 200)
+            XCTAssertEqual(callback, .failed(error: nil), error)
+        }
+    }
+
+    func testACallbackIsNeverPrintedWithItsCode() {
+        XCTAssertFalse(String(describing: LoopbackCallback.code("nc_secret")).contains("nc_secret"))
+        XCTAssertFalse(String(reflecting: LoopbackCallback.code("nc_secret")).contains("nc_secret"))
+    }
+
+    // MARK: No request leaves the API
+
+    func testNoRequestLeavesTheAPIOrigin() throws {
+        let plane = UnitApi.controlPlane()
+        let api = try XCTUnwrap(URL(string: plane.apiURL))
+        // Joined by concatenation onto the API's own address: whatever the
+        // path says, the host is the API's, and so is the token.
+        for path in ["/https://elsewhere.example/v1/x", "/elsewhere.example:443/v1/x", "https://elsewhere.example/v1/x",
+                     "//elsewhere.example/v1/x", "/v1/x@elsewhere.example", "/%2F%2Felsewhere.example/x"] {
+            let request = try plane.buildRequest("GET", path, auth: false)
+            XCTAssertEqual(ThalovantControlPlane.origin(of: try XCTUnwrap(request.url)), ThalovantControlPlane.origin(of: api), path)
+        }
+        let origin = ThalovantControlPlane.origin
+        XCTAssertEqual(origin(URL(string: "https://API.example.com/x")!), origin(URL(string: "https://api.example.com:443/y")!))
+        XCTAssertNotEqual(origin(URL(string: "https://api.example.com/x")!), origin(URL(string: "https://api.example.com:8443/x")!))
+        XCTAssertNotEqual(origin(URL(string: "https://api.example.com/x")!), origin(URL(string: "http://api.example.com/x")!))
+        XCTAssertNotEqual(origin(URL(string: "https://api.example.com/x")!), origin(URL(string: "https://elsewhere.example/x")!))
+    }
+
+    // MARK: The token
+
+    func testTheTokenIdComesFromTheExchangeAnswer() throws {
+        let plane = UnitApi.controlPlane()
+        plane.tokenId = "an-earlier-token"
+        let kept = try plane.browserTokenResult(["access_token": "tvpat_a", "token_id": "tok-a", "token_type": "bearer"])
+        XCTAssertEqual(kept.tokenId, "tok-a")
+        XCTAssertEqual(plane.accessToken, "tvpat_a")
+        XCTAssertEqual(plane.tokenId, "tok-a")
+        XCTAssertNil(try plane.browserTokenResult(["access_token": "tvpat_b", "token_id": ""]).tokenId)
+        XCTAssertNil(try plane.browserTokenResult(["access_token": "tvpat_c"]).tokenId)
+        XCTAssertNil(plane.tokenId)
+        XCTAssertThrowsError(try plane.browserTokenResult(["token_type": "bearer"])) { error in
+            XCTAssertNil((error as? ThalovantApiError)?.statusCode)
+        }
+    }
+
+    // MARK: The chooser's device path
+
+    func testADeviceLoginChosenByTheChooserOpensItsPageWithTheOpener() async throws {
+        Self.serveDeviceLogin()
+        let opened = LockedBox<String>()
+        let plane = UnitApi.controlPlane()
+        let token = try await plane.interactiveLogin(options: InteractiveLoginOptions(
+            method: .device, deviceName: "unit", opener: { opened.setOnce($0.absoluteString) }))
+        XCTAssertEqual(token.tokenId, "tok-unit")
+        try await eventually { opened.value != nil }
+        XCTAssertEqual(opened.value, "https://thalovant.com/activate?code=WDJB-MJHT")
+        XCTAssertEqual(UnitApi.requests, ["POST /v1/auth/device/authorize", "POST /v1/auth/device/token"])
+    }
+
+    /// An opener that waits for a console browser to exit holds neither the
+    /// polls nor their timeout.
+    func testTheChoosersDeviceOpenerDoesNotHoldThePolls() async throws {
+        Self.serveDeviceLogin()
+        let release = DispatchSemaphore(value: 0)
+        let opened = LockedBox<Bool>()
+        let plane = UnitApi.controlPlane()
+        let started = ProcessInfo.processInfo.systemUptime
+        let token = try await plane.interactiveLogin(options: InteractiveLoginOptions(
+            method: .device, deviceName: "unit", opener: { _ in
+                opened.setOnce(true)
+                _ = release.wait(timeout: .now() + 10)
+            }))
+        XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
+        release.signal()
+        XCTAssertEqual(token.accessToken, "tvpat_unit_token")
+        try await eventually { opened.value == true }
+    }
+
+    func testAnEmptyDeviceNameIsNotSentToADeviceLogin() async throws {
+        UnitApi.serve { _, path, _ in
+            path == "/v1/auth/device/authorize" ? .init(200, Self.deviceGrant) : .init(200, Self.token)
+        }
+        let plane = UnitApi.controlPlane()
+        try await plane.interactiveLogin(options: InteractiveLoginOptions(method: .device, deviceName: "", openBrowser: false))
+        XCTAssertEqual(UnitApi.bodies.first, .object([:]))
+        try await plane.interactiveLogin(options: InteractiveLoginOptions(method: .device, openBrowser: false))
+        XCTAssertEqual(UnitApi.bodies.dropFirst(2).first??["client_name"], .string(BrowserLogin.defaultDeviceName()))
+    }
+
+    #if !(os(macOS) || os(Linux))
+    /// No loopback listener here: the chooser signs in with a device login,
+    /// and a forced browser sign-in says why it cannot.
+    func testWithoutAListenerTheChooserUsesDeviceLogin() async throws {
+        XCTAssertFalse(BrowserLogin.isAvailable)
+        Self.serveDeviceLogin()
+        let plane = UnitApi.controlPlane()
+        var auto = InteractiveLoginOptions(openBrowser: false)
+        auto.environment = ["DISPLAY": ":0"]
+        auto.platform = "macos"
+        let token = try await plane.interactiveLogin(options: auto)
+        XCTAssertEqual(token.tokenId, "tok-unit")
+        XCTAssertFalse(UnitApi.requests.contains("GET /v1/auth/native/config"))
+        do {
+            try await plane.interactiveLogin(options: InteractiveLoginOptions(method: .browser, openBrowser: false))
+            XCTFail("expected browser sign-in to be unavailable")
+        } catch let error as ThalovantApiError {
+            XCTAssertNil(error.statusCode)
+        }
+    }
+    #endif
+
+    // MARK: The remaining edges
+
+    func testThisMachineIsNamedAsTheBrowserRuleNamesIt() {
+        #if os(Linux)
+        XCTAssertEqual(BrowserLogin.platformName, "linux")
+        XCTAssertTrue(BrowserLogin.isAvailable)
+        #elseif os(macOS)
+        XCTAssertEqual(BrowserLogin.platformName, "macos")
+        XCTAssertTrue(BrowserLogin.isAvailable)
+        #endif
+    }
+
+    func testTheBrowserRuleReadsThisProcessByDefault() {
+        XCTAssertEqual(
+            BrowserLogin.canOpenBrowser(),
+            BrowserLogin.canOpenBrowser(environment: ProcessInfo.processInfo.environment, platform: BrowserLogin.platformName))
+        XCTAssertFalse(BrowserLogin.canOpenBrowser(environment: [:], platform: "ios"))
+        XCTAssertFalse(BrowserLogin.canOpenBrowser(environment: [:], platform: "linux"))
+    }
+
+    func testAnAuthorizationEndpointNoBrowserCanOpenIsUnusable() {
+        for endpoint in ["https://dash.thalovant.com/author\u{07}ize", "https://dash.thalovant.com /authorize",
+                         "https://dash.thalovant.com:99999/authorize", "https://[::1/authorize", "https://dash.thalovant.com:8x/authorize",
+                         "https://[127.0.0.1]/authorize", "https:dash.thalovant.com/authorize", "https:///authorize",
+                         "ftp://dash.thalovant.com/authorize", "http://[::2]/authorize", "https://dash.thalovant.com/a\u{2028}b",
+                         "https://dash.thalovant.com/authorize?", "1https://dash.thalovant.com/authorize",
+                         // Anything around the brackets but an optional port.
+                         "http://[::1]junk/authorize", "http://[::1]junk:5173/authorize", "https://x[::1]/authorize",
+                         "https://[::1]:0/authorize",
+                         // Port 0, and hosts that are not a real hostname or address.
+                         "https://dash.thalovant.com:0/authorize", "https://%/authorize", "https://dash..thalovant.com/authorize",
+                         "https://dash_staging.thalovant.com/authorize", "https://dash.thalovânt.com/authorize",
+                         "https://999.1.1.1/authorize", "https://1.2.3/authorize", "https://01.2.3.4/authorize",
+                         "https://dash.thalovant.com./authorize", "https://-dash.thalovant.com/authorize",
+                         "https://\(String(repeating: "a", count: 64)).example/authorize"] {
+            XCTAssertFalse(NativeSignInConfig.usableAuthorizationEndpoint(endpoint), endpoint)
+        }
+        for endpoint in ["https://dash.thalovant.com/authorize", "HTTPS://Dash.Thalovant.com/authorize", "http://[::1]:5173/authorize",
+                         "http://LOCALHOST:5173/authorize", "https://[2001:db8::1]:8443/authorize", "https://dash.thalovant.com:/authorize",
+                         "http://127.0.0.1/authorize", "https://[::1]/authorize", "https://192.0.2.10/authorize",
+                         "https://xn--dsh-0na.example/authorize", "https://dash.thalovant.com:65535/authorize",
+                         "https://1.example/authorize", "https://[::1]:/authorize"] {
+            XCTAssertTrue(NativeSignInConfig.usableAuthorizationEndpoint(endpoint), endpoint)
+        }
+    }
+
+    func testATokenEndpointAndAClientIdAreReadStrictly() {
+        for path in ["/v1/auth/native/token", "/v1/auth/native/%74oken", "/v1/%2F%2fx"] {
+            XCTAssertTrue(NativeSignInConfig.usableTokenEndpoint(path), path)
+        }
+        for path in ["v1/auth/native/token", "//evil/x", "/v1/x#y", "/v1\\x", "/v1/ x", "/v1/x\u{85}",
+                     "/https://collector.example/token", "/collector.example:443/token", "/v1/a:b",
+                     "/v1/auth/native/%zz", "/v1/auth/native/token%", "/v1/%4", "/v1/%G1"] {
+            XCTAssertFalse(NativeSignInConfig.usableTokenEndpoint(path), path)
+        }
+        XCTAssertTrue(NativeSignInConfig.usableClientId("thalovant-sdk_2.x"))
+        for id in ["", String(repeating: "a", count: 65), "thalovant sdk", "thalovant/sdk", "thålovant"] {
+            XCTAssertFalse(NativeSignInConfig.usableClientId(id), id)
+        }
+    }
+
+    func testAConfigurationThatIsNotAnObjectIsUnusable() {
+        for payload: JSONValue in [["not", "an", "object"], .null, "config", 1] {
+            XCTAssertThrowsError(try NativeSignInConfig(payload: payload)) { error in
+                XCTAssertNil((error as? ThalovantApiError)?.statusCode)
+            }
+        }
+        XCTAssertNil(try NativeSignInConfig(response: [
+            "authorization_endpoint": "https://dash.thalovant.com/authorize", "token_endpoint": "/v1/auth/native/token",
+            "sdk_client_id": "thalovant-sdk", "code_challenge_methods_supported": ["S256"],
+        ]).deviceAuthorizationEndpoint)
+    }
+
+    func testQueryValuesAreDecodedOnceAsAFormDecodesThem() {
+        XCTAssertEqual(formDecode("a%2Bb%2Fc%3D%2541"), "a+b/c=%41")
+        XCTAssertEqual(formDecode("a+b"), "a b")
+        XCTAssertEqual(formDecode("%G1%4"), "%G1%4")
+        XCTAssertEqual(formDecode("%C3%A9t%C3%A9"), "été")
+        XCTAssertEqual(formDecode("%E9"), "\u{FFFD}")
+        XCTAssertEqual(loopbackFormPairs("a&&b=&=c&d=1=2").map { [$0.0, $0.1] }, [["a", ""], ["b", ""], ["", "c"], ["d", "1=2"]])
+    }
+
+    func testAHeadAnswerCarriesTheHeadersAndNoBody() {
+        let full = loopbackResponse(status: 404, text: loopbackNotFoundText)
+        let head = loopbackResponse(status: 404, text: loopbackNotFoundText, head: true)
+        let text = String(decoding: head, as: UTF8.self)
+        XCTAssertTrue(text.hasSuffix("\r\n\r\n"))
+        XCTAssertTrue(text.contains("Content-Length: \(Array(loopbackPage(loopbackNotFoundText).utf8).count)\r\n"))
+        XCTAssertEqual(Array(full.prefix(head.count)), head)
+    }
+}
+
+#if os(macOS) || os(Linux)
+
+/// The loopback listener and `browserLogin`, for real: macOS and Linux.
+final class BrowserLoginListenerTests: XCTestCase {
     /// The config and token routes; the token route answers with `token`.
     private func serve(token: @escaping @Sendable (JSONValue?) -> UnitApi.Answer = { _ in .init(200, BrowserLoginTests.token) }) {
         UnitApi.serve { _, path, body in
             switch path {
-            case "/v1/auth/native/config": return .init(200, Self.config)
+            case "/v1/auth/native/config": return .init(200, BrowserLoginTests.config)
             case "/v1/auth/native/token": return token(body)
             default: return .init(599, "{}")
             }
@@ -64,13 +366,6 @@ final class BrowserLoginTests: XCTestCase {
 
     // MARK: What the person sees
 
-    func testTheNoticeShowsTheURLOnTheLineAfter() {
-        XCTAssertEqual(
-            BrowserLogin.notice(for: "https://x.test/a", openBrowser: true),
-            "Opening your browser to sign in to Thalovant. If it does not open, visit:\nhttps://x.test/a")
-        XCTAssertEqual(BrowserLogin.notice(for: "https://x.test/a", openBrowser: false), "To sign in to Thalovant, visit:\nhttps://x.test/a")
-    }
-
     /// A console browser can hold the call until it exits. This one plays the
     /// tab and then holds on until the sign-in has returned, which it could not
     /// do if it were opened on the waiting path.
@@ -95,8 +390,7 @@ final class BrowserLoginTests: XCTestCase {
                 _ = release.wait(timeout: .now() + 10)
             })
         let token = try await plane.browserLogin(options: options)
-        // Opened on the waiting path, the tab would have been told the sign-in
-        // was not completed, a minute later.
+        // Opened on the waiting path, the sign-in would never have ended.
         XCTAssertLessThan(ProcessInfo.processInfo.systemUptime - started, 5)
         release.signal()
         XCTAssertEqual(token.accessToken, "tvpat_unit_token")
@@ -124,20 +418,10 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertNil(plane.accessToken)
     }
 
-    func testTheDeviceNameDefaultsToThisSDKOnThisHost() {
-        XCTAssertEqual(BrowserLogin.deviceName(host: "workstation"), "thalovant-swift-sdk on workstation")
-        XCTAssertEqual(BrowserLogin.deviceName(host: String(repeating: "h", count: 300)).unicodeScalars.count, 120)
-        XCTAssertEqual(BrowserLogin.deviceName(host: ""), "thalovant-swift-sdk")
-        XCTAssertTrue(BrowserLogin.defaultDeviceName().hasPrefix("thalovant-swift-sdk"))
-        XCTAssertLessThanOrEqual(BrowserLogin.defaultDeviceName().unicodeScalars.count, 120)
-        // Code points, not grapheme clusters: a flag is two of them.
-        XCTAssertEqual(BrowserLogin.truncatedToCodePoints("🇨🇦🇫🇷", 3).unicodeScalars.count, 3)
-    }
-
     func testTheDefaultDeviceNameReachesTheConsentPage() async throws {
         serve()
         let plane = UnitApi.controlPlane()
-        let (task, _, _, query) = try await begin(plane, BrowserLoginOptions(deviceName: "", openBrowser: false, timeout: 0.2))
+        let (task, _, _, query) = try await begin(plane, BrowserLoginOptions(openBrowser: false, timeout: 0.2))
         XCTAssertEqual(query["device_name"], BrowserLogin.defaultDeviceName())
         XCTAssertNil(query["scope"], "no scopes asked for: the API's default")
         guard case .failure(ThalovantDeviceLoginError.expired) = await task.value else {
@@ -145,27 +429,15 @@ final class BrowserLoginTests: XCTestCase {
         }
     }
 
-    // MARK: The secrets
-
-    func testEveryVerifierAndStateIsFreshAndWellFormed() {
-        let verifiers = Set((0..<50).map { _ in BrowserLogin.newVerifier() })
-        let states = Set((0..<50).map { _ in BrowserLogin.newState() })
-        XCTAssertEqual(verifiers.count, 50)
-        XCTAssertEqual(states.count, 50)
-        let unreserved = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        let base64URL = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_")
-        for verifier in verifiers {
-            XCTAssertEqual(verifier.count, 86)
-            XCTAssertTrue(verifier.unicodeScalars.allSatisfy(unreserved.contains))
-        }
-        for state in states {
-            // 24 random bytes: 192 bits, well over the 128 the contract asks for.
-            XCTAssertEqual(state.count, 32)
-            XCTAssertTrue(state.unicodeScalars.allSatisfy(base64URL.contains))
-        }
-        XCTAssertEqual(BrowserLogin.challenge(for: "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
-                       "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+    func testAnEmptyDeviceNameKeepsTheHostnameOffTheConsentPage() async throws {
+        serve()
+        let plane = UnitApi.controlPlane()
+        let (task, _, _, query) = try await begin(plane, BrowserLoginOptions(deviceName: "", openBrowser: false, timeout: 0.2))
+        XCTAssertNil(query["device_name"])
+        _ = await task.value
     }
+
+    // MARK: The secrets
 
     func testAnEchoedCodeAndVerifierNeverReachTheError() async throws {
         let sent = LockedBox<JSONObject>()
@@ -200,6 +472,56 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertNil(plane.accessToken)
     }
 
+    /// The detail is redacted before the bounded message is made of it.
+    func testAMessageCutToLengthKeepsNoPartOfASecret() async throws {
+        let sent = LockedBox<String>()
+        serve(token: { body in
+            let verifier = body?["code_verifier"]?.stringValue ?? ""
+            sent.setOnce(verifier)
+            // The verifier starts ten characters before the message's 200-character cut.
+            let detail: JSONObject = ["detail": .string(String(repeating: "a", count: 190) + verifier)]
+            return .init(400, (try? ThalovantJSON.encodeToString(detail)) ?? "{}")
+        })
+        let plane = UnitApi.controlPlane()
+        let (task, port, state, _) = try await begin(plane)
+        _ = try await RawHTTP.request(port: port, method: "GET", target: "/callback?code=c&state=\(state)")
+        guard case .failure(let failure) = await task.value, let error = failure as? ThalovantApiError else {
+            return XCTFail("expected the API's refusal")
+        }
+        XCTAssertEqual(error.statusCode, 400)
+        let prefix = String(try XCTUnwrap(sent.value).prefix(10))
+        for shown in printedForms(error) + [error.detail ?? "", error.body ?? "", String(describing: error.problem)] {
+            XCTAssertFalse(shown.contains(prefix), shown)
+        }
+        XCTAssertEqual(error.detail, String(repeating: "a", count: 190) + "[redacted]")
+    }
+
+    /// A transport failure's description can carry the request; the error
+    /// thrown does not.
+    func testATransportFailureDuringTheExchangeCarriesNothingOfTheRequest() async throws {
+        UnitApi.serve { _, path, body in
+            if path == "/v1/auth/native/config" { return .init(200, BrowserLoginTests.config) }
+            return .failure("connection reset while sending \((try? ThalovantJSON.encodeToString(body?.objectValue ?? [:])) ?? "")")
+        }
+        let plane = UnitApi.controlPlane()
+        let (task, port, state, _) = try await begin(plane)
+        _ = try await RawHTTP.request(port: port, method: "GET", target: "/callback?code=transport-code&state=\(state)")
+        guard case .failure(let failure) = await task.value, let error = failure as? ThalovantApiError else {
+            return XCTFail("expected a transport failure")
+        }
+        XCTAssertNil(error.statusCode)
+        let verifier = try XCTUnwrap(UnitApi.bodies.last??["code_verifier"]?.stringValue)
+        for shown in printedForms(error) + [error.body ?? "", String(describing: error.problem)] {
+            for secret in ["transport-code", verifier, state] {
+                XCTAssertFalse(shown.contains(secret), shown)
+            }
+        }
+        if error.message.contains("connection reset") {
+            // The transport's own description came through, scrubbed.
+            XCTAssertTrue(error.message.contains("[redacted]"), error.message)
+        }
+    }
+
     func testACleartextAPIIsRefusedBeforeAnythingIsAskedOrOpened() async throws {
         serve()
         let opened = LockedBox<String>()
@@ -228,25 +550,49 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertNil(opened.value)
     }
 
-    func testADeviceLoginChosenByTheChooserOpensItsPageWithTheOpener() async throws {
-        UnitApi.serve { _, path, _ in
-            switch path {
-            case "/v1/auth/device/authorize":
-                return .init(200, """
-                    {"device_code": "dc-unit", "user_code": "WDJB-MJHT", "verification_uri": "https://thalovant.com/activate",
-                     "verification_uri_complete": "https://thalovant.com/activate?code=WDJB-MJHT", "interval": 0}
-                    """)
-            case "/v1/auth/device/token": return .init(200, Self.token)
-            default: return .init(599, "{}")
-            }
-        }
-        let opened = LockedBox<String>()
+    // MARK: The exchange
+
+    /// The configuration refuses such an endpoint; past it, the request layer
+    /// still keeps the exchange on the API's origin.
+    func testTheExchangeNeverLeavesTheAPIOrigin() async throws {
+        serve()
         let plane = UnitApi.controlPlane()
-        let token = try await plane.interactiveLogin(options: InteractiveLoginOptions(
-            method: .device, deviceName: "unit", opener: { opened.setOnce($0.absoluteString) }))
-        XCTAssertEqual(token.tokenId, "tok-unit")
-        XCTAssertEqual(opened.value, "https://thalovant.com/activate?code=WDJB-MJHT")
-        XCTAssertEqual(UnitApi.requests, ["POST /v1/auth/device/authorize", "POST /v1/auth/device/token"])
+        let config = NativeSignInConfig(
+            authorizationEndpoint: "https://dash.thalovant.com/authorize",
+            tokenEndpoint: "/http://127.0.0.1:9/v1/auth/native/token", sdkClientId: "thalovant-sdk")
+        _ = try? await plane.exchangeBrowserCode(
+            config, code: "c", verifier: String(repeating: "v", count: 43), redirectURI: "http://127.0.0.1:1024/callback",
+            hidden: ["c"])
+        let api = try XCTUnwrap(URL(string: plane.apiURL))
+        XCTAssertEqual(UnitApi.urls.count, 1)
+        for url in UnitApi.urls {
+            XCTAssertEqual(ThalovantControlPlane.origin(of: url), ThalovantControlPlane.origin(of: api))
+        }
+    }
+
+    /// A reused connection found dead can make an HTTP stack send the request
+    /// again on a fresh one; the exchange goes out on a connection of its own,
+    /// once, and a code presented twice would revoke the first token.
+    func testTheExchangeIsSentOnceEvenWhenItsConnectionDies() async throws {
+        let server = try TinyHTTPServer { method, path in
+            if method == "GET" && path == "/v1/auth/native/config" { return .answer(BrowserLoginTests.config) }
+            return .hangUp
+        }
+        defer { server.stop() }
+        let plane = ThalovantControlPlane(apiURL: "http://127.0.0.1:\(server.port)")
+        let (task, port, state, _) = try await begin(plane)
+        let tab = try await RawHTTP.request(port: port, method: "GET", target: "/callback?code=c&state=\(state)")
+        XCTAssertEqual(tab.status, 200)
+        guard case .failure(let failure) = await task.value, let error = failure as? ThalovantApiError else {
+            return XCTFail("expected the exchange to fail")
+        }
+        XCTAssertNil(error.statusCode)
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(server.requests.filter { $0.hasPrefix("POST ") }, ["POST /v1/auth/native/token"])
+        // Not on the connection the configuration came over, which is still open.
+        let config = try XCTUnwrap(server.connection(of: "GET /v1/auth/native/config"))
+        let exchange = try XCTUnwrap(server.connection(of: "POST /v1/auth/native/token"))
+        XCTAssertNotEqual(config, exchange)
     }
 
     // MARK: The listener's own edges
@@ -295,6 +641,28 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertEqual(token.accessToken, "tvpat_unit_token")
     }
 
+    func testAnAnswerThatIsNotJSONIsAnErrorWithNoStatus() async throws {
+        for route in ["config", "token"] {
+            UnitApi.serve { _, path, _ in
+                if path == "/v1/auth/native/\(route)" { return .init(200, "<html>not json</html>", contentType: "text/html") }
+                return path == "/v1/auth/native/config" ? .init(200, BrowserLoginTests.config) : .init(200, BrowserLoginTests.token)
+            }
+            let plane = UnitApi.controlPlane()
+            let failure: Error?
+            if route == "token" {
+                let (task, port, state, _) = try await begin(plane)
+                let tab = try await RawHTTP.request(port: port, method: "GET", target: "/callback?code=c&state=\(state)")
+                XCTAssertEqual(tab.status, 200)
+                if case .failure(let error) = await task.value { failure = error } else { failure = nil }
+            } else {
+                do { try await plane.browserLogin(options: BrowserLoginOptions(openBrowser: false)); failure = nil } catch { failure = error }
+            }
+            let error = try XCTUnwrap(failure as? ThalovantApiError, route)
+            XCTAssertNil(error.statusCode, route)
+            XCTAssertNil(error.errorCode, route)
+        }
+    }
+
     func testASecondAnswerAfterTheFirstIsTurnedAway() async throws {
         let listener = LoopbackListener(state: "the-state-of-this-sign-in")
         let port = try listener.start()
@@ -327,6 +695,14 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(took, 0.25)
     }
 
+    func testAWaitIsOverAtItsDeadline() {
+        // The rule the loop and the acceptance of a callback share: a callback
+        // read once the deadline has passed is not the wait's any more.
+        XCTAssertFalse(LoopbackListener.waitIsOver(deadline: 10, now: 9))
+        XCTAssertTrue(LoopbackListener.waitIsOver(deadline: 10, now: 10))
+        XCTAssertTrue(LoopbackListener.waitIsOver(deadline: 10, now: 11))
+    }
+
     func testWaitingOnAListenerThatWasNeverStartedIsNoCallback() async {
         let listener = LoopbackListener(state: "s")
         let callback = await listener.wait(timeout: 5)
@@ -334,8 +710,8 @@ final class BrowserLoginTests: XCTestCase {
         await listener.close()
     }
 
-    func testAConnectionThatClosesBeforeItsAnswerChangesNothing() async throws {
-        let listener = LoopbackListener(state: "the-state", answerTimeout: 0.05)
+    func testAConnectionThatClosesBeforeItsHeadChangesNothing() async throws {
+        let listener = LoopbackListener(state: "the-state")
         let port = try listener.start()
         // Gone before sending a whole request head.
         let gone = try RawConnection(port: port)
@@ -343,17 +719,41 @@ final class BrowserLoginTests: XCTestCase {
         gone.close()
         let none = await listener.wait(timeout: 0.1)
         XCTAssertNil(none)
-        // Not accepted, so this sign-in's own answer still is; nobody says how
-        // it ended, so its tab is told it was not completed.
-        let tab = try await RawHTTP.request(port: port, method: "GET", target: "/callback?code=c&state=the-state")
-        XCTAssertEqual(tab.status, 200)
-        XCTAssertTrue(tab.body.contains("Sign-in was not completed."))
-        let accepted = await listener.wait(timeout: 0)
+        // Not accepted, so this sign-in's own answer still is.
+        let tab = try RawConnection(port: port)
+        defer { tab.close() }
+        tab.send(Array("GET /callback?code=c&state=the-state HTTP/1.1\r\n\r\n".utf8))
+        let accepted = await listener.wait(timeout: 5)
         XCTAssertEqual(accepted, .code("c"))
+        await listener.close()
+        let answer = try RawHTTP.parse(tab.readAll())
+        XCTAssertEqual(answer.status, 200)
+        XCTAssertTrue(answer.body.contains("Sign-in was not completed."))
+    }
+
+    /// The page says how the sign-in ended, so it is written once it has,
+    /// however long the exchange took: the tab has no deadline of its own.
+    func testTheAcceptedTabWaitsAsLongAsTheSignInTakes() async throws {
+        let listener = LoopbackListener(state: "the-state")
+        let port = try listener.start()
+        let started = ProcessInfo.processInfo.systemUptime
+        let page = LockedBox<String>()
+        Task.detached {
+            let answer = try? await RawHTTP.request(port: port, method: "GET", target: "/callback?code=c&state=the-state")
+            page.setOnce(answer?.body ?? "")
+        }
+        let accepted = await listener.wait(timeout: 5)
+        XCTAssertEqual(accepted, .code("c"))
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(page.value, "the tab was answered before the sign-in ended")
+        listener.finish(signedIn: true)
+        try await eventually { page.value != nil }
+        XCTAssertTrue(page.value?.contains("Signed in to Thalovant. You can close this tab.") == true)
+        XCTAssertGreaterThanOrEqual(ProcessInfo.processInfo.systemUptime - started, 0.3)
         await listener.close()
     }
 
-    func testClosingAnswersTheAcceptedTabAtOnce() async throws {
+    func testClosingTheListenerAnswersATabThatIsStillWaiting() async throws {
         let listener = LoopbackListener(state: "the-state")
         let port = try listener.start()
         let tab = try RawConnection(port: port)
@@ -369,97 +769,76 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertTrue(answer.body.contains("Sign-in was not completed."))
     }
 
-    func testACallbackIsNeverPrintedWithItsCode() {
-        XCTAssertFalse(String(describing: LoopbackCallback.code("nc_secret")).contains("nc_secret"))
-        XCTAssertFalse(String(reflecting: LoopbackCallback.code("nc_secret")).contains("nc_secret"))
+    func testAHeadRequestGetsTheHeadersAndNoBody() async throws {
+        let listener = LoopbackListener(state: "the-state")
+        let port = try listener.start()
+        let connection = try RawConnection(port: port)
+        connection.send(Array("HEAD /callback?code=c&state=the-state HTTP/1.1\r\n\r\n".utf8))
+        let raw = connection.readAll()
+        connection.close()
+        await listener.close()
+        let answer = try RawHTTP.parse(raw)
+        XCTAssertEqual(answer.status, 404)
+        XCTAssertEqual(answer.body, "")
+        XCTAssertEqual(answer.headers["Content-Type"], "text/html; charset=utf-8")
+        XCTAssertGreaterThan(Int(answer.headers["Content-Length"] ?? "") ?? 0, 0, "what a GET would have carried")
     }
 
-    // MARK: The remaining edges
-
-    func testThisMachineIsNamedAsTheBrowserRuleNamesIt() {
-        #if os(Linux)
-        XCTAssertEqual(BrowserLogin.platformName, "linux")
-        #elseif os(macOS)
-        XCTAssertEqual(BrowserLogin.platformName, "macos")
-        #endif
-        XCTAssertTrue(BrowserLogin.isAvailable)
-    }
-
-    func testTheBrowserRuleReadsThisProcessByDefault() {
-        XCTAssertEqual(
-            BrowserLogin.canOpenBrowser(),
-            BrowserLogin.canOpenBrowser(environment: ProcessInfo.processInfo.environment, platform: BrowserLogin.platformName))
-        XCTAssertFalse(BrowserLogin.canOpenBrowser(environment: [:], platform: "ios"))
-        XCTAssertFalse(BrowserLogin.canOpenBrowser(environment: [:], platform: "linux"))
-    }
-
-    func testAnAuthorizationEndpointNoBrowserCanOpenIsUnusable() {
-        for endpoint in ["https://dash.thalovant.com/author\u{07}ize", "https://dash.thalovant.com /authorize",
-                         "https://dash.thalovant.com:99999/authorize", "https://[::1/authorize", "https://dash.thalovant.com:8x/authorize",
-                         "https://[127.0.0.1]/authorize", "https:dash.thalovant.com/authorize", "https:///authorize",
-                         "ftp://dash.thalovant.com/authorize", "http://[::2]/authorize", "https://dash.thalovant.com/a\u{2028}b",
-                         "https://dash.thalovant.com/authorize?", "1https://dash.thalovant.com/authorize"] {
-            XCTAssertFalse(NativeSignInConfig.usableAuthorizationEndpoint(endpoint), endpoint)
-        }
-        for endpoint in ["https://dash.thalovant.com/authorize", "HTTPS://Dash.Thalovant.com/authorize", "http://[::1]:5173/authorize",
-                         "http://LOCALHOST:5173/authorize", "https://[2001:db8::1]:8443/authorize", "https://dash.thalovant.com:/authorize",
-                         "http://127.0.0.1/authorize"] {
-            XCTAssertTrue(NativeSignInConfig.usableAuthorizationEndpoint(endpoint), endpoint)
-        }
-    }
-
-    func testATokenEndpointAndAClientIdAreReadStrictly() {
-        XCTAssertTrue(NativeSignInConfig.usableTokenEndpoint("/v1/auth/native/token"))
-        for path in ["v1/auth/native/token", "//evil/x", "/v1/x#y", "/v1\\x", "/v1/ x", "/v1/x\u{85}"] {
-            XCTAssertFalse(NativeSignInConfig.usableTokenEndpoint(path), path)
-        }
-        XCTAssertTrue(NativeSignInConfig.usableClientId("thalovant-sdk_2.x"))
-        for id in ["", String(repeating: "a", count: 65), "thalovant sdk", "thalovant/sdk", "thålovant"] {
-            XCTAssertFalse(NativeSignInConfig.usableClientId(id), id)
+    /// Closing with bytes unread resets the connection, and macOS then drops
+    /// the answer the browser had not read; Linux shows the reset as
+    /// ECONNRESET. The listener drains first.
+    func testAnEarlyAnswerIsNotLostToAReset() async throws {
+        let cases: [(String, [UInt8])] = [
+            // A head far over the listener's limit: most of it is never read.
+            ("oversized head", Array("GET /callback?code=".utf8) + [UInt8](repeating: UInt8(ascii: "a"), count: 600_000)
+                + Array(" HTTP/1.1\r\nHost: x\r\n\r\n".utf8)),
+            // A body nobody asked for, behind a 404.
+            ("unread body", Array("POST /callback HTTP/1.1\r\nHost: x\r\nContent-Length: 600000\r\n\r\n".utf8)
+                + [UInt8](repeating: UInt8(ascii: "b"), count: 600_000)),
+        ]
+        for (name, bytes) in cases {
+            let listener = LoopbackListener(state: "the-state")
+            let port = try listener.start()
+            let (data, failure) = try await RawHTTP.sendWhileReading(port: port, bytes: bytes)
+            await listener.close()
+            let line = String(decoding: data.prefix(while: { $0 != 0x0D }), as: UTF8.self)
+            XCTAssertTrue(["HTTP/1.1 400 Bad Request", "HTTP/1.1 404 Not Found"].contains(line), "\(name): \(line)")
+            XCTAssertNil(failure, "\(name): the connection ended with errno \(failure ?? 0)")
         }
     }
 
-    func testAConfigurationThatIsNotAnObjectIsUnusable() {
-        for payload: JSONValue in [["not", "an", "object"], .null, "config", 1] {
-            XCTAssertThrowsError(try NativeSignInConfig(payload: payload)) { error in
-                XCTAssertNil((error as? ThalovantApiError)?.statusCode)
-            }
-        }
-        XCTAssertNil(try NativeSignInConfig(response: [
-            "authorization_endpoint": "https://dash.thalovant.com/authorize", "token_endpoint": "/v1/auth/native/token",
-            "sdk_client_id": "thalovant-sdk", "code_challenge_methods_supported": ["S256"],
-        ]).deviceAuthorizationEndpoint)
+    /// A browser that never closes its side cannot keep a connection open.
+    func testDrainingAConnectionIsBounded() async throws {
+        let listener = LoopbackListener(state: "the-state", drainTimeout: 0.2)
+        let port = try listener.start()
+        let connection = try RawConnection(port: port)
+        connection.send(Array("GET /favicon.ico HTTP/1.1\r\n\r\n".utf8))
+        // The answer ends because the listener shut its side; ours stays open.
+        XCTAssertEqual(try RawHTTP.parse(connection.readAll()).status, 404)
+        try await Task.sleep(nanoseconds: 500_000_000)
+        XCTAssertEqual(listener.openConnections, 0)
+        connection.close()
+        await listener.close()
     }
 
-    func testAnAnswerThatIsNotJSONIsAnErrorWithNoStatus() async throws {
-        for route in ["config", "token"] {
-            UnitApi.serve { _, path, _ in
-                if path == "/v1/auth/native/\(route)" { return .init(200, "<html>not json</html>", contentType: "text/html") }
-                return path == "/v1/auth/native/config" ? .init(200, Self.config) : .init(200, Self.token)
-            }
-            let plane = UnitApi.controlPlane()
-            let failure: Error?
-            if route == "token" {
-                let (task, port, state, _) = try await begin(plane)
-                let tab = try await RawHTTP.request(port: port, method: "GET", target: "/callback?code=c&state=\(state)")
-                XCTAssertEqual(tab.status, 200)
-                if case .failure(let error) = await task.value { failure = error } else { failure = nil }
-            } else {
-                do { try await plane.browserLogin(options: BrowserLoginOptions(openBrowser: false)); failure = nil } catch { failure = error }
-            }
-            let error = try XCTUnwrap(failure as? ThalovantApiError, route)
-            XCTAssertNil(error.statusCode, route)
-            XCTAssertNil(error.errorCode, route)
-        }
-    }
-
-    func testQueryValuesAreDecodedOnceAsAFormDecodesThem() {
-        XCTAssertEqual(formDecode("a%2Bb%2Fc%3D%2541"), "a+b/c=%41")
-        XCTAssertEqual(formDecode("a+b"), "a b")
-        XCTAssertEqual(formDecode("%G1%4"), "%G1%4")
-        XCTAssertEqual(formDecode("%C3%A9t%C3%A9"), "été")
-        XCTAssertEqual(formDecode("%E9"), "\u{FFFD}")
-        XCTAssertEqual(loopbackFormPairs("a&&b=&=c&d=1=2").map { [$0.0, $0.1] }, [["a", ""], ["b", ""], ["", "c"], ["d", "1=2"]])
+    /// Idle connections cannot keep the real tab out, nor keep the loop from
+    /// its work: the oldest idle one makes room.
+    func testAFloodOfIdleConnectionsDoesNotKeepTheTabOut() async throws {
+        let listener = LoopbackListener(state: "the-state")
+        let port = try listener.start()
+        var idle: [RawConnection] = []
+        for _ in 0..<(LoopbackListener.maxConnections + 16) { idle.append(try RawConnection(port: port)) }
+        defer { idle.forEach { $0.close() } }
+        try await eventually { listener.openConnections >= LoopbackListener.maxConnections }
+        XCTAssertLessThanOrEqual(listener.openConnections, LoopbackListener.maxConnections)
+        let tab = try RawConnection(port: port)
+        defer { tab.close() }
+        tab.send(Array("GET /callback?code=c&state=the-state HTTP/1.1\r\n\r\n".utf8))
+        let accepted = await listener.wait(timeout: 5)
+        XCTAssertEqual(accepted, .code("c"))
+        listener.finish(signedIn: true)
+        XCTAssertTrue(try RawHTTP.parse(tab.readAll()).body.contains("Signed in to Thalovant."))
+        await listener.close()
     }
 
     func testWaitsAreClamped() {
@@ -469,14 +848,9 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertGreaterThan(LoopbackListener.nanoseconds(.infinity), LoopbackListener.nanoseconds(1e9))
         XCTAssertEqual(LoopbackListener.nanoseconds(1e300), LoopbackListener.nanoseconds(.infinity))
     }
-
-    func testOnlyAWellFormedErrorIsKeptAsTheCode() {
-        XCTAssertTrue(ThalovantControlPlane.isProblemCode("server_error"))
-        XCTAssertFalse(ThalovantControlPlane.isProblemCode(""))
-        XCTAssertFalse(ThalovantControlPlane.isProblemCode("<script>"))
-        XCTAssertFalse(ThalovantControlPlane.isProblemCode(String(repeating: "a", count: 81)))
-    }
 }
+
+#endif
 
 /// An API that answers every request with `handler`'s answer, and notes what was sent.
 final class UnitApi: URLProtocol {
@@ -484,11 +858,21 @@ final class UnitApi: URLProtocol {
         let status: Int
         let body: String
         let contentType: String
+        /// When set, the request fails in transport with this description instead.
+        let failure: String?
         init(_ status: Int, _ body: String, contentType: String = "application/json") {
             self.status = status
             self.body = body
             self.contentType = contentType
+            self.failure = nil
         }
+        private init(failure: String) {
+            status = 0
+            body = ""
+            contentType = ""
+            self.failure = failure
+        }
+        static func failure(_ description: String) -> Answer { Answer(failure: description) }
     }
 
     typealias Handler = @Sendable (_ method: String, _ path: String, _ body: JSONValue?) -> Answer
@@ -496,15 +880,24 @@ final class UnitApi: URLProtocol {
     private static let lock = NSLock()
     private static var handler: Handler = { _, _, _ in Answer(599, "{}") }
     private static var seen: [String] = []
+    private static var seenURLs: [URL] = []
+    private static var seenBodies: [JSONValue?] = []
 
     static func serve(_ next: @escaping Handler) {
         lock.locked {
             handler = next
             seen = []
+            seenURLs = []
+            seenBodies = []
         }
     }
 
+    /// What was sent, as `METHOD path`.
     static var requests: [String] { lock.locked { seen } }
+    /// The URLs requested, whole.
+    static var urls: [URL] { lock.locked { seenURLs } }
+    /// The bodies sent, parsed.
+    static var bodies: [JSONValue?] { lock.locked { seenBodies } }
 
     static func controlPlane(apiURL: String = "http://127.0.0.1:8767") -> ThalovantControlPlane {
         let configuration = URLSessionConfiguration.ephemeral
@@ -523,9 +916,16 @@ final class UnitApi: URLProtocol {
         let body = raw.isEmpty ? nil : try? JSONDecoder().decode(JSONValue.self, from: raw)
         let handler = Self.lock.locked { () -> Handler in
             Self.seen.append("\(method) \(path)")
+            if let url = request.url { Self.seenURLs.append(url) }
+            Self.seenBodies.append(body)
             return Self.handler
         }
         let answer = handler(method, path, body)
+        if let failure = answer.failure {
+            client?.urlProtocol(self, didFailWithError: NSError(
+                domain: "UnitApi", code: 1, userInfo: [NSLocalizedDescriptionKey: failure]))
+            return
+        }
         let bytes = Data(answer.body.utf8)
         var headers = ["Content-Length": String(bytes.count)]
         if !bytes.isEmpty { headers["Content-Type"] = answer.contentType }
@@ -535,5 +935,124 @@ final class UnitApi: URLProtocol {
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
         if !bytes.isEmpty { client?.urlProtocol(self, didLoad: bytes) }
         client?.urlProtocolDidFinishLoading(self)
+    }
+}
+
+/// A real HTTP/1.1 server on 127.0.0.1 that keeps connections alive, for
+/// what a URLProtocol cannot show: which connection a request went out on,
+/// and whether it was sent twice.
+final class TinyHTTPServer: @unchecked Sendable {
+    enum Reply { case answer(String), hangUp }
+
+    let port: Int
+    private let fd: Int32
+    private let reply: @Sendable (String, String) -> Reply
+    private let lock = NSLock()
+    private var stopped = false
+    private var seen: [(String, Int)] = []
+    private var connections = 0
+
+    /// What arrived, as `METHOD path`, in order.
+    var requests: [String] { lock.locked { seen.map(\.0) } }
+
+    /// The connection, numbered from 1 in the order accepted, that a request arrived on.
+    func connection(of request: String) -> Int? { lock.locked { seen.first { $0.0 == request }?.1 } }
+
+    init(_ reply: @escaping @Sendable (_ method: String, _ path: String) -> Reply) throws {
+        self.reply = reply
+        #if canImport(Glibc)
+        let descriptor = socket(AF_INET, Int32(SOCK_STREAM.rawValue), 0)
+        #else
+        let descriptor = socket(AF_INET, SOCK_STREAM, 0)
+        #endif
+        var address = sockaddr_in()
+        address.sin_family = sa_family_t(AF_INET)
+        address.sin_addr.s_addr = inet_addr("127.0.0.1")
+        #if canImport(Darwin)
+        address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        #endif
+        var length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let bound = withUnsafePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(descriptor, $0, length) }
+        }
+        let named = withUnsafeMutablePointer(to: &address) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
+        }
+        guard descriptor >= 0, bound == 0, named == 0, listen(descriptor, 16) == 0 else {
+            throw RawHTTP.Failure(description: "the test server could not listen")
+        }
+        fd = descriptor
+        port = Int(UInt16(bigEndian: address.sin_port))
+        Thread.detachNewThread { [self] in acceptLoop() }
+    }
+
+    func stop() {
+        lock.locked { stopped = true }
+        #if canImport(Glibc)
+        _ = Glibc.shutdown(fd, Int32(SHUT_RDWR))
+        _ = Glibc.close(fd)
+        #else
+        _ = Darwin.shutdown(fd, Int32(SHUT_RDWR))
+        _ = Darwin.close(fd)
+        #endif
+    }
+
+    private func acceptLoop() {
+        while !lock.locked({ stopped }) {
+            var ready = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            guard poll(&ready, 1, 50) > 0 else { continue }
+            let connection = accept(fd, nil, nil)
+            guard connection >= 0 else { continue }
+            let number = lock.locked { () -> Int in connections += 1; return connections }
+            Thread.detachNewThread { [self] in serve(connection, number) }
+        }
+    }
+
+    /// Requests one after another on one connection, until a hang-up.
+    private func serve(_ connection: Int32, _ number: Int) {
+        var buffer: [UInt8] = []
+        var chunk = [UInt8](repeating: 0, count: 65_536)
+        defer {
+            #if canImport(Glibc)
+            _ = Glibc.close(connection)
+            #else
+            _ = Darwin.close(connection)
+            #endif
+        }
+        while true {
+            while !(buffer.count >= 4 && (0...(buffer.count - 4)).contains(where: { buffer[$0..<$0 + 4].elementsEqual([13, 10, 13, 10]) })) {
+                let count = recv(connection, &chunk, chunk.count, 0)
+                guard count > 0 else { return }
+                buffer += chunk[0..<count]
+            }
+            let end = (0...(buffer.count - 4)).first(where: { buffer[$0..<$0 + 4].elementsEqual([13, 10, 13, 10]) })! + 4
+            let head = String(decoding: buffer[0..<end], as: UTF8.self)
+            let lines = head.components(separatedBy: "\r\n")
+            let parts = lines[0].split(separator: " ")
+            let length = lines.compactMap { line -> Int? in
+                let pair = line.split(separator: ":", maxSplits: 1)
+                return pair.count == 2 && pair[0].lowercased() == "content-length"
+                    ? Int(pair[1].trimmingCharacters(in: .whitespaces)) : nil
+            }.first ?? 0
+            while buffer.count < end + length {
+                let count = recv(connection, &chunk, chunk.count, 0)
+                guard count > 0 else { return }
+                buffer += chunk[0..<count]
+            }
+            buffer.removeFirst(end + length)
+            let method = parts.count > 0 ? String(parts[0]) : ""
+            let path = parts.count > 1 ? String(parts[1]) : ""
+            lock.locked { seen.append(("\(method) \(path)", number)) }
+            switch reply(method, path) {
+            case .hangUp:
+                // The request was read, and the connection dies without an answer.
+                return
+            case .answer(let body):
+                let bytes = Array(body.utf8)
+                let answer = Array(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \(bytes.count)\r\n"
+                    + "Connection: keep-alive\r\n\r\n").utf8) + bytes
+                _ = answer.withUnsafeBytes { RawConnection.sendAll(connection, $0) }
+            }
+        }
     }
 }

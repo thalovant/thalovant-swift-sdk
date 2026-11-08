@@ -27,8 +27,10 @@ Rules:
   `pollDeviceLogin`, `describeDeviceLogin`, `revokeApiToken`) unchanged;
   `interactiveLogin()` prefers browser sign-in (`browserLogin()`, PKCE on a
   `127.0.0.1` loopback redirect, macOS and Linux only) and falls back to device
-  login only before the browser is opened. Never log, print or throw the
-  authorization code, the PKCE verifier, the state or a token.
+  login only before the browser is opened. Never log or throw the
+  authorization code, the PKCE verifier, the state or a token; the one place
+  the state appears is the authorization URL shown to the person signing in,
+  which the shared contract requires.
   `Tests/ThalovantSDKTests/Fixtures/browser-login-vectors.json` is the shared
   contract, vendored byte for byte from the Python SDK
   (`docs/browser-login-porting.md` there).

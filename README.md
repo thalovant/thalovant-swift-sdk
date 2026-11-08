@@ -94,25 +94,36 @@ try await api.revokeApiToken()
 grant with PKCE (S256) on a loopback redirect (RFC 8252). The SDK listens on
 `127.0.0.1` on a port the system picks, opens the dashboard's consent page, and
 waits for the browser to come back to `http://127.0.0.1:<port>/callback`. The
-browser that approves hands the code to its own computer, so a sign-in link sent
-to somebody else gives the sender nothing, which a device code cannot promise.
+browser that approves hands the code to its own computer's `127.0.0.1`, so a
+link or code sent to someone on another computer delivers nothing to the
+sender. A device code, read off one screen and typed in anywhere, cannot promise
+that. A forwarded callback port (`ssh -L`, a port-forwarding tool) or another
+user of the same computer can still complete a sign-in.
 
 ```swift
 let token = try await api.browserLogin(options: BrowserLoginOptions(
     scopes: ["hubs:read", "clients:write"],   // nil: the API's default
-    deviceName: "build-bot on studio",        // default: thalovant-swift-sdk on <hostname>
+    deviceName: "build-bot on studio",        // nil: thalovant-swift-sdk on <hostname>; "": none
     timeout: 300))
 ```
 
-- The URL is always printed as well as opened (`open` on macOS, `xdg-open` on
-  Linux): `Opening your browser to sign in to Thalovant. If it does not open,
-  visit:` and the URL on the next line. Pass `prompt` to show it yourself,
-  `openBrowser: false` to only show it, or `opener` to open it your own way.
+- The URL is always shown as well as opened (`open` on macOS, `xdg-open` on
+  Linux). Without a `prompt` it is printed: `Opening your browser to sign in to
+  Thalovant. If it does not open, visit:` and the URL on the next line. A
+  `prompt` receives the URL **instead of** the print, so a command-line tool
+  that passes one must show the URL itself. `openBrowser: false` only shows it,
+  and `opener` opens it your own way.
 - Denied in the browser throws `ThalovantDeviceLoginError.denied`; no answer
   within `timeout` seconds throws `ThalovantDeviceLoginError.expired`; a code
   the API will not exchange throws `ThalovantApiError` (`detail` is
   `invalid_grant`). An API without browser sign-in answers
   `GET /v1/auth/native/config` with a 404. Cancelling the task closes the port.
+- A sandboxed macOS app needs the `com.apple.security.network.server`
+  entitlement (and `network.client`) to listen on `127.0.0.1`. Without it the
+  listener cannot start and `browserLogin()`, and `interactiveLogin()` on that
+  Mac, throw: the shared contract keeps that an error rather than a silent
+  device login. Such an app passes `method: .device`, or signs in with
+  `NativeSignIn` and `ASWebAuthenticationSession`.
 - `interactiveLogin(options:)` takes `method: .auto` (the default), `.browser`
   or `.device`. `.auto` uses the browser only when `BrowserLogin.canOpenBrowser()`
   says this machine has one (never with `CI`, `SSH_CONNECTION` or `SSH_TTY` set;

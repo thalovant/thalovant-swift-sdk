@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Add the browser sign-in follow-ups (0.12.0).
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in follow-ups after the CodeRabbit round and the final producer.
 
 # Suggestions: thalovant-swift-sdk
 
@@ -22,9 +22,21 @@ Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Add the browser sign-in follow
 
 ## Drop the old reference digest after the Python merge
 
-- **Problem:** `contracts/sdk-parity.json` accepts both `57c7e71f6456` (current) and `49744ee385bf` (candidate) during the rollout.
-- **Proposal:** once thalovant-python-sdk `main` carries `49744ee385bf`, a follow-up records only the history the checker needs. Today the list keeps every acknowledged digest, so the follow-up may just leave it as is.
+- **Problem:** `contracts/sdk-parity.json` accepts both `57c7e71f6456` (current) and `6dfb3bb31ac7` (the final candidate) during the rollout.
+- **Proposal:** once thalovant-python-sdk `main` carries `6dfb3bb31ac7`, the record can stay as it is: the checker needs the current digest among the acknowledged ones, and this list has always kept every digest acknowledged so far. Prune superseded entries only if the checker or the lead asks.
 - **Impact:** low; housekeeping.
+
+## Read the device login's token id from its own answer
+
+- **Problem:** `acceptDeviceToken` (`Sources/ThalovantSDK/DeviceLogin.swift`) returns `tokenId: self.tokenId`, read back after `keepSignIn` stored it. A sign-in finishing on another task in between could hand back the other sign-in's id beside this one's token. Browser sign-in reads the id from its answer (`browserTokenResult`); device login was left unchanged in this port.
+- **Proposal:** build the device login's result the same way, with the id from the token answer. It is a device-login change, so it needs its own review.
+- **Impact:** low; only concurrent sign-ins on one control plane can see it.
+
+## Fall back to device login when the listener cannot start?
+
+- **Problem:** in a sandboxed macOS app without `com.apple.security.network.server`, `interactiveLogin(.auto)` throws, though a device login would work.
+- **Proposal:** the porting brief (`39e31d8`) decided to keep this an error in every SDK, and that is the contract. If it is revisited, it changes for all SDKs at once, with a vector that injects a bind failure. Until then, README and FAQ tell such an app to add the entitlement or pass `method: .device`.
+- **Impact:** medium for sandboxed Mac apps; none elsewhere.
 
 ## Make `DeviceLoginResult` `Sendable`
 

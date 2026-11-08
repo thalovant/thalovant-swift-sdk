@@ -23,10 +23,13 @@ public enum LoginMethod: String, Sendable, CaseIterable {
 /// S256 only) on a loopback redirect (RFC 8252 section 7.3), for a program on
 /// a machine with a browser.
 ///
-/// A device code can be relayed: somebody reads it off one screen and types it
-/// in anywhere. A loopback redirect cannot: the browser that approves hands
-/// the code to its own computer, so a sign-in link sent to somebody else
-/// delivers nothing to the sender. `ThalovantControlPlane.browserLogin(options:)`
+/// A device code can be passed on: somebody reads it off one screen and types
+/// it in anywhere. With a loopback redirect the browser that approves hands the
+/// code to its own computer's `127.0.0.1`, so a link or code sent to someone on
+/// another computer delivers nothing to the sender. That is all it promises: a
+/// forwarded callback port (`ssh -L`, a port-forwarding tool) or another user
+/// of the same computer can still complete a sign-in.
+/// `ThalovantControlPlane.browserLogin(options:)`
 /// signs a program in this way; the pieces it is made of are here, so each can
 /// be checked against the shared vectors on its own.
 ///
@@ -238,10 +241,12 @@ public struct NativeSignInConfig: Equatable, Sendable {
     /// a `ThalovantApiError` that has no status.
     ///
     /// Unusable: not a JSON object; an `authorization_endpoint` that is not
-    /// https (or http on `localhost`, `127.0.0.1` or `::1`), has no host,
-    /// carries credentials, a query or a fragment, whitespace or a control
-    /// character, or a port no browser can open; a `token_endpoint` that is not
-    /// a path on the API (one leading `/`, not `//`, no `?`, `#`, `\` or
+    /// https (or http on `localhost`, `127.0.0.1` or `::1`), carries
+    /// credentials, a query or a fragment, whitespace or a control character,
+    /// names port 0 or one above 65535, or whose host as written is not an
+    /// IPv6 address between brackets, an IPv4 address or an ASCII DNS name; a
+    /// `token_endpoint` that is not a path on the API (one leading `/`, not
+    /// `//`, every `%` followed by two hex digits, and no `:`, `?`, `#`, `\` or
     /// whitespace); an `sdk_client_id` that is not 1-64 of `[A-Za-z0-9._-]`; or
     /// a `code_challenge_methods_supported` that is not a list with `S256`.
     /// Other members are ignored.
@@ -278,6 +283,14 @@ public struct NativeSignInConfig: Equatable, Sendable {
         try self.init(payload: .object(response))
     }
 
+    /// A configuration as given, past the checks `init(payload:)` makes (tests).
+    init(authorizationEndpoint: String, tokenEndpoint: String, sdkClientId: String, deviceAuthorizationEndpoint: String? = nil) {
+        self.authorizationEndpoint = authorizationEndpoint
+        self.tokenEndpoint = tokenEndpoint
+        self.sdkClientId = sdkClientId
+        self.deviceAuthorizationEndpoint = deviceAuthorizationEndpoint
+    }
+
     private static func unusable(_ message: String) -> ThalovantApiError {
         ThalovantApiError(message: message)
     }
@@ -287,9 +300,11 @@ public struct NativeSignInConfig: Equatable, Sendable {
         value.unicodeScalars.contains { $0.properties.isWhitespace || $0.value < 32 || (127...159).contains($0.value) }
     }
 
-    /// https, or http on a loopback host while developing; a host; no
-    /// credentials, query, fragment, whitespace or control characters, and a
-    /// port a browser can open. Read the way the reference's `urlsplit` reads it.
+    /// https, or http on a loopback host while developing; a host that is an IP
+    /// address or a real hostname; a port a browser can open; no credentials,
+    /// query, fragment, whitespace or control characters. Read the way the
+    /// reference's `urlsplit` reads it, with its bracket rule: nothing before
+    /// `[`, and nothing but an optional `:port` after `]`.
     static func usableAuthorizationEndpoint(_ value: String) -> Bool {
         guard !value.isEmpty, !hasSpaceOrControl(value), !value.contains("?"), !value.contains("#"),
               let colon = value.firstIndex(of: ":") else { return false }
@@ -304,27 +319,31 @@ public struct NativeSignInConfig: Equatable, Sendable {
         let opens = authority.contains("["), closes = authority.contains("]")
         guard opens == closes else { return false }
         let host: Substring
-        let port: Substring
-        if let open = authority.firstIndex(of: "[") {
-            let inside = authority[authority.index(after: open)...]
-            guard let close = inside.firstIndex(of: "]") else { return false }
-            host = inside[..<close]
-            let after = inside[inside.index(after: close)...]
-            port = after.firstIndex(of: ":").map { after[after.index(after: $0)...] } ?? ""
-            guard isIPv6(String(host)) else { return false }
+        let port: Substring?
+        if opens {
+            guard authority.first == "[", let close = authority.firstIndex(of: "]") else { return false }
+            host = authority[authority.index(after: authority.startIndex)..<close]
+            let after = authority[authority.index(after: close)...]
+            if after.isEmpty {
+                port = nil
+            } else {
+                guard after.first == ":" else { return false }
+                port = after.dropFirst()
+            }
         } else if let mark = authority.firstIndex(of: ":") {
             host = authority[..<mark]
             port = authority[authority.index(after: mark)...]
         } else {
             host = authority
-            port = ""
+            port = nil
         }
-        if !port.isEmpty {
+        if let port, !port.isEmpty {
+            // 0 parses, and no browser can open it; neither can one above 65535.
             guard port.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }),
-                  let number = Int(port), (0...65535).contains(number) else { return false }
+                  let number = Int(port), (1...65535).contains(number) else { return false }
         }
         let name = host.lowercased()
-        guard !name.isEmpty else { return false }
+        guard !name.isEmpty, isRealHost(name, bracketed: opens) else { return false }
         switch scheme.lowercased() {
         case "https": return true
         case "http": return ["localhost", "127.0.0.1", "::1"].contains(name)
@@ -332,17 +351,64 @@ public struct NativeSignInConfig: Equatable, Sendable {
         }
     }
 
+    /// Whether `host` (lowercased, brackets off) names something a browser can
+    /// reach: an IPv6 address between brackets; an IPv4 address whenever the
+    /// last label is a number, as a browser reads it; otherwise a DNS name of
+    /// ASCII labels, each of letters, digits and inner hyphens and 1-63
+    /// characters long, at most 253 characters in all. So `%`, `_`, an empty
+    /// label, a trailing dot and a non-ASCII host are not one: an international
+    /// name is written in its `xn--` form.
+    static func isRealHost(_ host: String, bracketed: Bool) -> Bool {
+        if bracketed { return isIPv6(host) }
+        if isIPv4(host) { return true }
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        if let last = labels.last, !last.isEmpty, last.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }) {
+            return false  // numeric like an IPv4 address, and not one
+        }
+        return host.unicodeScalars.count <= 253 && labels.allSatisfy(isHostLabel)
+    }
+
+    /// `[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?`
+    private static func isHostLabel(_ label: Substring) -> Bool {
+        let scalars = Array(label.unicodeScalars)
+        guard (1...63).contains(scalars.count) else { return false }
+        func alphanumeric(_ scalar: Unicode.Scalar) -> Bool { ("a"..."z").contains(scalar) || ("0"..."9").contains(scalar) }
+        guard alphanumeric(scalars[0]), alphanumeric(scalars[scalars.count - 1]) else { return false }
+        return scalars.allSatisfy { alphanumeric($0) || $0 == "-" }
+    }
+
+    /// An IPv6 address, with an optional `%zone`, as the reference's
+    /// `ipaddress` reads one.
     private static func isIPv6(_ text: String) -> Bool {
         var address = in6_addr()
-        let plain = text.split(separator: "%", maxSplits: 1).first.map(String.init) ?? text
+        let plain = text.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? text
         return inet_pton(AF_INET6, plain, &address) == 1
     }
 
-    /// A path on the API: one leading slash, not two, and no query, fragment,
-    /// backslash, whitespace or control character.
+    /// Four decimal octets, 0-255 each, no leading zeros.
+    private static func isIPv4(_ text: String) -> Bool {
+        var address = in_addr()
+        return inet_pton(AF_INET, text, &address) == 1
+    }
+
+    /// A path on the API: one leading slash, not two, every `%` followed by two
+    /// hex digits, and no colon, query, fragment, backslash, whitespace or
+    /// control character.
+    ///
+    /// No colon, because a URL joiner can read what follows the slash as a URL
+    /// of its own (`/https://collector.example/token`,
+    /// `/collector.example:443/token`), and the exchange carries the code and
+    /// the verifier. A broken escape (`/v1/%zz`) is found here, while a device
+    /// login can still stand in, rather than after somebody approved.
     static func usableTokenEndpoint(_ value: String) -> Bool {
         guard value.hasPrefix("/"), !value.hasPrefix("//") else { return false }
-        return !hasSpaceOrControl(value) && !value.contains(where: { "?#\\".contains($0) })
+        guard !hasSpaceOrControl(value), !value.contains(where: { ":?#\\".contains($0) }) else { return false }
+        let scalars = Array(value.unicodeScalars)
+        for (index, scalar) in scalars.enumerated() where scalar == "%" {
+            guard index + 2 < scalars.count, scalars[index + 1].properties.isASCIIHexDigit,
+                  scalars[index + 2].properties.isASCIIHexDigit else { return false }
+        }
+        return true
     }
 
     /// 1-64 of `A-Z a-z 0-9 . _ -`.
@@ -358,9 +424,10 @@ public struct BrowserLoginOptions: Sendable {
     /// Scopes the token carries. Nil or none asks for the API's default,
     /// `hubs:read` and `clients:write`; empty strings are dropped.
     public var scopes: [String]?
-    /// What the consent page and the token show. Nil or empty is
-    /// `BrowserLogin.defaultDeviceName()` (`thalovant-swift-sdk on <hostname>`);
-    /// cut to 120 code points.
+    /// What the consent page and the token show, cut to 120 code points. Nil
+    /// is `BrowserLogin.defaultDeviceName()` (`thalovant-swift-sdk on
+    /// <hostname>`); an empty name sends none, and keeps the hostname off the
+    /// consent page.
     public var deviceName: String?
     /// Open the browser at the consent page (best-effort; the URL is shown
     /// either way). False only shows the URL.
@@ -400,8 +467,8 @@ public struct InteractiveLoginOptions: Sendable {
     /// Scopes the token carries; nil asks for the API's default.
     public var scopes: [String]?
     /// Names this machine on the consent page: a browser sign-in's
-    /// `device_name`, a device login's `client_name`. Nil or empty is
-    /// `BrowserLogin.defaultDeviceName()`.
+    /// `device_name`, a device login's `client_name`. Nil is
+    /// `BrowserLogin.defaultDeviceName()`; an empty name sends none, to either.
     public var deviceName: String?
     /// Open the browser (the consent page, or the device login's verification page).
     public var openBrowser: Bool
@@ -440,14 +507,18 @@ extension ThalovantControlPlane {
     /// the browser at the dashboard's consent page (read from `GET
     /// /v1/auth/native/config`), and waits for the browser to come back to
     /// `http://127.0.0.1:<port>/callback`. The browser that approves hands the
-    /// code to its own computer, so a sign-in link sent to somebody else
-    /// delivers nothing to the sender -- which a device code, read off one
-    /// screen and typed into another, cannot promise.
+    /// code to its own computer's `127.0.0.1`, so a link or code sent to
+    /// someone on another computer delivers nothing to the sender -- which a
+    /// device code, read off one screen and typed in anywhere, cannot promise.
+    /// A forwarded callback port or another user of the same computer is
+    /// another matter.
     ///
-    /// The URL is always shown as well as opened (`Opening your browser to sign
-    /// in to Thalovant. If it does not open, visit:` and the URL); pass
-    /// `options.prompt` to present it yourself, and `openBrowser: false` to
-    /// only show it.
+    /// The URL is always shown as well as opened. Without `options.prompt` it
+    /// is printed (`Opening your browser to sign in to Thalovant. If it does
+    /// not open, visit:` and the URL); a `prompt` receives it instead of the
+    /// print. `openBrowser: false` only shows it. A sandboxed macOS app needs
+    /// the `com.apple.security.network.server` entitlement to listen; without
+    /// it the listener cannot start and this throws, in `interactiveLogin` too.
     ///
     /// Returns the token answer as a `DeviceLoginResult` and stores
     /// `accessToken` and `tokenId` exactly as a device login does, so
@@ -510,7 +581,9 @@ extension ThalovantControlPlane {
     /// is a device login and `.browser` throws.
     @discardableResult
     public func interactiveLogin(options: InteractiveLoginOptions = InteractiveLoginOptions()) async throws -> DeviceLoginResult {
-        let name = options.deviceName.flatMap { $0.isEmpty ? nil : $0 } ?? BrowserLogin.defaultDeviceName()
+        // Only nil asks for the default: an empty name is the caller's way of
+        // sending none, and keeps the hostname out.
+        let name = options.deviceName ?? BrowserLogin.defaultDeviceName()
         var config: NativeSignInConfig?
         switch options.method {
         case .browser:
@@ -535,7 +608,13 @@ extension ThalovantControlPlane {
         guard let config else {
             var device = DeviceLoginOptions(scopes: options.scopes, clientName: name, openBrowser: options.openBrowser)
             device.timeout = options.timeout ?? BrowserLogin.defaultDeviceLoginTimeout
-            return try await deviceLogin(options: device, launch: options.opener)
+            // A caller's opener runs off the polling task, as the browser
+            // sign-in's does: one that waits for a console browser to exit
+            // must not hold the polls, or the timeout, back.
+            let launch = options.opener.map { open in
+                { (url: URL) in DispatchQueue.global(qos: .userInitiated).async { open(url) } }
+            }
+            return try await deviceLogin(options: device, launch: launch)
         }
         #if os(macOS) || os(Linux)
         return try await signInThroughBrowser(
@@ -625,7 +704,7 @@ extension ThalovantControlPlane {
             codeChallenge: BrowserLogin.challenge(for: verifier),
             state: state,
             scopes: scopes,
-            deviceName: deviceName.flatMap { $0.isEmpty ? nil : $0 } ?? BrowserLogin.defaultDeviceName(),
+            deviceName: deviceName ?? BrowserLogin.defaultDeviceName(),
             clientId: config.sdkClientId)
         presentBrowserLogin(url, prompt: prompt, openBrowser: openBrowser, opener: opener)
         let callback = await listener.wait(timeout: timeout)
@@ -636,19 +715,22 @@ extension ThalovantControlPlane {
         case .denied?:
             throw ThalovantDeviceLoginError.denied
         case .failed(let error)?:
-            let code = error.flatMap { Self.isProblemCode($0) ? $0 : nil }
+            // `error` is one of RFC 6749's codes or nothing: a value the page
+            // chose could be the state or a code.
             throw ThalovantApiError(
-                message: "The browser came back without a sign-in code" + (code.map { " (\($0))." } ?? "."),
-                errorCode: code)
+                message: "The browser came back without a sign-in code" + (error.map { " (\($0))." } ?? "."),
+                errorCode: error)
         case .code(let code)?:
+            let hidden = [code, verifier, state]
             do {
-                let token = try await exchangeBrowserCode(config, code: code, verifier: verifier, redirectURI: redirectURI)
+                let token = try await exchangeBrowserCode(
+                    config, code: code, verifier: verifier, redirectURI: redirectURI, hidden: hidden)
                 listener.finish(signedIn: true)
                 return token
             } catch let error as ThalovantApiError {
                 // A code is single-use: retrying the exchange would only
                 // revoke the token a first exchange minted (RFC 9700).
-                throw error.withoutSecrets([code, verifier, state])
+                throw error.withoutSecrets(hidden)
             }
         }
     }
@@ -659,9 +741,16 @@ extension ThalovantControlPlane {
     /// object with an `access_token` is an error with no status -- the API did
     /// not refuse, its answer could not be used -- and any other failure
     /// carries the api-errors fields (`invalid_grant` for every way an exchange
-    /// fails).
-    private func exchangeBrowserCode(
-        _ config: NativeSignInConfig, code: String, verifier: String, redirectURI: String
+    /// fails). The answer has every value in `hidden` taken out before the
+    /// error's message is built, so a message cut to length keeps no part of
+    /// one.
+    ///
+    /// Sent once, on a connection of its own: an HTTP stack that finds a reused
+    /// connection dead may resend the request on a fresh one, and a code
+    /// presented twice revokes the token the first exchange minted.
+    /// `buildRequest` keeps it on the API's origin, as every request.
+    func exchangeBrowserCode(
+        _ config: NativeSignInConfig, code: String, verifier: String, redirectURI: String, hidden: [String]
     ) async throws -> DeviceLoginResult {
         try NativeSignIn.requireSecureTokenExchange(apiURL)
         let payload: JSONObject = [
@@ -671,16 +760,41 @@ extension ThalovantControlPlane {
             "redirect_uri": .string(redirectURI),
         ]
         let request = try buildRequest("POST", config.tokenEndpoint, body: payload, auth: false)
-        let (data, response) = try await perform(request)
+        let (data, response) = try await performOnce(request)
         guard (200..<300).contains(response.statusCode) else {
             throw ThalovantApiError.httpFailure(
-                statusCode: response.statusCode, body: String(decoding: data, as: UTF8.self),
+                statusCode: response.statusCode, body: redactedBody(data, hidden),
                 header: { response.value(forHTTPHeaderField: $0) })
         }
         guard let token = try? ThalovantJSON.decodeObject(data) else {
             throw ThalovantApiError(message: "Thalovant API returned an unexpected response shape.")
         }
-        return try acceptDeviceToken(token)
+        return try browserTokenResult(token)
+    }
+
+    /// Keeps the token as a device login does (`keepSignIn`) and returns it,
+    /// its id read from this same answer: never `tokenId` read back, which a
+    /// sign-in completing meanwhile on another task could have replaced.
+    func browserTokenResult(_ token: JSONObject) throws -> DeviceLoginResult {
+        let accessToken = try keepSignIn(token)
+        return DeviceLoginResult(
+            accessToken: accessToken,
+            tokenType: token["token_type"]?.stringValue,
+            scopes: (token["scopes"]?.arrayValue ?? []).compactMap { $0.stringValue },
+            expiresAt: token["expires_at"]?.stringValue,
+            tokenId: token["token_id"]?.stringValue.flatMap { $0.isEmpty ? nil : $0 },
+            raw: token)
+    }
+
+    /// An error answer's body with every value in `hidden` taken out: scrubbed
+    /// as parsed JSON when it parses (an escaped value is still the value) and
+    /// written back, else as text.
+    func redactedBody(_ data: Data, _ hidden: [String]) -> String {
+        if let parsed = try? JSONDecoder().decode(JSONValue.self, from: data),
+           let encoded = try? JSONEncoder.sortedKeys.encode(redacting(parsed, hidden)) {
+            return String(decoding: encoded, as: UTF8.self)
+        }
+        return redacting(String(decoding: data, as: UTF8.self), hidden)
     }
 
     /// Shows the URL (opening a browser can fail without a word) and opens it
@@ -701,48 +815,84 @@ extension ThalovantControlPlane {
     }
     #endif
 
-    /// `[A-Za-z0-9_.:-]{1,80}`: an `error` the consent page sent that may be
-    /// kept as the error's code.
-    static func isProblemCode(_ value: String) -> Bool {
-        (1...80).contains(value.unicodeScalars.count) && value.unicodeScalars.allSatisfy {
-            ("A"..."Z").contains($0) || ("a"..."z").contains($0) || ("0"..."9").contains($0) || "_.:-".unicodeScalars.contains($0)
+}
+
+/// The marker every redacted value becomes.
+let redactedMarker = "[redacted]"
+
+/// `text` with every value in `hidden` replaced by `[redacted]`, in one pass.
+///
+/// Every place any value occurs is found in the text as it was given, before
+/// anything is replaced, and each run of covered characters becomes one
+/// `[redacted]`. So a value that is part of a longer one cannot break it up
+/// before it is matched, and two values that overlap leave nothing of either.
+/// A `[redacted]` already there is left alone, so scrubbing twice changes
+/// nothing. Empty values are ignored.
+func redacting(_ text: String, _ hidden: [String]) -> String {
+    let values = Set(hidden.filter { !$0.isEmpty })
+    guard !values.isEmpty else { return text }
+    return text.components(separatedBy: redactedMarker).map { part -> String in
+        let scalars = Array(part.unicodeScalars)
+        var covered = [Bool](repeating: false, count: scalars.count)
+        for value in values {
+            let needle = Array(value.unicodeScalars)
+            guard needle.count <= scalars.count else { continue }
+            for start in 0...(scalars.count - needle.count) where scalars[start..<start + needle.count].elementsEqual(needle) {
+                for index in start..<start + needle.count { covered[index] = true }
+            }
         }
+        var out = String.UnicodeScalarView()
+        var index = 0
+        while index < scalars.count {
+            if covered[index] {
+                out.append(contentsOf: redactedMarker.unicodeScalars)
+                while index < scalars.count && covered[index] { index += 1 }
+            } else {
+                out.append(scalars[index])
+                index += 1
+            }
+        }
+        return String(out)
+    }.joined(separator: redactedMarker)
+}
+
+/// `redacting(_:_:)` through a JSON value, keys included.
+func redacting(_ value: JSONValue, _ hidden: [String]) -> JSONValue {
+    switch value {
+    case .string(let text): return .string(redacting(text, hidden))
+    case .array(let items): return .array(items.map { redacting($0, hidden) })
+    case .object(let fields): return .object(redacting(fields, hidden))
+    default: return value
+    }
+}
+
+func redacting(_ fields: JSONObject, _ hidden: [String]) -> JSONObject {
+    var out: JSONObject = [:]
+    for (key, value) in fields { out[redacting(key, hidden)] = redacting(value, hidden) }
+    return out
+}
+
+extension JSONEncoder {
+    /// Keys sorted, so a re-encoded body reads the same every time.
+    static var sortedKeys: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        return encoder
     }
 }
 
 extension ThalovantApiError {
-    /// This error with every value in `hidden` replaced by `[redacted]` in its
-    /// message, body, code, detail and problem (keys included).
+    /// A new error like this one, with every value in `hidden` replaced by
+    /// `[redacted]` in its message, body, code, detail and problem (keys
+    /// included).
     ///
     /// An API that echoes a request back (a 422 lists each field's `input`)
-    /// would otherwise hand the code and the verifier to whoever logs the error.
+    /// would otherwise hand the code and the verifier to whoever logs the
+    /// error. Always a new value, built from the scrubbed fields alone.
     func withoutSecrets(_ hidden: [String]) -> ThalovantApiError {
-        let values = hidden.filter { !$0.isEmpty }
-        func scrub(_ text: String) -> String {
-            values.reduce(text) { $0.replacingOccurrences(of: $1, with: "[redacted]") }
-        }
-        func scrub(_ value: JSONValue) -> JSONValue {
-            switch value {
-            case .string(let text): return .string(scrub(text))
-            case .array(let items): return .array(items.map(scrub))
-            case .object(let fields): return .object(scrubObject(fields))
-            default: return value
-            }
-        }
-        func scrubObject(_ fields: JSONObject) -> JSONObject {
-            var out: JSONObject = [:]
-            for (key, value) in fields { out[scrub(key)] = scrub(value) }
-            return out
-        }
-        let message = scrub(self.message)
-        let body = self.body.map(scrub)
-        let problem = self.problem.map(scrubObject)
-        let errorCode = self.errorCode.map(scrub)
-        let detail = self.detail.map(scrub)
-        guard message != self.message || body != self.body || problem != self.problem
-            || errorCode != self.errorCode || detail != self.detail else { return self }
-        return ThalovantApiError(
-            message: message, statusCode: statusCode, body: body, errorCode: errorCode, detail: detail,
-            problem: problem, kind: kind, retryAfterSeconds: retryAfterSeconds)
+        ThalovantApiError(
+            message: redacting(message, hidden), statusCode: statusCode, body: body.map { redacting($0, hidden) },
+            errorCode: errorCode.map { redacting($0, hidden) }, detail: detail.map { redacting($0, hidden) },
+            problem: problem.map { redacting($0, hidden) }, kind: kind, retryAfterSeconds: retryAfterSeconds)
     }
 }

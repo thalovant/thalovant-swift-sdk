@@ -131,6 +131,10 @@ final class BrowserLoginVectorTests: XCTestCase {
         }
     }
 
+    // The loopback listener and `browserLogin` exist on macOS and Linux only:
+    // on iOS, tvOS, watchOS and visionOS the pure sections above still run.
+    #if os(macOS) || os(Linux)
+
     /// The same cases through a real socket: the listener answers as the rule says.
     func testCallbacksOverTheListener() async throws {
         let pages = try XCTUnwrap(vectors()["page_headers"]?.objectValue)
@@ -342,6 +346,8 @@ final class BrowserLoginVectorTests: XCTestCase {
         XCTAssertFalse(answer.body.contains("src=") || answer.body.contains("href=") || answer.body.contains("http"), name)
     }
 
+    #endif
+
     // MARK: The rest of the file
 
     func testEverySectionIsRun() throws {
@@ -390,6 +396,7 @@ final class BrowserLoginVectorTests: XCTestCase {
         }
     }
 
+    #if os(macOS) || os(Linux)
     func testTheListenerBindsLoopbackOnly() async throws {
         let listener = LoopbackListener(state: String(repeating: "s", count: 32))
         let port = try listener.start()
@@ -398,6 +405,7 @@ final class BrowserLoginVectorTests: XCTestCase {
         await listener.close()
         XCTAssertTrue(RawHTTP.refused(port: port))
     }
+    #endif
 }
 
 // MARK: - What the test learnt from the URL the SDK built
@@ -687,6 +695,39 @@ enum RawHTTP {
         return RawAnswer(status: status, headers: headers, body: String(text[split.upperBound...]))
     }
 
+    /// Sends `bytes` from one thread while reading the answer on another, as
+    /// a browser does; returns what was read and the errno the read ended
+    /// with, nil for a clean end.
+    static func sendWhileReading(port: Int, bytes: [UInt8]) async throws -> ([UInt8], Int32?) {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global().async {
+                do {
+                    let connection = try RawConnection(port: port)
+                    let sent = DispatchSemaphore(value: 0)
+                    let fd = connection.fd
+                    Thread.detachNewThread {
+                        _ = bytes.withUnsafeBytes { RawConnection.sendAll(fd, $0) }
+                        sent.signal()
+                    }
+                    var data: [UInt8] = []
+                    var failure: Int32?
+                    var buffer = [UInt8](repeating: 0, count: 65_536)
+                    while true {
+                        let count = recv(fd, &buffer, buffer.count, 0)
+                        if count > 0 { data += buffer[0..<count]; continue }
+                        if count < 0 { failure = errno }
+                        break
+                    }
+                    _ = sent.wait(timeout: .now() + 5)
+                    connection.close()
+                    continuation.resume(returning: (data, failure))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
     /// Whether a new connection to the port is refused.
     static func refused(port: Int) -> Bool {
         guard let connection = try? RawConnection(port: port) else { return true }
@@ -697,7 +738,7 @@ enum RawHTTP {
 
 /// A blocking TCP connection to 127.0.0.1, bounded by a ten-second receive timeout.
 final class RawConnection: @unchecked Sendable {
-    private let fd: Int32
+    let fd: Int32
 
     init(port: Int) throws {
         #if canImport(Glibc)
@@ -760,6 +801,27 @@ final class RawConnection: @unchecked Sendable {
     }
 
     func close() { Self.systemClose(fd) }
+
+    /// Writes all of `bytes` on `fd`, or as much as goes before an error.
+    @discardableResult
+    static func sendAll(_ fd: Int32, _ bytes: UnsafeRawBufferPointer) -> Bool {
+        #if canImport(Glibc)
+        let flags = Int32(MSG_NOSIGNAL)
+        #else
+        let flags: Int32 = 0
+        #endif
+        var sent = 0
+        while sent < bytes.count {
+            #if canImport(Glibc)
+            let wrote = Glibc.send(fd, bytes.baseAddress! + sent, bytes.count - sent, flags)
+            #else
+            let wrote = Darwin.send(fd, bytes.baseAddress! + sent, bytes.count - sent, flags)
+            #endif
+            if wrote <= 0 { return false }
+            sent += wrote
+        }
+        return true
+    }
 
     private static func systemClose(_ descriptor: Int32) {
         #if canImport(Glibc)

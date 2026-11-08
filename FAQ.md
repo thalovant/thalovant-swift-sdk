@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Answer the browser sign-in questions (0.12.0).
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in answers for the final contract (prompt, sandbox entitlement, empty device name, wording).
 
 # FAQ: thalovant-swift-sdk
 
@@ -12,13 +12,19 @@ The Python SDK is the parity reference. Each consumer records the reference dige
 `try await api.interactiveLogin()`. On a machine that can show a browser (macOS, or Linux with `DISPLAY` or `WAYLAND_DISPLAY`, and never with `CI`, `SSH_CONNECTION` or `SSH_TTY` set) it calls `browserLogin()`: PKCE on a loopback redirect to `http://127.0.0.1:<port>/callback`. Otherwise it uses a device login. `InteractiveLoginOptions(method: .browser)` or `.device` forces one. See `Sources/ThalovantSDK/BrowserLogin.swift`.
 
 **Why browser sign-in instead of the device code?**
-A device code can be relayed: somebody reads it off one screen and types it in anywhere (device-code phishing). With a loopback redirect, the browser that approves hands the code to its own computer, so a link sent to somebody else delivers nothing.
+A device code can be passed on: somebody reads it off one screen and types it in anywhere (device-code phishing). With a loopback redirect, the browser that approves hands the code to its own computer's `127.0.0.1`, so a link or code sent to someone on another computer delivers nothing to the sender. A forwarded callback port (`ssh -L`) or another user of the same computer can still complete one.
 
 **Does browser sign-in work on iOS?**
 No. `browserLogin()` is unavailable on iOS, tvOS, watchOS and visionOS, and `interactiveLogin()` uses a device login there. An app signs in with `NativeSignIn` and `ASWebAuthenticationSession`, as `thalovant-ios` does.
 
 **The browser did not open. What now?**
-The URL is always printed as well (`Opening your browser to sign in to Thalovant. If it does not open, visit:` and the URL on the next line). Open it in any browser on the same machine. Pass `BrowserLoginOptions(prompt:)` to show it yourself, or `opener:` to open it your own way.
+The URL is always shown as well. Without a `prompt` it is printed (`Opening your browser to sign in to Thalovant. If it does not open, visit:` and the URL on the next line). Open it in any browser on the same machine. `BrowserLoginOptions(prompt:)` receives the URL instead of the print, so a tool that passes one must show it; `opener:` opens it your own way.
+
+**My sandboxed Mac app's browser sign-in fails before the browser opens.**
+Listening on `127.0.0.1` needs the `com.apple.security.network.server` entitlement in a sandboxed macOS app. Without it the listener cannot start, and `browserLogin()` and `interactiveLogin(.auto)` throw. The shared contract keeps that an error rather than a silent device login. Add the entitlement, or use `InteractiveLoginOptions(method: .device)`, or `NativeSignIn` with `ASWebAuthenticationSession`.
+
+**How do I keep my hostname off the consent page?**
+Pass an empty `deviceName` (`""`). Nil gets the default, `thalovant-swift-sdk on <hostname>`; an empty name sends none, to a browser sign-in or, through `interactiveLogin`, to a device login.
 
 **What does a browser sign-in throw?**
 Denied: `ThalovantDeviceLoginError.denied`. No answer within the timeout (300 s by default): `ThalovantDeviceLoginError.expired`. These are the device login's own types, and their messages still say "device sign-in". A refused exchange: `ThalovantApiError` with status 400 and detail `invalid_grant`. An API without browser sign-in: `ThalovantApiError` with status 404, which `interactiveLogin(.auto)` turns into a device login before anything is opened.

@@ -1,6 +1,64 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record browser sign-in (0.12.0), its verification and the Transparency Report.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the CodeRabbit round and the final producer port (39e31d8), with verification and the Transparency Report.
 
 # Maintenance Report
+
+## 2026-11-08 — Browser sign-in: CodeRabbit round and the final producer (0.12.0)
+
+**What changed:**
+
+- **The 13 CodeRabbit threads on #52.** Nine were fixed with tests:
+  - bracket junk around an authorization host;
+  - the callback `error` kept only as an RFC 6749 code;
+  - the token id read from the exchange answer;
+  - a one-pass, overlap-proof scrub;
+  - the device fallback's opener run off the polling task;
+  - accept batches bounded, and the oldest idle connection evicted;
+  - the wait's deadline checked when a callback is accepted;
+  - desktop-only tests gated to macOS and Linux;
+  - the README/FAQ/CHANGELOG wording on `prompt`, and the AUDIT evidence line.
+
+  One was resolved by the producer's change 6 (no tab deadline). Two were answered as the cross-SDK contract: a listener that cannot start still raises in `auto`, and the printed URL carries the state. The pre-existing device-login `acceptDeviceToken` read-back was reported to the lead, not changed.
+- **The final producer, thalovant-python-sdk #113 at `39e31d8`.**
+  - `browser-login-vectors.json` was re-vendored byte for byte (sha256 `b0c73f808c4f26328c27dd4d04eebfbbc3e7c0c81b8d63a666f63737d0259e73`, 119 cases).
+  - Its ten changes, all ported:
+    - every request is checked against the API's origin (`buildRequest`);
+    - `token_endpoint` refuses a colon and a broken `%`-escape;
+    - `authorization_endpoint` refuses port 0 and anything above 65535, and the host must be an IPv6 address in brackets, an IPv4 address or an ASCII DNS name;
+    - only RFC 6749 error codes are kept from a callback;
+    - only a nil `deviceName` gets the default;
+    - the accepted tab's 60 s bound is dropped;
+    - a HEAD answer has no body;
+    - the exchange's answer is redacted before its message is built, then a fresh error is made;
+    - every answer is drained (2 s / 1 MiB) before close;
+    - the wording is "a link or code sent to someone on another computer delivers nothing to the sender".
+  - The exchange now goes out on a session of its own (`performOnce`), so it is never sent on a reused connection.
+- **`contracts/sdk-parity.json`:** the interim candidate `49744ee385bf` was replaced by the final `6dfb3bb31ac7` beside the current `57c7e71f6456`. Evidence hashes were refreshed only for the files that changed (`BrowserLogin.swift`, `Loopback.swift`, `ControlPlane.swift` and the two browser test files), with every other recorded hash asserted unchanged. `ControlPlane.swift` also moves for api-errors, connection-admission, connection-kinds, control and device-login, because the origin check and `performOnce` live there.
+
+**Why:** the review found real gaps, and the producer revision folds in every port's findings. The parity gate needs each consumer to run the final vectors and acknowledge the final digest before Python merges.
+
+**Verification:**
+
+- `swift build` and `THALOVANT_CONFORMANCE_OUT=contracts/conformance-results.json swift test` (Linux, Swift 6.3.2): build complete, **487 tests, 0 failures** (879 s).
+- `browser-login-vectors.json` results: **119/119** case digests and the file digest equal the reference's at `39e31d8`. The 98 earlier cases recorded exactly what they did before, and every other vector file's results are unchanged.
+- The CI's `swift:5.10` image (5.10.1), full `swift build` and `swift test`: build complete, **487 tests, 0 failures** (222 s).
+- `check-sdk-parity.py --workspace <checkouts> --consumer thalovant-swift-sdk`:
+  - against Python `39e31d8`: verified, no gaps;
+  - against Python `main` `44b6e2b`: verified, with "declares capabilities the reference does not know yet: browser-login", the expected rollout state.
+- `python3 tools/check-source-hashes.py` and `python3 -m unittest discover -s tools/tests` (13 tests): pass.
+- **URLSession retry check.** On Linux, with the exchange sent on the shared session, the POST reused the configuration's keep-alive connection, and its libcurl sent it once even when that connection died after the server read it. In `swift:5.10`: with the shared session the POST also reused connection #1, was sent once, and URLSession did not notice the hang-up. The exchange hung until the 60 s request timeout (`-1001`), so the tab waited a minute. With the dedicated session it failed at once on a new connection (the full 5.10 run above). The dedicated session takes the reuse away on every platform. `testTheExchangeIsSentOnceEvenWhenItsConnectionDies` pins one POST, on a new connection, against a real keep-alive server.
+- **The live API.** `https://api.thalovant.com/v1/auth/native/config` answered 200 with `authorization_endpoint` `https://dash.thalovant.com/authorize`, `token_endpoint` `/v1/auth/native/token`, `sdk_client_id` `thalovant-sdk` and S256. Through the SDK, `browserLogin(openBrowser: false, timeout: 2)` read that configuration, bound the listener, built `https://dash.thalovant.com/authorize?response_type=code&client_id=thalovant-sdk&redirect_uri=http%3A%2F%2F127.0.0.1%3A<port>%2Fcallback&code_challenge=<43>&code_challenge_method=S256&state=<32>&device_name=…`, opened nothing, and expired as expected.
+- After the full runs, two doc comments were reworded (comment-only, in `BrowserLogin.swift` and `ControlPlane.swift`). `swift test --filter "BrowserLogin|DeviceLogin|NativeSignIn|ApiErrorVector|AdmissionVector|ConnectionKindsVector|RequestBuilding|ControlPlaneSecurity"` then ran **134 tests, 0 failures**, recording results identical to the committed ones, and those two files' hashes were refreshed.
+- **Not run:** no macOS or iOS build was done locally. Hosted CI builds and tests macOS, and nothing builds iOS.
+
+### Transparency Report
+
+- **AI Model:** Claude Opus 5.5 (claude-opus-5-5), as a Claude Code agent working for the lead's cross-SDK rollout.
+- **Actions Taken:**
+  - Read the 13 review threads and the producer's diff and brief at `39e31d8`.
+  - Changed `BrowserLogin.swift`, `Loopback.swift` and `ControlPlane.swift`, and the two browser test files, adding tests for every fix and every row.
+  - Re-vendored the vectors and re-recorded the results, refreshed the changed-file hashes, and updated the docs and these records.
+  - Replied on and resolved each thread.
+- **Oversight:** hosted CI (macOS, Linux), the SDK parity workflow and the PR review gate the merge, and only the lead merges.
 
 ## 2026-11-08 — Browser sign-in (0.12.0)
 
