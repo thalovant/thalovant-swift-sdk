@@ -295,6 +295,60 @@ final class BrowserLoginTests: XCTestCase {
         }
     }
 
+    /// IP hosts as the reference's `ipaddress` reads them, on every platform:
+    /// the verdicts below are Python's own (`_usable_authorization_endpoint`
+    /// at #113 `39e31d8`). macOS's `inet_pton` accepted `01.2.3.4`, which
+    /// glibc and the reference refuse, so the SDK parses addresses itself.
+    func testIPHostsAreReadAsTheReferenceReadsThem() {
+        let verdicts: [(String, Bool)] = [
+            ("01.2.3.4", false),
+            ("1.2.3.04", false),
+            ("1.02.3.4", false),
+            ("0.0.0.0", true),
+            ("00.1.2.3", false),
+            ("1.2.3.4", true),
+            ("255.255.255.255", true),
+            ("256.1.1.1", false),
+            ("1.2.3", false),
+            ("1.2.3.4.5", false),
+            ("1.2.3.", false),
+            ("0x7f.0.0.1", false),
+            ("1.2.3.0x4", true),
+            ("127.1", false),
+            ("[::1]", true),
+            ("[::]", true),
+            ("[1::]", true),
+            ("[::ffff:1.2.3.4]", true),
+            ("[::ffff:01.2.3.4]", false),
+            ("[::ffff:1.2.3]", false),
+            ("[1:2:3:4:5:6:7:8]", true),
+            ("[1:2:3:4:5:6:7:8:9]", false),
+            ("[1::2::3]", false),
+            ("[12345::]", false),
+            ("[:1]", false),
+            ("[1:]", false),
+            ("[1:2:3:4:5:6:7::]", true),
+            ("[::1:2:3:4:5:6:7]", true),
+            ("[1:2:3:4:5:6:7:8::]", false),
+            ("[0000:0000::1]", true),
+            ("[00000::1]", false),
+            ("[::g]", false),
+            ("[fe80::1%25eth0]", true),
+            ("[::1%]", false),
+            ("[1:2:3:4:5:6:1.2.3.4]", true),
+            ("[1:2:3:4:5:6:7:1.2.3.4]", false),
+            ("[::1.2.3.4]", true),
+            ("[::FFFF:1.2.3.4]", true),
+            ("[1.2.3.4]", false),
+        ]
+        for (host, usable) in verdicts {
+            XCTAssertEqual(NativeSignInConfig.usableAuthorizationEndpoint("https://\(host)/authorize"), usable, host)
+        }
+        XCTAssertEqual(NativeSignInConfig.ipv4Value("192.0.2.10"), 0xC000_020A)
+        XCTAssertEqual(NativeSignInConfig.ipv6Hextets("::ffff:1.2.3.4"), [0, 0, 0, 0, 0, 0xFFFF, 0x0102, 0x0304])
+        XCTAssertEqual(NativeSignInConfig.ipv6Hextets("1::"), [1, 0, 0, 0, 0, 0, 0, 0])
+    }
+
     func testATokenEndpointAndAClientIdAreReadStrictly() {
         for path in ["/v1/auth/native/token", "/v1/auth/native/%74oken", "/v1/%2F%2fx"] {
             XCTAssertTrue(NativeSignInConfig.usableTokenEndpoint(path), path)

@@ -380,17 +380,88 @@ public struct NativeSignInConfig: Equatable, Sendable {
     /// An IPv6 address, with an optional `%zone`, as the reference's
     /// `ipaddress` reads one: a zone, when there is a `%`, is not empty and
     /// holds no second `%`.
-    private static func isIPv6(_ text: String) -> Bool {
-        var address = in6_addr()
+    ///
+    /// Parsed here rather than by the platform's `inet_pton`, which is not the
+    /// same everywhere: macOS's accepts `01.2.3.4` where glibc and the
+    /// reference refuse it, and a configuration must be usable or not alike on
+    /// every platform.
+    static func isIPv6(_ text: String) -> Bool {
         let parts = text.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
         if parts.count == 2, parts[1].isEmpty || parts[1].contains("%") { return false }
-        return inet_pton(AF_INET6, String(parts[0]), &address) == 1
+        return ipv6Hextets(String(parts[0])) != nil
     }
 
-    /// Four decimal octets, 0-255 each, no leading zeros.
-    private static func isIPv4(_ text: String) -> Bool {
-        var address = in_addr()
-        return inet_pton(AF_INET, text, &address) == 1
+    /// Four decimal octets, 0-255 each, with no leading zeros, as the
+    /// reference's `ipaddress.IPv4Address` reads them.
+    static func isIPv4(_ text: String) -> Bool { ipv4Value(text) != nil }
+
+    /// `ipaddress.IPv4Address`: exactly four octets of one to three ASCII
+    /// digits, none above 255, none with a leading zero but `0` itself.
+    static func ipv4Value(_ text: String) -> UInt32? {
+        let octets = text.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4 else { return nil }
+        var value: UInt32 = 0
+        for octet in octets {
+            guard (1...3).contains(octet.count), octet.unicodeScalars.allSatisfy({ ("0"..."9").contains($0) }),
+                  octet == "0" || octet.first != "0", let number = UInt32(octet), number <= 255 else { return nil }
+            value = value << 8 | number
+        }
+        return value
+    }
+
+    /// `ipaddress.IPv6Address` without its zone: up to eight hextets of one to
+    /// four hex digits, `::` at most once and standing for at least one, and
+    /// an IPv4 address in place of the last two.
+    static func ipv6Hextets(_ text: String) -> [UInt16]? {
+        guard !text.isEmpty else { return nil }
+        var parts = text.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3 else { return nil }
+        if let last = parts.last, last.contains(".") {
+            guard let v4 = ipv4Value(last) else { return nil }
+            parts.removeLast()
+            parts += [String(v4 >> 16, radix: 16), String(v4 & 0xFFFF, radix: 16)]
+        }
+        guard parts.count <= 9 else { return nil }
+        var skip: Int?
+        for index in 1..<(parts.count - 1) where parts[index].isEmpty {
+            guard skip == nil else { return nil }  // `::` twice
+            skip = index
+        }
+        var high: Int
+        var low: Int
+        if let skip {
+            high = skip
+            low = parts.count - skip - 1
+            if parts[0].isEmpty {
+                high -= 1
+                guard high == 0 else { return nil }  // a leading `:` needs `::`
+            }
+            if parts[parts.count - 1].isEmpty {
+                low -= 1
+                guard low == 0 else { return nil }  // a trailing `:` needs `::`
+            }
+            guard 8 - (high + low) >= 1 else { return nil }
+        } else {
+            guard parts.count == 8, !parts[0].isEmpty, !parts[7].isEmpty else { return nil }
+            high = 8
+            low = 0
+        }
+        func hextet(_ part: String) -> UInt16? {
+            guard (1...4).contains(part.count), part.unicodeScalars.allSatisfy({ $0.properties.isASCIIHexDigit }) else { return nil }
+            return UInt16(part, radix: 16)
+        }
+        var hextets: [UInt16] = []
+        for part in parts[0..<high] {
+            guard let value = hextet(part) else { return nil }
+            hextets.append(value)
+        }
+        let tail = parts[(parts.count - low)..<parts.count]
+        hextets += [UInt16](repeating: 0, count: 8 - high - low)
+        for part in tail {
+            guard let value = hextet(part) else { return nil }
+            hextets.append(value)
+        }
+        return hextets
     }
 
     /// A path on the API: one leading slash, not two, every `%` followed by two

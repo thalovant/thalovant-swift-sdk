@@ -1,6 +1,31 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the third CodeRabbit round on #52, with verification and the Transparency Report.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the macOS CI fix on #52 (IP hosts parsed as the reference does), with verification.
 
 # Maintenance Report
+
+## 2026-11-08 — Browser sign-in: the macOS CI failure on `bf70147` (0.12.0)
+
+**What failed:** `test-macos`, in both CI runs (push and pull request). Linux, `interop-linux`, CodeQL and SDK parity passed. The job log has one failure, the same in both runs: `BrowserLoginTests.testAnAuthorizationEndpointNoBrowserCanOpenIsUnusable` — `XCTAssertFalse failed - https://01.2.3.4/authorize`. Every listener, drain and eviction test, and every vector, passed on macOS.
+
+**Cause:** `isRealHost` used the platform's `inet_pton` to read IP hosts. On macOS, `inet_pton(AF_INET, "01.2.3.4")` succeeds; glibc refuses a leading zero, and so does the reference's `ipaddress.IPv4Address`. So the same configuration was unusable on Linux and usable on a Mac. A Mac's `auto` would have picked browser sign-in where every other SDK picks device login. The IPv6 path had the same dependence, its embedded IPv4 included.
+
+**Fix:** `ipv4Value` and `ipv6Hextets` in `Sources/ThalovantSDK/BrowserLogin.swift` port Python's `ipaddress` parsing exactly: four octets of 1-3 digits, no leading zero, at most 255; up to eight hextets of 1-4 hex digits, `::` once and standing for at least one, an IPv4 address in place of the last two. Nothing calls `inet_pton` any more.
+
+**Test:** `testIPHostsAreReadAsTheReferenceReadsThem` checks 39 IP hosts against verdicts taken from the reference itself (`_usable_authorization_endpoint` at `39e31d8`): leading zeros, short and long forms, `::` rules, embedded IPv4, zones and brackets. The failing assertion stays as it was.
+
+**Verification:**
+
+- `swift build` and `THALOVANT_CONFORMANCE_OUT=contracts/conformance-results.json swift test` (Linux, Swift 6.3.2): **490 tests, 0 failures** (one new test).
+- The CI's `swift:5.10` image (5.10.1), full `swift build` and `swift test` with the recorder: **490 tests, 0 failures**. It recorded a file identical to the committed one.
+- The conformance record is unchanged: `browser-login-vectors.json` 119/119 equals the reference's.
+- `check-sdk-parity.py`: verified against Python `39e31d8` and `main` `44b6e2b`.
+- Evidence hashes were refreshed for `BrowserLogin.swift` and `BrowserLoginTests.swift` only (browser-login); every other recorded hash was asserted unchanged.
+- macOS: decided by the hosted `test-macos` job on the pushed commit (recorded in the PR).
+
+### Transparency Report
+
+- **AI Model:** Claude Opus 5.5 (claude-opus-5-5), as a Claude Code agent working for the lead's cross-SDK rollout.
+- **Actions Taken:** read the failing macOS job logs; traced the failure to `inet_pton`; ported the reference's address parsing and pinned its verdicts in a test; re-ran the suites and the recorder; refreshed the changed files' hashes; pushed and watched CI.
+- **Oversight:** hosted CI (macOS, Linux), the SDK parity workflow and the PR review gate the merge; only the lead merges.
 
 ## 2026-11-08 — Browser sign-in: third CodeRabbit round on #52 (0.12.0)
 

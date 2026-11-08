@@ -28,7 +28,7 @@ Browser sign-in, ported from the Python reference's final 0.11.0 producer (`brow
   - A configuration that cannot be used safely is an error with no status:
     - a dashboard that is not https (or loopback http), or that carries credentials, a query or a fragment;
     - a dashboard on port 0 or above 65535;
-    - a dashboard host that is not an IPv6 address in brackets, an IPv4 address or an ASCII DNS name (`xn--` for international names);
+    - a dashboard host that is not an IPv6 address in brackets, an IPv4 address or an ASCII DNS name (`xn--` for international names). Addresses are read exactly as the reference's `ipaddress` reads them, on every platform, never by the platform's `inet_pton` (macOS's accepts `01.2.3.4`);
     - a token endpoint that is not a path on the API (no colon, no broken `%`-escape);
     - a bad `sdk_client_id`, or no S256.
   - A cleartext API URL (neither https nor http on `localhost`, `127.0.0.1` or `::1`) is refused before anything is asked or opened, and a listener that cannot start is an error, in `interactiveLogin` too.
