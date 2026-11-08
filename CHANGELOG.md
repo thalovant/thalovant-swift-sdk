@@ -22,7 +22,7 @@ Browser sign-in, ported from the Python reference's final 0.11.0 producer (`brow
 - **No request leaves the API's origin.** Every request the control plane builds is checked against the API's scheme, host and port, and refused with an error with no status otherwise.
 - **Errors reuse the device-login types.**
   - Denied is `ThalovantDeviceLoginError.denied` and a timeout is `ThalovantDeviceLoginError.expired`.
-  - A failed exchange is a `ThalovantApiError` with the api-errors fields (400, detail `invalid_grant`). A 2xx that is not a token is a `ThalovantApiError` with no status.
+  - A refused exchange is a `ThalovantApiError` with the answer's own HTTP status and its api-errors fields: the API answers every way an exchange fails with 400, detail `invalid_grant`, and another status (a 422, a 503) is kept as sent. A transport failure, or a 2xx that is not a token, is a `ThalovantApiError` with no status.
   - Another `error` from the consent page is a `ThalovantApiError` whose `errorCode` is kept only when it is one of RFC 6749's codes.
   - A 404 on the configuration means an API without browser sign-in.
   - A configuration that cannot be used safely is an error with no status:
@@ -31,11 +31,11 @@ Browser sign-in, ported from the Python reference's final 0.11.0 producer (`brow
     - a dashboard host that is not an IPv6 address in brackets, an IPv4 address or an ASCII DNS name (`xn--` for international names);
     - a token endpoint that is not a path on the API (no colon, no broken `%`-escape);
     - a bad `sdk_client_id`, or no S256.
-  - A cleartext API URL is refused before anything is asked or opened, and a listener that cannot start is an error, in `interactiveLogin` too.
+  - A cleartext API URL (neither https nor http on `localhost`, `127.0.0.1` or `::1`) is refused before anything is asked or opened, and a listener that cannot start is an error, in `interactiveLogin` too.
   - Cancelling the task closes the port.
   - The code, the verifier, the state and the token never reach an error. An API that echoes them back, as a 422 does, has them replaced by `[redacted]` before the message is built, in one pass that leaves no part of an overlapping value, in the message, body and problem. The error is always a new one.
 - **`interactiveLogin(options:)`** chooses the method.
-  - `LoginMethod.auto` (the default) uses the browser when `BrowserLogin.canOpenBrowser()` allows it and the configuration is usable. The rule: never with `CI`, `SSH_CONNECTION` or `SSH_TTY` set; macOS and Windows yes; elsewhere only with `DISPLAY` or `WAYLAND_DISPLAY`, an empty variable counting as unset.
+  - `LoginMethod.auto` (the default) uses the browser when this build has the listener (`BrowserLogin.isAvailable`: macOS and Linux), `BrowserLogin.canOpenBrowser()` allows it, and the configuration is usable. The `canOpenBrowser` rule: never with `CI`, `SSH_CONNECTION` or `SSH_TTY` set; macOS and Windows yes; elsewhere only with `DISPLAY` or `WAYLAND_DISPLAY`, an empty variable counting as unset.
   - Otherwise it uses a device login, with `deviceName` as its `client_name` (an empty name sends none), and opens the verification page with the caller's `opener` off the polling task.
   - `.browser` and `.device` force one. Once the browser has opened, its outcome stands.
   - `timeout` defaults to each method's own: 300 s for the browser, 900 s for a device login.

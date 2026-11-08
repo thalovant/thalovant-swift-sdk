@@ -696,9 +696,12 @@ enum RawHTTP {
     }
 
     /// Sends `bytes` from one thread while reading the answer on another, as
-    /// a browser does; returns what was read and the errno the read ended
-    /// with, nil for a clean end.
-    static func sendWhileReading(port: Int, bytes: [UInt8]) async throws -> ([UInt8], Int32?) {
+    /// a browser does. Returns what was read, the errno the read ended with
+    /// (nil for a clean end), and whether the sender was still sending five
+    /// seconds after the read ended. The descriptor is closed only once the
+    /// sender has returned: a stalled one is unblocked with `shutdown` first,
+    /// never by closing a descriptor another socket could reuse.
+    static func sendWhileReading(port: Int, bytes: [UInt8]) async throws -> ([UInt8], Int32?, Bool) {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global().async {
                 do {
@@ -718,9 +721,18 @@ enum RawHTTP {
                         if count < 0 { failure = errno }
                         break
                     }
-                    _ = sent.wait(timeout: .now() + 5)
+                    var stalled = false
+                    if sent.wait(timeout: .now() + 5) == .timedOut {
+                        stalled = true
+                        #if canImport(Glibc)
+                        _ = Glibc.shutdown(fd, Int32(SHUT_RDWR))
+                        #else
+                        _ = Darwin.shutdown(fd, Int32(SHUT_RDWR))
+                        #endif
+                        sent.wait()
+                    }
                     connection.close()
-                    continuation.resume(returning: (data, failure))
+                    continuation.resume(returning: (data, failure, stalled))
                 } catch {
                     continuation.resume(throwing: error)
                 }

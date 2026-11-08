@@ -378,11 +378,13 @@ public struct NativeSignInConfig: Equatable, Sendable {
     }
 
     /// An IPv6 address, with an optional `%zone`, as the reference's
-    /// `ipaddress` reads one.
+    /// `ipaddress` reads one: a zone, when there is a `%`, is not empty and
+    /// holds no second `%`.
     private static func isIPv6(_ text: String) -> Bool {
         var address = in6_addr()
-        let plain = text.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? text
-        return inet_pton(AF_INET6, plain, &address) == 1
+        let parts = text.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+        if parts.count == 2, parts[1].isEmpty || parts[1].contains("%") { return false }
+        return inet_pton(AF_INET6, String(parts[0]), &address) == 1
     }
 
     /// Four decimal octets, 0-255 each, no leading zeros.
@@ -518,7 +520,8 @@ extension ThalovantControlPlane {
     /// not open, visit:` and the URL); a `prompt` receives it instead of the
     /// print. `openBrowser: false` only shows it. A sandboxed macOS app needs
     /// the `com.apple.security.network.server` entitlement to listen; without
-    /// it the listener cannot start and this throws, in `interactiveLogin` too.
+    /// it the listener cannot start and this throws, as `interactiveLogin`
+    /// does whenever it picks browser sign-in.
     ///
     /// Returns the token answer as a `DeviceLoginResult` and stores
     /// `accessToken` and `tokenId` exactly as a device login does, so
@@ -826,34 +829,49 @@ let redactedMarker = "[redacted]"
 /// anything is replaced, and each run of covered characters becomes one
 /// `[redacted]`. So a value that is part of a longer one cannot break it up
 /// before it is matched, and two values that overlap leave nothing of either.
-/// A `[redacted]` already there is left alone, so scrubbing twice changes
-/// nothing. Empty values are ignored.
+/// A value is matched across a `[redacted]` already there too, so a secret
+/// that contains the marker is still taken out. Only a match lying wholly
+/// inside an existing `[redacted]` is left alone, so scrubbing twice changes
+/// nothing; a marker a match runs into is replaced whole. Empty values are
+/// ignored.
 func redacting(_ text: String, _ hidden: [String]) -> String {
     let values = Set(hidden.filter { !$0.isEmpty })
     guard !values.isEmpty else { return text }
-    return text.components(separatedBy: redactedMarker).map { part -> String in
-        let scalars = Array(part.unicodeScalars)
-        var covered = [Bool](repeating: false, count: scalars.count)
-        for value in values {
-            let needle = Array(value.unicodeScalars)
-            guard needle.count <= scalars.count else { continue }
-            for start in 0...(scalars.count - needle.count) where scalars[start..<start + needle.count].elementsEqual(needle) {
-                for index in start..<start + needle.count { covered[index] = true }
-            }
+    let scalars = Array(text.unicodeScalars)
+    let marker = Array(redactedMarker.unicodeScalars)
+    func occurrences(_ needle: [Unicode.Scalar]) -> [Int] {
+        guard !needle.isEmpty, needle.count <= scalars.count else { return [] }
+        return (0...(scalars.count - needle.count)).filter { scalars[$0..<$0 + needle.count].elementsEqual(needle) }
+    }
+    // The markers already there, left to right, never overlapping.
+    var markers: [Range<Int>] = []
+    for start in occurrences(marker) where markers.last.map({ start >= $0.upperBound }) ?? true {
+        markers.append(start..<start + marker.count)
+    }
+    var covered = [Bool](repeating: false, count: scalars.count)
+    for value in values {
+        let needle = Array(value.unicodeScalars)
+        for start in occurrences(needle) {
+            let match = start..<start + needle.count
+            if markers.contains(where: { $0.lowerBound <= match.lowerBound && match.upperBound <= $0.upperBound }) { continue }
+            for index in match { covered[index] = true }
         }
-        var out = String.UnicodeScalarView()
-        var index = 0
-        while index < scalars.count {
-            if covered[index] {
-                out.append(contentsOf: redactedMarker.unicodeScalars)
-                while index < scalars.count && covered[index] { index += 1 }
-            } else {
-                out.append(scalars[index])
-                index += 1
-            }
+    }
+    for range in markers where range.contains(where: { covered[$0] }) {
+        for index in range { covered[index] = true }
+    }
+    var out = String.UnicodeScalarView()
+    var index = 0
+    while index < scalars.count {
+        if covered[index] {
+            out.append(contentsOf: marker)
+            while index < scalars.count && covered[index] { index += 1 }
+        } else {
+            out.append(scalars[index])
+            index += 1
         }
-        return String(out)
-    }.joined(separator: redactedMarker)
+    }
+    return String(out)
 }
 
 /// `redacting(_:_:)` through a JSON value, keys included.

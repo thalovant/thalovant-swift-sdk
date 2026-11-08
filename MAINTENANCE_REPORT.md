@@ -1,6 +1,40 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the CodeRabbit round and the final producer port (39e31d8), with verification and the Transparency Report.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the third CodeRabbit round on #52, with verification and the Transparency Report.
 
 # Maintenance Report
+
+## 2026-11-08 — Browser sign-in: third CodeRabbit round on #52 (0.12.0)
+
+**What changed:** CodeRabbit's 14 minor threads on `facb532`.
+
+- **Fixed in code, with tests (5):**
+  - an IPv6 zone must be non-empty, with no second `%`, which aligns with the reference;
+  - the scrub matches secrets across an existing `[redacted]`, so a code that contains the marker is still taken out;
+  - an oversized `HEAD` head's 400 has no body;
+  - at the connection cap, connections that have something to read are served before one is closed;
+  - the reset test asserts each case's exact status.
+- **Fixed in the test helpers (3):** `TinyHTTPServer` closes its socket on a failed setup and shuts down every accepted connection on `stop()`, and `sendWhileReading` never closes a descriptor its sender may still use.
+- **Fixed in the docs (4):** the CHANGELOG's exchange status, its cleartext rule and its `.auto` conditions; the FAQ, README and doc comment on when `.auto` needs the entitlement.
+- **Answered without a change (2):**
+  - A hex last label (`auth.0x1`) stays usable, as the reference's `_real_host` reads it, because the cross-SDK contract decides which configurations are usable. The gap is reported to the lead and pinned by a test.
+  - The device-login `acceptDeviceToken` stays unchanged, as before.
+
+The scrub and HEAD changes are stricter than the reference on inputs no vector covers. They follow the brief's own rules, and are recorded in AUDIT.md and SUGGESTIONS.md for the producer.
+
+**Verification:**
+
+- `swift build` and `THALOVANT_CONFORMANCE_OUT=contracts/conformance-results.json swift test` (Linux, Swift 6.3.2): **489 tests, 0 failures** (841 s; two new tests).
+- The CI's `swift:5.10` image (5.10.1), full `swift build` and `swift test` with the recorder: **489 tests, 0 failures** (224 s).
+- The conformance record is unchanged and equal to the reference (`browser-login-vectors.json`: 119/119 case digests and the file digest), and the 5.10 run recorded the same file.
+- `check-sdk-parity.py --workspace <checkouts> --consumer thalovant-swift-sdk`: verified against Python `39e31d8` (still the PR head), and against Python `main` `44b6e2b` (the expected rollout note).
+- `python3 tools/check-source-hashes.py` and `python3 -m unittest discover -s tools/tests`: pass.
+- Evidence hashes were refreshed for `BrowserLogin.swift`, `Loopback.swift`, `BrowserLoginTests.swift` and `BrowserLoginVectorTests.swift` only (browser-login); every other recorded hash was asserted unchanged.
+- **Not run:** no macOS or iOS build was done locally.
+
+### Transparency Report
+
+- **AI Model:** Claude Opus 5.5 (claude-opus-5-5), as a Claude Code agent working for the lead's cross-SDK rollout.
+- **Actions Taken:** checked the reference's behaviour on each thread's input against Python `39e31d8` itself; changed `BrowserLogin.swift`, `Loopback.swift`, the two browser test files and the docs; re-ran the suites and the recorder; refreshed the changed files' hashes; replied to and resolved each thread.
+- **Oversight:** hosted CI, the SDK parity workflow and the PR review gate the merge; only the lead merges.
 
 ## 2026-11-08 — Browser sign-in: CodeRabbit round and the final producer (0.12.0)
 

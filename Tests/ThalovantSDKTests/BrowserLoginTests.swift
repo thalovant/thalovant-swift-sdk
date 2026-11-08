@@ -97,7 +97,16 @@ final class BrowserLoginTests: XCTestCase {
         XCTAssertEqual(redacting("zabq", ["ab", "zabq"]), "[redacted]")
         XCTAssertEqual(redacting("zabq", ["zabq", "ab"]), "[redacted]")
         XCTAssertEqual(redacting("<abcde>", ["abc", "cde"]), "<[redacted]>")
-        XCTAssertEqual(redacting("a[redacted]b", ["a[redacted]b"]), "a[redacted]b")
+        // A secret that contains the marker is still taken out; one that lies
+        // wholly inside an existing marker is not, and a marker a match runs
+        // into is replaced whole.
+        XCTAssertEqual(redacting("echo a[redacted]b end", ["a[redacted]b"]), "echo [redacted] end")
+        XCTAssertEqual(redacting("echo [redacted] end", ["dact"]), "echo [redacted] end")
+        XCTAssertEqual(redacting("xab[redacted]y", ["b[re"]), "xa[redacted]y")
+        for (text, hidden) in [("echo a[redacted]b end", ["a[redacted]b"]), ("xab[redacted]y", ["b[re"]), ("c-[redacted]-c", ["c"])] {
+            let once = redacting(text, hidden)
+            XCTAssertEqual(redacting(once, hidden), once, text)
+        }
     }
 
     func testScrubbingMakesANewErrorFromTheScrubbedFieldsAlone() {
@@ -268,14 +277,20 @@ final class BrowserLoginTests: XCTestCase {
                          "https://dash_staging.thalovant.com/authorize", "https://dash.thalovânt.com/authorize",
                          "https://999.1.1.1/authorize", "https://1.2.3/authorize", "https://01.2.3.4/authorize",
                          "https://dash.thalovant.com./authorize", "https://-dash.thalovant.com/authorize",
-                         "https://\(String(repeating: "a", count: 64)).example/authorize"] {
+                         "https://\(String(repeating: "a", count: 64)).example/authorize",
+                         // An IPv6 zone is not empty and holds no second `%`, as the reference reads it.
+                         "https://[::1%]/authorize", "https://[::1%a%b]/authorize"] {
             XCTAssertFalse(NativeSignInConfig.usableAuthorizationEndpoint(endpoint), endpoint)
         }
         for endpoint in ["https://dash.thalovant.com/authorize", "HTTPS://Dash.Thalovant.com/authorize", "http://[::1]:5173/authorize",
                          "http://LOCALHOST:5173/authorize", "https://[2001:db8::1]:8443/authorize", "https://dash.thalovant.com:/authorize",
                          "http://127.0.0.1/authorize", "https://[::1]/authorize", "https://192.0.2.10/authorize",
                          "https://xn--dsh-0na.example/authorize", "https://dash.thalovant.com:65535/authorize",
-                         "https://1.example/authorize", "https://[::1]:/authorize"] {
+                         "https://1.example/authorize", "https://[::1]:/authorize", "https://[fe80::1%25eth0]/authorize",
+                         // Only a decimal last label is numeric here, as the reference
+                         // (`_real_host`, Python #113 at 39e31d8) reads it: the
+                         // cross-SDK contract decides which configurations are usable.
+                         "https://auth.0x1/authorize"] {
             XCTAssertTrue(NativeSignInConfig.usableAuthorizationEndpoint(endpoint), endpoint)
         }
     }
@@ -788,23 +803,71 @@ final class BrowserLoginListenerTests: XCTestCase {
     /// the answer the browser had not read; Linux shows the reset as
     /// ECONNRESET. The listener drains first.
     func testAnEarlyAnswerIsNotLostToAReset() async throws {
-        let cases: [(String, [UInt8])] = [
+        let cases: [(String, [UInt8], String)] = [
             // A head far over the listener's limit: most of it is never read.
             ("oversized head", Array("GET /callback?code=".utf8) + [UInt8](repeating: UInt8(ascii: "a"), count: 600_000)
-                + Array(" HTTP/1.1\r\nHost: x\r\n\r\n".utf8)),
+                + Array(" HTTP/1.1\r\nHost: x\r\n\r\n".utf8), "HTTP/1.1 400 Bad Request"),
             // A body nobody asked for, behind a 404.
             ("unread body", Array("POST /callback HTTP/1.1\r\nHost: x\r\nContent-Length: 600000\r\n\r\n".utf8)
-                + [UInt8](repeating: UInt8(ascii: "b"), count: 600_000)),
+                + [UInt8](repeating: UInt8(ascii: "b"), count: 600_000), "HTTP/1.1 404 Not Found"),
         ]
-        for (name, bytes) in cases {
+        for (name, bytes, expected) in cases {
             let listener = LoopbackListener(state: "the-state")
             let port = try listener.start()
-            let (data, failure) = try await RawHTTP.sendWhileReading(port: port, bytes: bytes)
+            let (data, failure, stalled) = try await RawHTTP.sendWhileReading(port: port, bytes: bytes)
             await listener.close()
             let line = String(decoding: data.prefix(while: { $0 != 0x0D }), as: UTF8.self)
-            XCTAssertTrue(["HTTP/1.1 400 Bad Request", "HTTP/1.1 404 Not Found"].contains(line), "\(name): \(line)")
+            XCTAssertEqual(line, expected, name)
             XCTAssertNil(failure, "\(name): the connection ended with errno \(failure ?? 0)")
+            XCTAssertFalse(stalled, "\(name): the request could not be sent within five seconds")
         }
+    }
+
+    /// An answer to a HEAD has no body, even when its head is too large to read.
+    func testAnOversizedHeadRequestGetsItsAnswerWithNoBody() async throws {
+        let listener = LoopbackListener(state: "the-state")
+        let port = try listener.start()
+        let head = Array("HEAD /callback?code=".utf8) + [UInt8](repeating: UInt8(ascii: "a"), count: LoopbackListener.maxRequestHead + 10)
+            + Array(" HTTP/1.1\r\n\r\n".utf8)
+        let answer = try await RawHTTP.raw(port: port, bytes: head)
+        await listener.close()
+        XCTAssertEqual(answer.status, 400)
+        XCTAssertEqual(answer.body, "")
+        XCTAssertGreaterThan(Int(answer.headers["Content-Length"] ?? "") ?? 0, 0)
+        // Another method's oversized head still gets the page.
+        let other = LoopbackListener(state: "the-state")
+        let otherPort = try other.start()
+        let get = try await RawHTTP.raw(port: otherPort, bytes: Array("GET".utf8) + head.dropFirst(4))
+        await other.close()
+        XCTAssertEqual(get.status, 400)
+        XCTAssertFalse(get.body.isEmpty)
+    }
+
+    /// At the cap, a connection whose callback has arrived is served before
+    /// the oldest one is closed, even when it is the oldest.
+    func testACallbackThatHasArrivedIsServedBeforeAnyConnectionIsClosed() async throws {
+        let listener = LoopbackListener(state: "the-state")
+        let port = try listener.start()
+        // The tab connects first, as a browser that preconnects does, so it
+        // is the oldest connection when the cap is reached.
+        let tab = try RawConnection(port: port)
+        defer { tab.close() }
+        var idle: [RawConnection] = []
+        for _ in 0..<(LoopbackListener.maxConnections - 1) { idle.append(try RawConnection(port: port)) }
+        defer { idle.forEach { $0.close() } }
+        try await eventually { listener.openConnections >= LoopbackListener.maxConnections }
+        tab.send(Array("GET /callback?code=c&state=the-state HTTP/1.1\r\n\r\n".utf8))
+        // More connections at once: each would close the oldest, the tab.
+        // Once the callback is accepted the port stops listening, so these
+        // may be refused, which is the point.
+        for _ in 0..<LoopbackListener.acceptBatch {
+            if let more = try? RawConnection(port: port) { idle.append(more) }
+        }
+        let accepted = await listener.wait(timeout: 5)
+        XCTAssertEqual(accepted, .code("c"))
+        listener.finish(signedIn: true)
+        XCTAssertTrue(try RawHTTP.parse(tab.readAll()).body.contains("Signed in to Thalovant."))
+        await listener.close()
     }
 
     /// A browser that never closes its side cannot keep a connection open.
@@ -951,6 +1014,7 @@ final class TinyHTTPServer: @unchecked Sendable {
     private var stopped = false
     private var seen: [(String, Int)] = []
     private var connections = 0
+    private var open: Set<Int32> = []
 
     /// What arrived, as `METHOD path`, in order.
     var requests: [String] { lock.locked { seen.map(\.0) } }
@@ -979,6 +1043,7 @@ final class TinyHTTPServer: @unchecked Sendable {
             $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
         }
         guard descriptor >= 0, bound == 0, named == 0, listen(descriptor, 16) == 0 else {
+            if descriptor >= 0 { Self.systemClose(descriptor) }
             throw RawHTTP.Failure(description: "the test server could not listen")
         }
         fd = descriptor
@@ -986,14 +1051,31 @@ final class TinyHTTPServer: @unchecked Sendable {
         Thread.detachNewThread { [self] in acceptLoop() }
     }
 
+    /// Stops accepting, and ends every connection still open: a worker
+    /// blocked reading one returns, and closes it.
     func stop() {
-        lock.locked { stopped = true }
+        let connections = lock.locked { () -> Set<Int32> in
+            stopped = true
+            return open
+        }
+        for connection in connections { Self.systemShutdown(connection) }
+        Self.systemShutdown(fd)
+        Self.systemClose(fd)
+    }
+
+    private static func systemShutdown(_ descriptor: Int32) {
         #if canImport(Glibc)
-        _ = Glibc.shutdown(fd, Int32(SHUT_RDWR))
-        _ = Glibc.close(fd)
+        _ = Glibc.shutdown(descriptor, Int32(SHUT_RDWR))
         #else
-        _ = Darwin.shutdown(fd, Int32(SHUT_RDWR))
-        _ = Darwin.close(fd)
+        _ = Darwin.shutdown(descriptor, Int32(SHUT_RDWR))
+        #endif
+    }
+
+    private static func systemClose(_ descriptor: Int32) {
+        #if canImport(Glibc)
+        _ = Glibc.close(descriptor)
+        #else
+        _ = Darwin.close(descriptor)
         #endif
     }
 
@@ -1003,7 +1085,18 @@ final class TinyHTTPServer: @unchecked Sendable {
             guard poll(&ready, 1, 50) > 0 else { continue }
             let connection = accept(fd, nil, nil)
             guard connection >= 0 else { continue }
-            let number = lock.locked { () -> Int in connections += 1; return connections }
+            // Registered under the same lock `stop()` takes, so a connection
+            // accepted as the server stops is closed rather than left behind.
+            let number = lock.locked { () -> Int? in
+                guard !stopped else { return nil }
+                open.insert(connection)
+                connections += 1
+                return connections
+            }
+            guard let number else {
+                Self.systemClose(connection)
+                continue
+            }
             Thread.detachNewThread { [self] in serve(connection, number) }
         }
     }
@@ -1013,11 +1106,8 @@ final class TinyHTTPServer: @unchecked Sendable {
         var buffer: [UInt8] = []
         var chunk = [UInt8](repeating: 0, count: 65_536)
         defer {
-            #if canImport(Glibc)
-            _ = Glibc.close(connection)
-            #else
-            _ = Darwin.close(connection)
-            #endif
+            lock.locked { _ = open.remove(connection) }
+            Self.systemClose(connection)
         }
         while true {
             while !(buffer.count >= 4 && (0...(buffer.count - 4)).contains(where: { buffer[$0..<$0 + 4].elementsEqual([13, 10, 13, 10]) })) {

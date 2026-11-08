@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in follow-ups after the CodeRabbit round and the final producer.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Third CodeRabbit round on #52: reference gaps for the producer.
 
 # Suggestions: thalovant-swift-sdk
 
@@ -43,3 +43,12 @@ Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in follow-ups aft
 - **Problem:** `DeviceLoginResult` is a public struct of `Sendable` members, but it does not conform, so a caller cannot return it from a `Task` without copying it out. The browser tests project it into a record for that reason.
 - **Proposal:** declare `extension DeviceLoginResult: Sendable {}` (checked conformance; every stored property is `Sendable`).
 - **Impact:** low; additive.
+
+## Raise three reference gaps with the producer (Python #113)
+
+- **Problem:** the Swift port found three places where the reference's behaviour and its own brief part ways. None is covered by a vector.
+  1. `_real_host` treats only a decimal last label as numeric, so `https://auth.0x1/authorize` is usable. The brief says "whenever the last label is a number, it must be one, as a browser reads it", and a WHATWG browser reads `0x1` as a number. Swift keeps the reference's verdict, because it decides `auto`'s method.
+  2. `_scrub` splits at `[redacted]` before matching, so a secret that contains the marker survives. The brief's first rule is that the code never appears in an error. Swift takes it out.
+  3. The 400 for an oversized `HEAD` head carries a body, where the brief says a HEAD answer carries none. Swift sends none.
+- **Proposal:** decide each in the brief, add a vector where it changes a verdict, and let every port follow.
+- **Impact:** low; these are pathological inputs. (1) is the only one that can change which sign-in method `auto` picks.

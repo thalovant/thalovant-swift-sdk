@@ -472,7 +472,7 @@ final class LoopbackListener: @unchecked Sendable {
             if fds[0].revents != 0 {
                 while read(wakeRead, &chunk, chunk.count) > 0 {}
             }
-            if listening && fds[1].revents != 0 { acceptBatch() }
+            if listening && fds[1].revents != 0 { acceptBatch(&chunk) }
             let first = listening ? 2 : 1
             for (offset, fd) in reading.enumerated() where fds[first + offset].revents != 0 {
                 serve(fd, &chunk)
@@ -495,7 +495,7 @@ final class LoopbackListener: @unchecked Sendable {
     /// Accepts at most `acceptBatch` connections, then lets the loop get on
     /// with callbacks, deadlines and closing: a flood of connections cannot
     /// starve it.
-    private func acceptBatch() {
+    private func acceptBatch(_ chunk: inout [UInt8]) {
         for _ in 0..<Self.acceptBatch {
             guard listenFD >= 0 else { return }
             let connection = accept(listenFD, nil, nil)
@@ -509,16 +509,23 @@ final class LoopbackListener: @unchecked Sendable {
             }
             Self.configure(connection)
             if pending.count + draining.count >= Self.maxConnections {
-                makeRoom()
+                makeRoom(&chunk)
             }
             let now = Self.now()
             pending[connection] = Pending(opened: now, deadline: now &+ Self.nanoseconds(readTimeout))
         }
     }
 
-    /// Closes the oldest connection that has not sent its head, else the one
-    /// being drained longest.
-    private func makeRoom() {
+    /// Serves every waiting connection that has something to read -- a
+    /// callback the browser has sent is never the one closed -- then, if
+    /// still full, closes the oldest connection that has not sent its head,
+    /// else the one being drained longest.
+    private func makeRoom(_ chunk: inout [UInt8]) {
+        var ready = pending.keys.map { pollfd(fd: $0, events: Int16(POLLIN), revents: 0) }
+        if !ready.isEmpty, poll(&ready, nfds_t(ready.count), 0) > 0 {
+            for entry in ready where entry.revents != 0 { serve(entry.fd, &chunk) }
+        }
+        guard pending.count + draining.count >= Self.maxConnections else { return }
         if let oldest = pending.min(by: { $0.value.opened < $1.value.opened })?.key {
             pending[oldest] = nil
             systemClose(oldest)
@@ -548,7 +555,9 @@ final class LoopbackListener: @unchecked Sendable {
         pending[fd] = nil
         guard let separator, separator <= Self.maxRequestHead,
               let request = loopbackRequestLine(connection.head[0..<separator + 4]) else {
-            respond(fd, status: 400, text: loopbackWrongStateText)
+            // An answer to a HEAD carries no body, even when the head could
+            // not be read whole: its method is the first word sent.
+            respond(fd, status: 400, text: loopbackWrongStateText, head: connection.head.starts(with: Array("HEAD ".utf8)))
             return
         }
         let (status, callback) = classifyLoopbackRequest(method: request.method, target: request.target, state: state)

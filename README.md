@@ -120,8 +120,10 @@ let token = try await api.browserLogin(options: BrowserLoginOptions(
   `GET /v1/auth/native/config` with a 404. Cancelling the task closes the port.
 - A sandboxed macOS app needs the `com.apple.security.network.server`
   entitlement (and `network.client`) to listen on `127.0.0.1`. Without it the
-  listener cannot start and `browserLogin()`, and `interactiveLogin()` on that
-  Mac, throw: the shared contract keeps that an error rather than a silent
+  listener cannot start, so `browserLogin()` throws, and so does
+  `interactiveLogin()` whenever it picks browser sign-in. A device login it
+  picks (a 404 or an unusable configuration) starts no listener. The shared
+  contract keeps a listener that cannot start an error rather than a silent
   device login. Such an app passes `method: .device`, or signs in with
   `NativeSignIn` and `ASWebAuthenticationSession`.
 - `interactiveLogin(options:)` takes `method: .auto` (the default), `.browser`
