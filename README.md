@@ -1,4 +1,4 @@
-<!-- Last Edit: Codex - 2026-11-07 - Motive: Add the canonical Thalovant logo with light and dark theme support. -->
+<!-- Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (browserLogin, interactiveLogin) and the 0.12.0 install snippet. -->
 
 <p align="center">
   <picture>
@@ -39,7 +39,7 @@ Add the package to your `Package.swift`:
 
 ```swift
 dependencies: [
-    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.11.0"),
+    .package(url: "https://github.com/thalovant/thalovant-swift-sdk", from: "0.12.0"),
 ]
 ```
 
@@ -75,6 +75,59 @@ and the raw hub and client resources carry bootstrap credentials too.
 `result.asJSON()` redacts all of them; only `result.asJSON(includeSecrets:
 true)` returns the real secrets, so never log or persist that variant.
 
+## Sign in
+
+A program on a machine with a browser (macOS, or Linux with a display) signs
+its user in through that browser. On a machine without one it uses a device
+login, whose code can be approved from any browser.
+
+```swift
+let api = ThalovantControlPlane()
+// The browser when this machine can show one and the API offers it,
+// a device login otherwise.
+let token = try await api.interactiveLogin()
+print(token.scopes)          // api.accessToken and api.tokenId are now set
+try await api.revokeApiToken()
+```
+
+`browserLogin()` is the browser sign-in on its own: the OAuth authorization code
+grant with PKCE (S256) on a loopback redirect (RFC 8252). The SDK listens on
+`127.0.0.1` on a port the system picks, opens the dashboard's consent page, and
+waits for the browser to come back to `http://127.0.0.1:<port>/callback`. The
+browser that approves hands the code to its own computer, so a sign-in link sent
+to somebody else gives the sender nothing, which a device code cannot promise.
+
+```swift
+let token = try await api.browserLogin(options: BrowserLoginOptions(
+    scopes: ["hubs:read", "clients:write"],   // nil: the API's default
+    deviceName: "build-bot on studio",        // default: thalovant-swift-sdk on <hostname>
+    timeout: 300))
+```
+
+- The URL is always printed as well as opened (`open` on macOS, `xdg-open` on
+  Linux): `Opening your browser to sign in to Thalovant. If it does not open,
+  visit:` and the URL on the next line. Pass `prompt` to show it yourself,
+  `openBrowser: false` to only show it, or `opener` to open it your own way.
+- Denied in the browser throws `ThalovantDeviceLoginError.denied`; no answer
+  within `timeout` seconds throws `ThalovantDeviceLoginError.expired`; a code
+  the API will not exchange throws `ThalovantApiError` (`detail` is
+  `invalid_grant`). An API without browser sign-in answers
+  `GET /v1/auth/native/config` with a 404. Cancelling the task closes the port.
+- `interactiveLogin(options:)` takes `method: .auto` (the default), `.browser`
+  or `.device`. `.auto` uses the browser only when `BrowserLogin.canOpenBrowser()`
+  says this machine has one (never with `CI`, `SSH_CONNECTION` or `SSH_TTY` set;
+  on Linux only with `DISPLAY` or `WAYLAND_DISPLAY`) and the configuration is
+  usable. Once the browser has opened, its outcome stands: a denial or a timeout
+  is never turned into a device login.
+- Device login is unchanged: `loginWithBrowser()`, or `beginDeviceLogin` and
+  `pollDeviceLogin` one step at a time.
+- iOS, tvOS, watchOS and visionOS have no loopback listener: `browserLogin()` is
+  unavailable there and `interactiveLogin()` uses a device login. An app signs in
+  with `NativeSignIn` and `ASWebAuthenticationSession`.
+
+Neither the code, the PKCE verifier, the state nor the token appears in an
+error.
+
 ## Documentation
 
 | Topic | Where |
@@ -99,6 +152,7 @@ text of each is in the git history of this file.
 - Durable memory: `createMemoryItem`, `listMemoryItems`, `getMemorySummary`,
   `deleteMemoryItem`.
 - Listing data follows `thalovant-languages` 0.2.1 (270 languages).
+- Browser sign-in (`browserLogin`, `interactiveLogin`): see [Sign in](#sign-in).
 
 ## Development
 

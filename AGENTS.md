@@ -23,6 +23,15 @@ Rules:
 - Do not create a release for internal platform changes with no Swift SDK
   impact; record `no SDK impact` in the coordinated change instead.
 - Update affected `docs.thalovant.com` SDK pages in the same release train.
+- Sign-in: keep device login (`loginWithBrowser`, `beginDeviceLogin`,
+  `pollDeviceLogin`, `describeDeviceLogin`, `revokeApiToken`) unchanged;
+  `interactiveLogin()` prefers browser sign-in (`browserLogin()`, PKCE on a
+  `127.0.0.1` loopback redirect, macOS and Linux only) and falls back to device
+  login only before the browser is opened. Never log, print or throw the
+  authorization code, the PKCE verifier, the state or a token.
+  `Tests/ThalovantSDKTests/Fixtures/browser-login-vectors.json` is the shared
+  contract, vendored byte for byte from the Python SDK
+  (`docs/browser-login-porting.md` there).
 
 Validate with `swift build` and `swift test` on both macOS and Linux (CI runs
 both; the Linux job uses the `swift:5.10` container). The test suite must stay

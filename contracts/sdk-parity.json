@@ -34,6 +34,27 @@
         "binary-vectors.json": "Tests/ThalovantSDKTests/Fixtures/binary-vectors.json"
       }
     },
+    "browser-login": {
+      "implementation": {
+        "Sources/ThalovantSDK/BrowserLogin.swift": "94a10a375c055eb7c23f5ff61841746a07f06f2ef9a51c9506f513d72dffbf9a",
+        "Sources/ThalovantSDK/ControlPlane.swift": "8ee5cf4d6a4048617ee0a0e59f8d4a698a6b3f1de3627c4fddc3f1409f65ee9a",
+        "Sources/ThalovantSDK/DeviceLogin.swift": "1c904c029e7f88bd18d882d3f343dcbe47c37309c8289408bb24c8f3b9b03f5d",
+        "Sources/ThalovantSDK/Errors.swift": "e5ba85d374e4e274946a40f911c1f14eacd7c6d451e1386bfa523adc751bff08",
+        "Sources/ThalovantSDK/Loopback.swift": "cc4660b6c1d59dd6b85813eb83b603ac93fa4d3e429f91daaa1c89378dc19bee",
+        "Sources/ThalovantSDK/NativeSignIn.swift": "27bce649dd89659004e89ae9d2afec26806588665ab19076fe35eb412ad29c58"
+      },
+      "reason": "browserLogin(options:) and interactiveLogin(options:) in Sources/ThalovantSDK/BrowserLogin.swift. GET /v1/auth/native/config is read by NativeSignInConfig(payload:): a 404 keeps its status and fields, an unusable 2xx is an error with no status, and a cleartext API URL is refused before anything is asked or opened. PKCE comes from NativeSignIn (in-tree SHA-256, SystemRandomNumberGenerator; an 86-character verifier and a 192-bit state). BrowserLogin.authorizationURL percent-encodes by hand (RFC 3986, %20) in the contract's order, leaves scope out when empty and cuts device_name (default thalovant-swift-sdk on <hostname>) to 120 code points. The redirect is bound on 127.0.0.1:0 before the URL is built. The exchange sends exactly the four fields to the configuration's token_endpoint, once, and keeps the token through acceptDeviceToken/keepSignIn, so revokeApiToken revokes it as a device login's. Sources/ThalovantSDK/Loopback.swift is the listener: POSIX sockets and poll(2) on a thread of its own. classifyLoopbackRequest decides 404, 400 or accepted (state compared in constant time as UTF-8, values form-decoded once, error before code). The accepted tab is answered after the sign-in ends; idle connections are closed, never waited for, and nothing is logged. Denied and expired reuse ThalovantDeviceLoginError. Every other failure is a ThalovantApiError with the api-errors fields, the code, verifier and state replaced by [redacted]. interactiveLogin takes the browser only when BrowserLogin.canOpenBrowser() and a usable configuration allow it, and falls back to device login (deviceLogin(options:launch:), the steps loginWithBrowser runs) only before the browser is opened; browser and device force one. The listener runs on macOS and Linux. browserLogin is unavailable on iOS, tvOS, watchOS and visionOS, where interactiveLogin uses device login and the app signs in with NativeSignIn. Run against the shared browser-login vectors: the pure sections against the functions that decide them, the callbacks through a real listener as well, and sign_ins and chooser for real, with a URLProtocol-scripted API checking every request (the verifier's S256 checked against the URL with the C SHA-256) and a raw TCP client playing the browser. All 98 results are recorded in contracts/conformance-results.json.",
+      "status": "required",
+      "tests": {
+        "Tests/ThalovantSDKTests/BrowserLoginTests.swift": "b2351cf64fc1bd786736d32cd234de5c3567ca615040d20d94fc9ca621dd31e4",
+        "Tests/ThalovantSDKTests/BrowserLoginVectorTests.swift": "6213b43edb8fe1e4f0d511f49228e88bf3654da202413f0bf3ea235c3f22bb78",
+        "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
+        "Tests/ThalovantSDKTests/HomeLinkTestSupport.swift": "0bfa3286a462c8467d98dedd20ab3c77ddc4d154ff65dda7e871dcc31758c555"
+      },
+      "vectors": {
+        "browser-login-vectors.json": "Tests/ThalovantSDKTests/Fixtures/browser-login-vectors.json"
+      }
+    },
     "chat-apps": {
       "reason": "The iOS SDK is the app's data plane to its hubs. The API's impact records for chat apps record no Swift obligation: an owner connects and manages chat apps from the console, the Python, Node, Go and Rust SDKs or the MCP server, never from the phone app.",
       "status": "not-applicable"
@@ -111,11 +132,11 @@
     "device-login": {
       "implementation": {
         "Sources/ThalovantSDK/ControlPlane.swift": "8ee5cf4d6a4048617ee0a0e59f8d4a698a6b3f1de3627c4fddc3f1409f65ee9a",
-        "Sources/ThalovantSDK/DeviceLogin.swift": "6a4b8a006df7e4263692d1c05970d46accb1700761ad4212faa8ebe5831b231a",
+        "Sources/ThalovantSDK/DeviceLogin.swift": "1c904c029e7f88bd18d882d3f343dcbe47c37309c8289408bb24c8f3b9b03f5d",
         "Sources/ThalovantSDK/Errors.swift": "e5ba85d374e4e274946a40f911c1f14eacd7c6d451e1386bfa523adc751bff08",
         "Sources/ThalovantSDK/NativeSignIn.swift": "27bce649dd89659004e89ae9d2afec26806588665ab19076fe35eb412ad29c58"
       },
-      "reason": "beginDeviceLogin, pollDeviceLogin and revokeApiToken in Sources/ThalovantSDK/DeviceLogin.swift, with the per-code interval kept on ThalovantControlPlane and tokenId set by every sign-in from its own answer (keepSignIn in ControlPlane.swift, used by login and by completeNativeSignIn in NativeSignIn.swift). An empty scope list is left out. A poll that is not approved throws ThalovantApiError with kind .deviceLoginPending(interval:), .deviceLoginExpired or .deviceLoginDenied, so every api-errors field stays on it and an existing catch still matches; revoking the token in use is idempotent (a 401 counts as revoked). loginWithBrowser runs on the same steps and still throws ThalovantDeviceLoginError. Run against the shared device-login vectors over URLSession, each exchange served and checked by a URLProtocol. Since 0.10.1: beginDeviceLogin(scopes:clientName:clientId:) and DeviceLoginOptions.clientId send client_id when given (homeAssistantClientId is Home Assistant's), and describeDeviceLogin(userCode:) reads GET /v1/auth/device/codes/{user_code} into DeviceLoginRequest, clientVerified only with a clientId.",
+      "reason": "beginDeviceLogin, pollDeviceLogin and revokeApiToken in Sources/ThalovantSDK/DeviceLogin.swift, with the per-code interval kept on ThalovantControlPlane and tokenId set by every sign-in from its own answer (keepSignIn in ControlPlane.swift, used by login and by completeNativeSignIn in NativeSignIn.swift). An empty scope list is left out. A poll that is not approved throws ThalovantApiError with kind .deviceLoginPending(interval:), .deviceLoginExpired or .deviceLoginDenied, so every api-errors field stays on it and an existing catch still matches; revoking the token in use is idempotent (a 401 counts as revoked). loginWithBrowser runs on the same steps and still throws ThalovantDeviceLoginError. Run against the shared device-login vectors over URLSession, each exchange served and checked by a URLProtocol. Since 0.10.1: beginDeviceLogin(scopes:clientName:clientId:) and DeviceLoginOptions.clientId send client_id when given (homeAssistantClientId is Home Assistant's), and describeDeviceLogin(userCode:) reads GET /v1/auth/device/codes/{user_code} into DeviceLoginRequest, clientVerified only with a clientId. Since 0.12.0: loginWithBrowser runs through deviceLogin(options:launch:), which interactiveLogin also uses with its opener; device login's shapes, defaults, messages and behaviour are unchanged.",
       "status": "required",
       "tests": {
         "Tests/ThalovantSDKTests/ConformanceRecord.swift": "e0a058a801fd54de6946b8659fe435b0511a300fd5c934f8ae7a423eb76cc8fa",
@@ -282,7 +303,8 @@
     "600b10e7e159f6ca9c1d59d7f2a4103c2e1c66a0894b587e0224e4d9c0e66bd1",
     "5b973a65ab583082069afaa67e2baf7257cbc4950a89460c9912851821258d16",
     "1e56099da5dba82b48fb83b27e53192f3cd70e7d0f5a9c4f94bb08948e45a1d6",
-    "57c7e71f6456344877b34bb3093399f813c7a21fde3ae14f48c8b3fa04be43b9"
+    "57c7e71f6456344877b34bb3093399f813c7a21fde3ae14f48c8b3fa04be43b9",
+    "49744ee385bfce57439dadbef1e20e6116f72a6817649843adba7a450d2fc56b"
   ],
   "schema_version": 1
 }

@@ -180,13 +180,19 @@ extension ThalovantControlPlane {
     /// the same flow one step at a time, for a caller that runs its own loop.
     @discardableResult
     public func loginWithBrowser(options: DeviceLoginOptions = DeviceLoginOptions()) async throws -> DeviceLoginResult {
+        try await deviceLogin(options: options, launch: nil)
+    }
+
+    /// `loginWithBrowser(options:)`, opening the verification page with
+    /// `launch` when it is given: `interactiveLogin` passes its opener here.
+    func deviceLogin(options: DeviceLoginOptions, launch: ((URL) -> Void)?) async throws -> DeviceLoginResult {
         let grant = try await beginDeviceLogin(
             scopes: options.scopes, clientName: options.clientName, clientId: options.clientId)
         defer { setDeviceInterval(grant.deviceCode, nil) }
 
         options.prompt(grant)
         if options.openBrowser, let completeUri = grant.verificationUriComplete, !completeUri.isEmpty {
-            openBrowserBestEffort(completeUri)
+            openBrowserBestEffort(completeUri, launch: launch)
         }
 
         let token = try await pollDeviceToken(deviceCode: grant.deviceCode, interval: grant.interval, timeout: options.timeout)
