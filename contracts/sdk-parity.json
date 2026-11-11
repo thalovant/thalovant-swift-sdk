@@ -183,6 +183,10 @@
         "Tests/ThalovantSDKTests/ProtocolSelectionTests.swift": "84a641e4aa02a15ef36596ae4606f2570916573a2a162fd77a547d8e453678b8"
       }
     },
+    "intercom": {
+      "status": "not-applicable",
+      "reason": "The iOS SDK is the app's data plane to its hubs. Intercom announcements (an announce-only text spoken aloud on a household hub's speakers, POST /v1/hubs/{hub_id}/intercom/announce) are sent from the console, the Python, Node, Go and Rust SDKs or the MCP server, which the intercom contract (section F) names as the only consumers; this SDK only ever receives speech as an ordinary client. A port is a separate decision to record in the API's impact file first, not a silent gap."
+    },
     "inventory": {
       "implementation": {
         "Sources/ThalovantSDK/Inventory.swift": "76ce439fc364309398d7f3633b98b25cfbd7b74a54efc879227f9011cd9a6da3"
@@ -304,7 +308,8 @@
     "5b973a65ab583082069afaa67e2baf7257cbc4950a89460c9912851821258d16",
     "1e56099da5dba82b48fb83b27e53192f3cd70e7d0f5a9c4f94bb08948e45a1d6",
     "57c7e71f6456344877b34bb3093399f813c7a21fde3ae14f48c8b3fa04be43b9",
-    "6dfb3bb31ac7590591febef1c4d8372984ca6cdad4700381f869db30c38452df"
+    "6dfb3bb31ac7590591febef1c4d8372984ca6cdad4700381f869db30c38452df",
+    "690784dbb9af67d32523958808442d2b6ec5ea2f09ab881e56940b35333952a3"
   ],
   "schema_version": 1
 }
