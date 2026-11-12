@@ -1,6 +1,28 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the last CodeRabbit round on #52, with verification.
+Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Record the Python revision and review of every acknowledged reference digest (CodeRabbit PR 53), and the digest a0722fec2c54.
 
 # Maintenance Report
+
+## 2026-11-12: Python reference digests acknowledged on the intercom branch
+
+`contracts/sdk-parity.json` lists five reference digests that thalovant-python-sdk `feature/intercom-v1` (PR 114) published while it moved. Each is the digest of the `reference` object of that repository's `contracts/sdk-parity.json` (`scripts/check-sdk-parity.py`, `digest(reference)`), and each was reviewed by reading the Python diff of the `intercom` capability for impact on this SDK, then confirmed with `check-sdk-parity.py --workspace <checkouts> --consumer thalovant-swift-sdk`. This SDK has no control-plane announce client, so the `intercom` capability stays `not-applicable` (the reason is in the file) and every acknowledgement is a review, not a port:
+
+| Digest | Python commit | What moved in the Python reference | Review here |
+|---|---|---|---|
+| `690784dbb9af` | `a07ed9f` | the `intercom` capability: announce, speakers and settings on the control plane (0.12.0) | no control-plane announce client in this SDK: `not-applicable` |
+| `66bfb1ac5879` | `6e4e9da` | review round 1: `wait` and targets and DND validated before the POST, docs | Python diff read for impact on this SDK: none; no file here changed |
+| `a82b669bc2cb` | `375b822` | amendment 2: `cancel_announcement`, safe ids, the announce timeout, key replay docs | read; none; no file here changed |
+| `69badc4fb072` | `577cb4b` | the final API: `intercom:urgent`, speaker `kind`, `can_play`, `policy_synced`, typed problem codes, one text rule | read; none; no file here changed |
+| `a0722fec2c54` | `cc33f67` | review round 2: a requests-style session read off the event loop, the urgent-scope code before the generic scope refusal, nested problem members, docs aligned with the API | read; none; no file here changed |
+
+The first digest, `690784dbb9af`, was recorded on 2026-11-11 (below); the other four are recorded here. No source, test or version file changed, so no release is made from this change.
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: added the digest `a0722fec2c54` to `contracts/sdk-parity.json` and recorded the revision and review of every added digest in this report; oversight: none yet, review pending.
+
+## 2026-11-11: intercom (no SDK impact)
+
+The Python reference moved to digest `690784dbb9af` (thalovant-python-sdk 0.12.0, the `intercom` capability). This SDK records the digest and marks `intercom` `not-applicable` in `contracts/sdk-parity.json`, with the reason written there: announcements are sent from the console, the Python, Node, Go and Rust SDKs and the MCP server (intercom contract, section F), never from this SDK. No source, test, documentation or version change; `scripts/check-sdk-parity.py --workspace <checkouts> --consumer thalovant-swift-sdk` passes.
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: edited `contracts/sdk-parity.json` and this report; oversight: none yet, review pending.
 
 ## 2026-11-08 — Browser sign-in: last CodeRabbit round on #52 (0.12.0)
 
