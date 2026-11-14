@@ -2,7 +2,7 @@
 
 ## 0.13.1
 
-- A `connectors_invalid` refusal whose detail names `connection_type` keeps its `.connectorsInvalid` kind: the legacy text check that makes `.unsupportedConnectionType` no longer re-types it. Acknowledges the Python reference digest `45c675d31752`.
+- A `connectors_invalid` refusal whose detail names `connection_type` keeps its `.connectorsInvalid` kind: the legacy text check that makes `.unsupportedConnectionType` no longer re-types it. Acknowledges the Python reference digest `45c675d31752`. The same holds for a `skill_config_private_hub_only` refusal, which keeps `.privateHubOnly`.
 
 ## 0.13.0
 
