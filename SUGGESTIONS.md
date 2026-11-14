@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Third CodeRabbit round on #52: reference gaps for the producer.
-
 # Suggestions: thalovant-swift-sdk
 
 ## Decide whether this SDK should manage chat apps
