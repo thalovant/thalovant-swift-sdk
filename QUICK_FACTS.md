@@ -5,7 +5,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in at the final p
 | Fact | Value |
 | :--- | :--- |
 | Package | ThalovantSDK (Swift Package Manager) |
-| Version | 0.13.0 (VERSION) |
+| Version | 0.13.1 (VERSION) |
 | Public surface | ThalovantClient, ThalovantControlPlane (Sources/ThalovantSDK) |
 | Parity | consumer of the Python reference; acknowledges `57c7e71f6456` (current) and `6dfb3bb31ac7` (final candidate, browser-login; Python #113 at `39e31d8`) in `contracts/sdk-parity.json` |
 | Chat apps (`/v1/bridges`) | not covered (`chat-apps` not applicable); see the Python, Node, Go or Rust SDK or the MCP server |
