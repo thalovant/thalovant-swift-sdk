@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Last CodeRabbit round on #52: links checked against the code, the cap counts the accepted tab.
-
 # Audit
 
 Known issues, technical debt and review decisions, each tied to the code that shows it.

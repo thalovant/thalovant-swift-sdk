@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in answers for the final contract (prompt, sandbox entitlement, empty device name, wording).
-
 # FAQ: thalovant-swift-sdk
 
 **Can I manage chat apps (Telegram, Discord, Matrix, Mattermost, Twitch bridges) with this SDK?**

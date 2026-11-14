@@ -1,5 +1,3 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Browser sign-in at the final producer: 119 vectors, digest 6dfb3bb31ac7.
-
 # Quick facts: thalovant-swift-sdk
 
 | Fact | Value |
