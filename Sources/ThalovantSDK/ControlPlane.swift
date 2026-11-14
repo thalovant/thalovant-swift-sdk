@@ -487,6 +487,9 @@ public final class ThalovantControlPlane {
             }
         } catch let error as ThalovantApiError {
             if error.kind == .unsupportedConnectionType { throw error }
+            // A refusal a typed kind claimed keeps its kind: a connectors_invalid whose detail
+            // names connection_type is not "this kind is not supported".
+            if error.kind == .connectorsInvalid || error.kind == .privateHubOnly { throw error }
             if let connectionType = options.connectionType, error.refusesConnectionType {
                 throw error.reclassified(
                     as: .unsupportedConnectionType,

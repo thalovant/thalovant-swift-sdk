@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.13.1
+
+- A `connectors_invalid` refusal whose detail names `connection_type` keeps its `.connectorsInvalid` kind: the legacy text check that makes `.unsupportedConnectionType` no longer re-types it. Acknowledges the Python reference digest `45c675d31752`. The same holds for a `skill_config_private_hub_only` refusal, which keeps `.privateHubOnly`.
+
 ## 0.13.0
 
 Home bridges and the refusals that came with them, ported from the Python reference's `connector-connections` capability (0.13.0). It depends on thalovant-api #521, which is not deployed yet; everything here is additive and safe against the current API (unknown fields are ignored, and an answer without them behaves as before).
