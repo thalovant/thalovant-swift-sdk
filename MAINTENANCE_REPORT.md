@@ -2,6 +2,12 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Record the Python revision a
 
 # Maintenance Report
 
+## 2026-11-14: connector-connections (0.13.0)
+
+Ported the Python reference's `connector-connections` capability (digest `8687c8429e2827ce098a22bfcdeee6545b8bfdf4a18d2ff4c1371eeb477b487c`): the `connector` kind, replay detection that throws `ThalovantCredentialsNotReplayedError`, `serves` on the create result and the typed connection refusals. Own tests in `Tests/ThalovantSDKTests/ConnectorConnectionsTests.swift`; no shared vectors exist for it. Depends on thalovant-api #521 (not deployed); additive against the old API.
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: ported the capability, wrote its tests and updated the version, changelog and parity file; oversight: none yet, review pending.
+
 ## 2026-11-12: Python reference digests acknowledged on the intercom branch
 
 `contracts/sdk-parity.json` lists five reference digests that thalovant-python-sdk `feature/intercom-v1` (PR 114) published while it moved. Each is the digest of the `reference` object of that repository's `contracts/sdk-parity.json` (`scripts/check-sdk-parity.py`, `digest(reference)`), and each was reviewed by reading the Python diff of the `intercom` capability for impact on this SDK, then confirmed with `check-sdk-parity.py --workspace <checkouts> --consumer thalovant-swift-sdk`. This SDK has no control-plane announce client, so the `intercom` capability stays `not-applicable` (the reason is in the file) and every acknowledgement is a review, not a port:
