@@ -18,6 +18,11 @@ public let homeAssistantClientId = "thalovant-home-assistant"
 /// `spec.connection_type` of a Home Assistant link.
 public let homeAssistantConnectionType = "home_assistant"
 
+/// `spec.connection_type` of a home bridge: a link that serves the connector
+/// ids in `spec.connectors` (`music_assistant` today). Home Assistant has the
+/// kind above and is never one of a bridge's connectors.
+public let connectorConnectionType = "connector"
+
 /// Filters for `GET /v1/analytics/overview`.
 public struct AnalyticsOverviewOptions: Sendable {
     public var range: String?
@@ -105,6 +110,25 @@ public struct BootstrapIdentityResult {
     public let hub: JSONObject
     public let client: JSONObject
     public let endpoint: SelectedHubEndpoint?
+    /// True when the API answered from an earlier create with the same
+    /// `Idempotency-Key`. A replay carries no credentials, so
+    /// `createClientIdentity` throws `ThalovantCredentialsNotReplayedError`
+    /// instead of returning one: this is always false on a result you hold.
+    public var replayed: Bool = false
+
+    /// What a new link will serve: `devices` (`id`, `name`, `connection_type`,
+    /// `active`), `count` and `warning`. Present for a `home_assistant` or
+    /// `connector` link: it answers the same account's devices on the same hub
+    /// and nobody else's. Nil for any other kind, and from an API that does
+    /// not say.
+    public var serves: JSONObject? { client["serves"]?.objectValue }
+
+    /// The warning in `serves`: this link will serve none of the account's
+    /// devices (none, or all paused). Nil when there is none.
+    public var servesWarning: String? {
+        guard let warning = serves?["warning"]?.stringValue, !warning.isEmpty else { return nil }
+        return warning
+    }
 
     public var selectedProtocol: HubProtocol? { endpoint?.hubProtocol }
 
@@ -395,6 +419,20 @@ public final class ThalovantControlPlane {
     /// of its kind, `.alreadyLinked(clientId:)`; a token that cannot do it,
     /// `.auth`. The result's `operation` tracks the hub admitting the
     /// connection, about ninety seconds; `waitForAdmission(_:)` waits for it.
+    ///
+    /// `connectorConnectionType` makes a home bridge; name what it serves in
+    /// `spec["connectors"]` (each id once; a refusal is `.connectorsInvalid`).
+    /// A link, of either kind, is made only on the caller's own hub or one
+    /// Thalovant runs (422 `connection_type_unavailable`, a kind of
+    /// `.unsupportedConnectionType`, `reason` `hub_operated_by_another_account`),
+    /// and it serves only the caller's own devices on that hub: read
+    /// `BootstrapIdentityResult.serves`.
+    ///
+    /// The platform issues the connection's access key and password: an
+    /// `apiKey` or `password` in the spec is ignored by an API that has this
+    /// behaviour, and the identity returned is the one in the answer. A create
+    /// answered from an earlier request with the same `idempotencyKey` carries
+    /// no credentials and throws `ThalovantCredentialsNotReplayedError`.
     public func createClientIdentity(hubId: String, options: CreateClientIdentityOptions) async throws -> BootstrapIdentityResult {
         let hub = try await getHub(hubId)
         return try await createClientIdentity(hub: hub, options: options)
@@ -431,8 +469,24 @@ public final class ThalovantControlPlane {
 
         let client: JSONObject
         do {
-            client = try await createClient(payload, idempotencyKey: options.idempotencyKey)
+            let answer = try await requestObjectWithResponse(
+                "POST",
+                "/v1/clients",
+                body: payload,
+                headers: ["Idempotency-Key": options.idempotencyKey ?? newIdempotencyKey()]
+            )
+            client = answer.object
+            if isReplay(client, answer.response) {
+                throw ThalovantCredentialsNotReplayedError(
+                    "This create was answered from an earlier request with the same Idempotency-Key. "
+                        + "The connection exists, but its credentials were in the first answer only and are "
+                        + "not stored. Download its identity from the owner's session, or delete it and "
+                        + "create it again with a new key.",
+                    client: redactingSecretFields(client)
+                )
+            }
         } catch let error as ThalovantApiError {
+            if error.kind == .unsupportedConnectionType { throw error }
             if let connectionType = options.connectionType, error.refusesConnectionType {
                 throw error.reclassified(
                     as: .unsupportedConnectionType,
@@ -556,6 +610,16 @@ public final class ThalovantControlPlane {
         headers: [String: String] = [:],
         auth: Bool = true
     ) async throws -> Data {
+        try await requestDataWithResponse(method, path, body: body, headers: headers, auth: auth).data
+    }
+
+    func requestDataWithResponse(
+        _ method: String,
+        _ path: String,
+        body: JSONObject? = nil,
+        headers: [String: String] = [:],
+        auth: Bool = true
+    ) async throws -> (data: Data, response: HTTPURLResponse) {
         let request = try buildRequest(method, path, body: body, headers: headers, auth: auth)
         let (data, response) = try await perform(request)
         guard (200..<300).contains(response.statusCode) else {
@@ -563,7 +627,7 @@ public final class ThalovantControlPlane {
             throw ThalovantApiError.httpFailure(
                 statusCode: response.statusCode, body: text, header: { response.value(forHTTPHeaderField: $0) })
         }
-        return data
+        return (data, response)
     }
 
     func requestObject(
@@ -573,14 +637,24 @@ public final class ThalovantControlPlane {
         headers: [String: String] = [:],
         auth: Bool = true
     ) async throws -> JSONObject {
-        let data = try await requestData(method, path, body: body, headers: headers, auth: auth)
+        try await requestObjectWithResponse(method, path, body: body, headers: headers, auth: auth).object
+    }
+
+    func requestObjectWithResponse(
+        _ method: String,
+        _ path: String,
+        body: JSONObject? = nil,
+        headers: [String: String] = [:],
+        auth: Bool = true
+    ) async throws -> (object: JSONObject, response: HTTPURLResponse) {
+        let (data, response) = try await requestDataWithResponse(method, path, body: body, headers: headers, auth: auth)
         if data.isEmpty || String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            return [:]
+            return ([:], response)
         }
         guard let object = try? ThalovantJSON.decodeObject(data) else {
             throw ThalovantApiError(message: "Thalovant API returned an unexpected response shape.")
         }
-        return object
+        return (object, response)
     }
 
     /// A URL's origin: scheme, host and port, the default port spelled out.
@@ -645,6 +719,17 @@ public final class ThalovantControlPlane {
 }
 
 // MARK: Helpers
+
+/// True when a create was answered from an earlier request with the same key:
+/// `Idempotent-Replayed: true` or a `replay` marker with code
+/// `idempotent_replay`. (Not the intercom header `Idempotency-Replayed`.)
+func isReplay(_ client: JSONObject, _ response: HTTPURLResponse) -> Bool {
+    if let header = response.value(forHTTPHeaderField: "Idempotent-Replayed"),
+       header.trimmingCharacters(in: .whitespaces).lowercased() == "true" {
+        return true
+    }
+    return client["replay"]?["code"]?.stringValue == ConnectionProblemCode.idempotentReplay
+}
 
 func pathWithQuery(_ path: String, _ params: [(String, String)]) -> String {
     guard !params.isEmpty else { return path }

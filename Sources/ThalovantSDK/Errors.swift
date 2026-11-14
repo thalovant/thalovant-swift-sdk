@@ -169,6 +169,26 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
         if statusCode == 409 && errorCode == "home_assistant_already_linked" {
             return .alreadyLinked(clientId: linkedClientId(problem))
         }
+        switch (statusCode, errorCode ?? "") {
+        case (422, ConnectionProblemCode.connectionTypeUnavailable),
+             (422, ConnectionProblemCode.connectionTypeUnknown),
+             (422, ConnectionProblemCode.connectionTypeAmbiguous):
+            return .unsupportedConnectionType
+        case (422, ConnectionProblemCode.connectorsInvalid):
+            return .connectorsInvalid
+        case (403, ConnectionProblemCode.deviceOwnerOnly),
+             (403, ConnectionProblemCode.setupSessionOwnerOnly),
+             (403, ConnectionProblemCode.deviceIdentityOwnerOnly):
+            return .ownerOnlyBesideLink(linkClientId: problemMember(problem, "link_client_id")?.stringValue)
+        case (409, ConnectionProblemCode.hubScaleOutBreaksLinks):
+            return .hubScaleOutBreaksLinks
+        case (409, ConnectionProblemCode.idempotencyKeySpent):
+            return .idempotencyKeySpent
+        case (422, ConnectionProblemCode.skillConfigPrivateHubOnly):
+            return .privateHubOnly
+        default:
+            break
+        }
         return .other
     }
 
@@ -188,6 +208,42 @@ public struct ThalovantApiError: Error, CustomStringConvertible, LocalizedError 
 
     public var description: String { message }
     public var errorDescription: String? { message }
+
+    /// Why a connection refusal happened, when the body says: `reason` of a
+    /// `connection_type_unavailable` (`hub_operated_by_another_account`) or a
+    /// `connectors_invalid` (`duplicate`, `own_kind`, `unknown_or_malformed`).
+    /// An open value; nil when absent.
+    public var reason: String? { Self.problemMember(problem, "reason")?.stringValue }
+
+    /// The ids or kinds the API says it knows (`known`): the connector ids a
+    /// home bridge may serve, or the connection types it creates. Empty when
+    /// the body did not say.
+    public var known: [String] {
+        (Self.problemMember(problem, "known")?.arrayValue ?? []).compactMap { $0.stringValue }
+    }
+
+    /// The link that closes an owner-only refusal (`link_client_id`).
+    public var linkClientId: String? { Self.problemMember(problem, "link_client_id")?.stringValue }
+
+    /// How many links a refused hub scale-out would break (`links`).
+    public var links: Int? {
+        switch Self.problemMember(problem, "links") {
+        case .integer(let count)?: return count
+        default: return nil
+        }
+    }
+
+    /// The settings a `skill_config_private_hub_only` refusal names.
+    public var settings: [String] {
+        (Self.problemMember(problem, "settings")?.arrayValue ?? []).compactMap { $0.stringValue }
+    }
+
+    /// A member of the problem, at its top or inside a `detail` object (the
+    /// FastAPI envelope around a structured refusal), as `code` is read.
+    static func problemMember(_ problem: JSONObject?, _ key: String) -> JSONValue? {
+        guard let problem else { return nil }
+        return problem[key] ?? problem["detail"]?.objectValue?[key]
+    }
 
     /// The body as a JSON object, decoded as UTF-8 whatever the response's
     /// Content-Type said; nil when it is not one.
@@ -266,7 +322,28 @@ extension ThalovantApiError {
         /// The API does not know the connection type asked for: a 422 about
         /// `connection_type`, or a created connection that came back of
         /// another type -- which the SDK deleted before throwing.
+        ///
+        /// Also 422 `connection_type_unavailable` (no link on this hub: it is
+        /// run by another account; `reason`), `connection_type_unknown` and
+        /// `connection_type_ambiguous`. Tell them apart by `errorCode` (see
+        /// `ConnectionProblemCode`).
         case unsupportedConnectionType
+        /// A home bridge's `spec.connectors` was refused (422
+        /// `connectors_invalid`): `reason` is `duplicate`, `own_kind` or
+        /// `unknown_or_malformed`, and `known` lists the ids it may serve.
+        case connectorsInvalid
+        /// Only the account owner, from their own session, may add a device
+        /// beside a home link (403, three codes). `linkClientId` names the link.
+        case ownerOnlyBesideLink(linkClientId: String?)
+        /// A hub with links does not scale out (409
+        /// `hub_scale_out_breaks_links`); `links` counts them.
+        case hubScaleOutBreaksLinks
+        /// The `Idempotency-Key` made something since removed (409
+        /// `idempotency_key_spent`): send a new key.
+        case idempotencyKeySpent
+        /// A setting is for a private hub only (422
+        /// `skill_config_private_hub_only`); `settings` names them.
+        case privateHubOnly
         /// A device sign-in nobody has approved yet. Poll again after
         /// `interval` seconds, already five seconds longer for every
         /// `slow_down` the API sent for this code.
@@ -687,6 +764,57 @@ public struct ThalovantTimeoutError: Error, CustomStringConvertible, LocalizedEr
 public struct ThalovantUnsupportedProtocolError: Error, CustomStringConvertible, LocalizedError {
     public let message: String
     public init(_ message: String) { self.message = message }
+    public var description: String { message }
+    public var errorDescription: String? { message }
+}
+
+/// The `code` of every refusal the connection routes gained with home links
+/// and home bridges. Read `ThalovantApiError.errorCode` first; a code the SDK
+/// does not list is an ordinary `ThalovantApiError` of kind `.other`.
+public enum ConnectionProblemCode {
+    /// 422: no link on this hub; `reason` is `hub_operated_by_another_account`.
+    public static let connectionTypeUnavailable = "connection_type_unavailable"
+    /// 422: the kind is not one the API creates; `known` lists the ones it does.
+    public static let connectionTypeUnknown = "connection_type_unknown"
+    /// 422: `connection_type` and `connectionType` were both sent and differ.
+    public static let connectionTypeAmbiguous = "connection_type_ambiguous"
+    /// 422: the bridge's connector list is empty, repeated or names an id it may not serve.
+    public static let connectorsInvalid = "connectors_invalid"
+    /// 403: only the owner may add a device beside a home link.
+    public static let deviceOwnerOnly = "device_owner_only_beside_home_link"
+    /// 403: the same, for a device's setup session.
+    public static let setupSessionOwnerOnly = "setup_session_owner_only_beside_home_link"
+    /// 403: the same, for downloading a device's identity.
+    public static let deviceIdentityOwnerOnly = "device_identity_owner_only_beside_home_link"
+    /// 409: a hub with links does not scale out; `links` counts them.
+    public static let hubScaleOutBreaksLinks = "hub_scale_out_breaks_links"
+    /// 409: the `Idempotency-Key` made something since removed; send a new key.
+    public static let idempotencyKeySpent = "idempotency_key_spent"
+    /// 422: the setting is not for a public hub; `settings` names them.
+    public static let skillConfigPrivateHubOnly = "skill_config_private_hub_only"
+    /// Not an error code: the `replay.code` of a connection answered from an earlier request with the same key.
+    public static let idempotentReplay = "idempotent_replay"
+}
+
+/// A connection create was answered from an earlier request with the same
+/// `Idempotency-Key` (`Idempotent-Replayed: true`, or a `replay` marker).
+///
+/// The connection exists, but its credentials were in the first answer only:
+/// the platform does not store them, so a replay carries none. The SDK never
+/// returns an identity it generated itself, because the platform issues the
+/// connection's real credentials. `client` is the replayed resource without
+/// credentials; download the identity from the owner's own session, or delete
+/// the connection and create it again with a new key.
+public struct ThalovantCredentialsNotReplayedError: Error, CustomStringConvertible, LocalizedError {
+    public let message: String
+    /// The replayed connection resource, secret fields removed.
+    public let client: JSONObject
+    public init(_ message: String, client: JSONObject = [:]) {
+        self.message = message
+        self.client = client
+    }
+    /// The connection's id.
+    public var clientId: String? { client["id"]?.stringValue }
     public var description: String { message }
     public var errorDescription: String? { message }
 }

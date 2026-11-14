@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.13.0
+
+Home bridges and the refusals that came with them, ported from the Python reference's `connector-connections` capability (0.13.0). It depends on thalovant-api #521, which is not deployed yet; everything here is additive and safe against the current API (unknown fields are ignored, and an answer without them behaves as before).
+
+- **`connectorConnectionType`** (`"connector"`) joins `homeAssistantConnectionType`: a home bridge, whose connector ids ride in `spec["connectors"]` (each once; the API validates them).
+- **Platform-issued credentials.** The identity of a create is the one in the answer's `initial_identify`. An answer with none that is not a replay keeps the old fallback (the locally generated pair).
+- **Replays fail.** An answer to a repeated `Idempotency-Key` (header `Idempotent-Replayed: true`, or a `replay` object with `code: "idempotent_replay"`) carries no credentials, so `createClientIdentity` throws the new `ThalovantCredentialsNotReplayedError` with the resource (`client`, secrets removed; `clientId`) and never returns an identity it made up. `BootstrapIdentityResult.replayed` is always false on a result you hold.
+- **`serves`.** `BootstrapIdentityResult.serves` (`devices`, `count`, `warning`) and `servesWarning` expose what a new link will serve.
+- **Typed refusals**, by status and code (at the top of the problem or inside an object `detail`), all still `ThalovantApiError` with every field kept. New `kind` cases: `.connectorsInvalid`, `.ownerOnlyBesideLink(linkClientId:)`, `.hubScaleOutBreaksLinks`, `.idempotencyKeySpent`, `.privateHubOnly`; 422 `connection_type_unavailable`, `connection_type_unknown` and `connection_type_ambiguous` are `.unsupportedConnectionType`, so existing handlers keep working. Accessors `reason`, `known`, `linkClientId`, `links` and `settings` read the members; `ConnectionProblemCode` exports the codes. A code the SDK does not list stays `.other`. `kind` already documents that new cases may be added, so a `switch` over it needs a `default`.
+
 ## 0.12.0
 
 Browser sign-in, ported from the Python reference's final 0.11.0 producer (`browser-login`, thalovant-python-sdk #113 at `39e31d8`). A device code can be passed on: somebody reads it off one screen and types it in anywhere. With a loopback redirect, the browser that approves hands the code to its own computer's `127.0.0.1`, so a link or code sent to someone on another computer delivers nothing to the sender. A forwarded callback port (`ssh -L`) or another user of the same computer can still complete a sign-in. So on a machine with a browser the SDK now signs in through that browser, and device login stays the fallback for machines with none. Everything is additive: device login (`loginWithBrowser`, `beginDeviceLogin`, `pollDeviceLogin`, `describeDeviceLogin`, `revokeApiToken`) keeps its shapes, defaults, messages and behaviour.
