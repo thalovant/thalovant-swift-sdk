@@ -2,6 +2,7 @@
 
 ## 0.13.0
 
+- A `connectors_invalid` refusal whose detail names `connection_type` keeps its `.connectorsInvalid` kind: the legacy text check that makes `.unsupportedConnectionType` no longer re-types it. Acknowledges the Python reference digest `45c675d31752`.
 Home bridges and the refusals that came with them, ported from the Python reference's `connector-connections` capability (0.13.0). It depends on thalovant-api #521, which is not deployed yet; everything here is additive and safe against the current API (unknown fields are ignored, and an answer without them behaves as before).
 
 - **`connectorConnectionType`** (`"connector"`) joins `homeAssistantConnectionType`: a home bridge, whose connector ids ride in `spec["connectors"]` (each once; the API validates them).

@@ -214,6 +214,14 @@ final class ConnectorConnectionsTests: XCTestCase {
         }
     }
 
+    func testAConnectorsRefusalThatNamesConnectionTypeStaysItself() async {
+        ConnectorStub.serve(.init(status: 422, body: #"{"detail":"Invalid connectors for connection_type connector","code":"connectors_invalid","reason":"duplicate","known":["music_assistant"]}"#))
+        let error = await refused("connector")
+        XCTAssertEqual(error?.kind, .connectorsInvalid)
+        XCTAssertEqual(error?.reason, "duplicate")
+        XCTAssertEqual(error?.known, ["music_assistant"])
+    }
+
     func testAnOwnerOnlyRefusalNamesTheLink() async {
         for code in [
             "device_owner_only_beside_home_link", "setup_session_owner_only_beside_home_link",
