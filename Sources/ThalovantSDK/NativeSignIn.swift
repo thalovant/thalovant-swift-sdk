@@ -328,3 +328,40 @@ extension ThalovantControlPlane {
         return response
     }
 }
+
+// MARK: - Redacted reflection
+//
+// `Begun` holds the PKCE `verifier` and the `state`; default reflection would
+// print them. The properties and `code(from:)` are unchanged.
+
+extension NativeSignIn.Begun: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "NativeSignIn.Begun(authorizationURL: \(authorizationURLForDisplay), state: <redacted>, "
+            + "verifier: <redacted>, redirectURI: \(redirectURI))"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "authorizationURL": authorizationURLForDisplay,
+                "state": "<redacted>",
+                "verifier": "<redacted>",
+                "redirectURI": redirectURI,
+            ],
+            displayStyle: .struct
+        )
+    }
+
+    /// The authorization URL with its `state` value replaced.
+    private var authorizationURLForDisplay: String {
+        guard var components = URLComponents(string: authorizationURL),
+              let items = components.queryItems, items.contains(where: { $0.name == "state" }) else {
+            return authorizationURL
+        }
+        components.queryItems = items.map { $0.name == "state" ? URLQueryItem(name: "state", value: "<redacted>") : $0 }
+        return components.string ?? authorizationURL
+    }
+}

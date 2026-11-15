@@ -29,3 +29,7 @@ Denied: `ThalovantDeviceLoginError.denied`. No answer within the timeout (300 s 
 
 **Is a tab from another sign-in a problem?**
 No. A callback with a missing or wrong `state` gets a 400 and the wait goes on. Only the first callback with this sign-in's state is accepted. After that the port stops listening.
+
+## Does `print(result)` of a create result show the access key?
+
+Not from 0.13.3: `"\(result)"`, `String(reflecting:)` and `dump()` show the redacted view. 0.13.2 printed the raw hub and client records. Use `result.asJSON(includeSecrets: true)` on purpose to persist an identity.
