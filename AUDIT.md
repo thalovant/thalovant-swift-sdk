@@ -2,6 +2,10 @@
 
 Known issues, technical debt and review decisions, each tied to the code that shows it.
 
+## 2026-11-15: fixed in 0.13.3, reflection printed the raw hub and client records and the verifier
+
+`BootstrapIdentityResult` (`ControlPlane.swift`), `ThalovantControlPlane` and `NativeSignIn.Begun` (`NativeSignIn.swift`) were printed field by field by default reflection. Redacted now; `ReflectionRedactionTests` pins it. Open: `result.hub`, `result.client` and `JSONObject` values are plain dictionaries and print what the API sent when printed on their own.
+
 ## Notes
 
 - **Default key and cache folders follow `NSHomeDirectory()`.** [`Sources/ThalovantSDK/Noise.swift`](Sources/ThalovantSDK/Noise.swift) (`.thalovant`) and [`Sources/ThalovantSDK/Inventory.swift`](Sources/ThalovantSDK/Inventory.swift) (`.cache`) fall back to it when no folder is given. That is the user's home on Linux and unsandboxed macOS, and the app's container on iOS and sandboxed macOS, so two sandboxed apps never share a key by default. An app that must share one identity's key with another program passes the folder explicitly.

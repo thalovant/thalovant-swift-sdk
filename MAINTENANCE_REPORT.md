@@ -1,5 +1,13 @@
 # Maintenance Report
 
+## 2026-11-15: reflection of a create result, a control plane and a begun sign-in (0.13.3)
+
+Resolved `thalovant-swift-sdk` 0.13.2 from SwiftPM into a consumer package and printed the connector-flow result four ways. `ThalovantIdentity`, `MqttBrokerCredentials`, `DeviceAuthorizationGrant` and `DeviceLoginResult` were already redacted; `BootstrapIdentityResult` (`ControlPlane.swift`), `ThalovantControlPlane` (`dump`) and `NativeSignIn.Begun` (`NativeSignIn.swift`) were not. Fix: redacting description, debugDescription and customMirror on each, `strippingURLUserinfo` in `asJSON()`. `contracts/sdk-parity.json` hashes refreshed for the two changed files; the parity check passes. The version is bumped by the release workflow.
+
+Verification: `swift test` on Linux (Swift 6.3.2) with the new `ReflectionRedactionTests` (3 tests) and the security, connector and request suites passing; the full suite was run as well. Not verified against a live API or on Apple platforms.
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: reproduced the leaks from the tagged package, wrote the conformances, tests and docs; oversight: PR review and CI only.
+
 ## 2026-11-14: connector-connections (0.13.0)
 
 Ported the Python reference's `connector-connections` capability (digest `8687c8429e2827ce098a22bfcdeee6545b8bfdf4a18d2ff4c1371eeb477b487c`): the `connector` kind, replay detection that throws `ThalovantCredentialsNotReplayedError`, `serves` on the create result and the typed connection refusals. Own tests in `Tests/ThalovantSDKTests/ConnectorConnectionsTests.swift`; no shared vectors exist for it. Depends on thalovant-api #521 (not deployed); additive against the old API.

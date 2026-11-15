@@ -19,7 +19,7 @@ public let homeAssistantClientId = "thalovant-home-assistant"
 public let homeAssistantConnectionType = "home_assistant"
 
 /// `spec.connection_type` of a home bridge: a link that serves the connector
-/// ids in `spec.connectors` (`music_assistant` today). Home Assistant has the
+/// ids in `spec.connectors` (`jellyfin` and `music_assistant` today). Home Assistant has the
 /// kind above and is never one of a bridge's connectors.
 public let connectorConnectionType = "connector"
 
@@ -162,7 +162,8 @@ public struct BootstrapIdentityResult {
         ]
         if let endpoint {
             data["selectedProtocol"] = .string(endpoint.hubProtocol.rawValue)
-            data["selectedEndpoint"] = .string(endpoint.endpoint)
+            // The endpoint can be written user:pass@host; only includeSecrets keeps that.
+            data["selectedEndpoint"] = .string(includeSecrets ? endpoint.endpoint : strippingURLUserinfo(endpoint.endpoint))
         }
         return data
     }
@@ -783,9 +784,22 @@ private func redactedSecretValue(_ value: JSONValue) -> JSONValue {
         return .object(redactingSecretFields(object))
     case .array(let array):
         return .array(array.map(redactedSecretValue))
+    case .string(let text):
+        return .string(strippingURLUserinfo(text))
     default:
         return value
     }
+}
+
+/// `text` with `user:password@` removed when it is a URL carrying it (a
+/// data-plane endpoint such as `wss://user:pass@host`); any other string as is.
+func strippingURLUserinfo(_ text: String) -> String {
+    guard text.contains("://"), text.contains("@"),
+          var components = URLComponents(string: text),
+          components.user != nil || components.password != nil else { return text }
+    components.user = nil
+    components.password = nil
+    return components.string ?? text
 }
 
 func encodePathComponent(_ value: String) -> String {
@@ -915,5 +929,67 @@ final class ControlPlaneRedirectPolicy: NSObject, URLSessionTaskDelegate, @unche
         if let upstream = upstream as? URLSessionTaskDelegate { upstream.urlSession(session, task: task, didReceive: challenge, completionHandler: completionHandler); return }
         #endif
         completionHandler(.performDefaultHandling, nil)
+    }
+}
+
+// MARK: - Redacted reflection
+//
+// A create result holds the new connection's credentials (`identity`) and the
+// raw `hub` and `client` resources, which repeat them (`initial_identify`, the
+// echoed spec `apiKey` and `password`). Default reflection (`"\(result)"`,
+// `String(describing:)`, `String(reflecting:)`, `dump()`, `Mirror`) would print
+// them field by field, so every printing path shows the redacted `asJSON()`
+// view; the stored values and `asJSON(includeSecrets: true)` are unchanged.
+// The control plane's bearer token is hidden from `dump()` the same way.
+
+extension BootstrapIdentityResult: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        let view = asJSON()
+        var parts = ["identity: \(identity)"]
+        for key in ["hub", "client"] {
+            if let value = view[key] { parts.append("\(key): \(value)") }
+        }
+        if let endpoint {
+            parts.append("endpoint: \(endpoint.hubProtocol.rawValue) \(strippingURLUserinfo(endpoint.endpoint))")
+        }
+        parts.append("replayed: \(replayed)")
+        return "BootstrapIdentityResult(" + parts.joined(separator: ", ") + ")"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        let view = asJSON()
+        return Mirror(
+            self,
+            children: [
+                "identity": identity,
+                "hub": view["hub"] as Any,
+                "client": view["client"] as Any,
+                "endpoint": endpoint.map { strippingURLUserinfo($0.endpoint) } as Any,
+                "replayed": replayed,
+            ],
+            displayStyle: .struct
+        )
+    }
+}
+
+extension ThalovantControlPlane: CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
+    public var description: String {
+        "ThalovantControlPlane(apiURL: \(apiURL), accessToken: \(accessToken == nil ? "nil" : "<redacted>"), userAgent: \(userAgent))"
+    }
+
+    public var debugDescription: String { description }
+
+    public var customMirror: Mirror {
+        Mirror(
+            self,
+            children: [
+                "apiURL": apiURL,
+                "accessToken": accessToken == nil ? "nil" : "<redacted>",
+                "userAgent": userAgent,
+            ],
+            displayStyle: .class
+        )
     }
 }
