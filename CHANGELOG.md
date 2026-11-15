@@ -2,6 +2,10 @@
 
 ## 0.13.3
 
+- Automated patch release of the unreleased changes on `main` since v0.13.2.
+
+## 0.13.3
+
 Security hardening: printing a create result, a control plane or a begun browser sign-in no longer prints secrets. Found by installing 0.13.2 from its git tag: `"\(result)"`, `String(reflecting: result)` and `dump(result)` of a `BootstrapIdentityResult` printed the raw `hub` and `client` records (`initial_identify`, the echoed spec `apiKey` and `password`), `dump(api)` printed the control plane's bearer token, and `print(begun)` of `NativeSignIn.Begun` printed the PKCE `verifier`. Upgrading from 0.13.2 is advised; 0.13.2 stays published.
 
 - `BootstrapIdentityResult`, `ThalovantControlPlane` and `NativeSignIn.Begun` conform to `CustomStringConvertible`, `CustomDebugStringConvertible` and `CustomReflectable` and show `<redacted>` for secrets (the hub and client records go through `redactingSecretFields`). Stored values and `asJSON(includeSecrets: true)` are unchanged.
